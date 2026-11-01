@@ -310,8 +310,9 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
 
     // Single-line viewport around the cursor; the caret is drawn (no hardware
     // cursor) to avoid conhost block blink. No leading prompt glyph.
-    let avail = rows[1].width.saturating_sub(1) as usize;
-    let avail = avail.max(1);
+    // Reserve two columns: 1 for the caret glyph and 1 so we never write the
+    // last column (conhost auto-wraps there and shifts every later row).
+    let avail = (rows[1].width as usize).saturating_sub(2).max(1);
     let cursor = app.cursor.min(app.input.len());
     let mut pre: Vec<char> = Vec::new();
     let mut pre_w = 0usize;
@@ -327,7 +328,7 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     let mut post_w = 0usize;
     for &c in app.input[cursor..].iter() {
         let cw = char_width(c);
-        if pre_w + post_w + cw > avail {
+        if pre_w + post_w + cw > avail.saturating_sub(pre_w) {
             break;
         }
         post.push(c);
