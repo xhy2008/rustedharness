@@ -12,15 +12,15 @@ use crate::entries::EntryKind;
 use crate::theme::*;
 
 pub fn draw(app: &mut App, frame: &mut Frame) {
-    // Reserve a 6-column right gutter. crossterm's reported width overstates
-    // what conhost on this machine actually lets you write before latching a
-    // pending auto-wrap (empirically ~4 columns too wide), and any row reaching
-    // that limit shifts the rows after it — the status bar's trailing ellipsis
-    // landing on a phantom second line. 6 keeps full-width rows clear of the
-    // wrap trigger at every width.
+    // Reserve a 1-column right gutter. The UI chrome itself now uses only
+    // narrow glyphs, but transcript/tool content can still contain East-Asian
+    // ambiguous characters (· … box glyphs) that conhost draws 2 cells wide
+    // while unicode-width counts 1, so a row can silently exceed the computed
+    // width and latch conhost's pending auto-wrap, shifting every row after it.
+    // One column of slack absorbs a single overrun cell.
     let area = {
         let mut a = frame.area();
-        a.width = a.width.saturating_sub(6);
+        a.width = a.width.saturating_sub(1);
         a
     };
     let rows = vec![
@@ -37,21 +37,10 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     app.mouse_area = body;
     draw_editor(app, frame, editor);
     draw_footer(app, frame, footer);
-    // Inset overlays/transcript fills by one column: writing the last terminal
-    // column triggers conhost's pending auto-wrap, which desynchronizes
-    // subsequent incremental redraws (the "typing shifts rows" glitch that a
-    // manual resize temporarily fixes).
     if app.consent.is_some() {
-        draw_consent(app, frame, shrink(body));
+        draw_consent(app, frame, body);
     }
-    draw_overlay(app, frame, shrink(body));
-}
-
-fn shrink(area: Rect) -> Rect {
-    Rect {
-        width: area.width.saturating_sub(1),
-        ..area
-    }
+    draw_overlay(app, frame, body);
 }
 
 fn transcript_signature(app: &App) -> u64 {
@@ -117,7 +106,7 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 lines.push(Line::from(Span::styled("▎ thinking", style)));
                 let body = if entry.body.chars().count() > 600 {
                     let t: String = entry.body.chars().take(600).collect();
-                    format!("{t}…")
+                    format!("{t}...")
                 } else {
                     entry.body.clone()
                 };
@@ -146,7 +135,7 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 if entry.visible_body(app.tools_open) && !entry.body.trim().is_empty() {
                     let body = if entry.body.chars().count() > 4_000 {
                         let t: String = entry.body.chars().take(4_000).collect();
-                        format!("{t}…")
+                        format!("{t}...")
                     } else {
                         entry.body.clone()
                     };
@@ -173,11 +162,11 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 let style = Style::default().fg(DIM);
                 if entry.title.is_empty() {
                     for raw in entry.body.lines() {
-                        lines.extend(wrap_styled(format!("· {raw}"), style, "  ", width));
+                        lines.extend(wrap_styled(format!("* {raw}"), style, "  ", width));
                     }
                 } else {
                     lines.push(Line::from(Span::styled(
-                        format!("· {}", entry.title),
+                        format!("* {}", entry.title),
                         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                     )));
                     for raw in entry.body.lines() {
@@ -379,7 +368,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         GREEN
     };
-    let sep = || Span::styled("  ·  ", Style::default().fg(DIM));
+    let sep = || Span::styled("  |  ", Style::default().fg(DIM));
     let mut spans = Vec::new();
     if app.busy {
         spans.push(Span::styled(
@@ -407,7 +396,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     spans.push(sep());
     spans.push(Span::styled(
         format!(
-            "in {} · out {}",
+            "in {} | out {}",
             crate::app::human_count(app.input_tokens),
             crate::app::human_count(app.output_tokens)
         ),
@@ -454,13 +443,13 @@ fn truncate_line(line: Line<'static>, width: u16) -> Line<'static> {
         let mut tw = 0;
         for c in span.content.chars() {
             let cw = char_width(c);
-            if tw + cw > keep.saturating_sub(1) {
+            if tw + cw > keep.saturating_sub(3) {
                 break;
             }
             text.push(c);
             tw += cw;
         }
-        text.push('…');
+        text.push_str("...");
         out.push(Span::styled(text, span.style));
         break;
     }
@@ -489,7 +478,7 @@ fn shorten(path: &str, max: usize) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("…{tail}")
+    format!("...{tail}")
 }
 
 fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
@@ -510,7 +499,7 @@ fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            format!("  {} · v{}", card.url, card.version),
+            format!("  {} | v{}", card.url, card.version),
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
@@ -525,7 +514,7 @@ fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
         )));
     }
     lines.push(Line::from(Span::styled(
-        "  y allow · n/Esc decline",
+        "  y allow | n/Esc decline",
         Style::default().fg(ACCENT),
     )));
     let paragraph = Paragraph::new(lines).block(
@@ -570,7 +559,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                     value: name.clone(),
                 })
                 .collect();
-            let title = format!("files · /{rel}");
+            let title = format!("files | /{rel}");
             draw_picker_items(frame, body, &title, &items, *sel, "");
         }
         Overlay::FileView {
@@ -601,7 +590,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             let flag = if *truncated { " (truncated)" } else { "" };
             let paragraph = Paragraph::new(rendered).scroll((*scroll as u16, 0)).block(
                 Block::bordered()
-                    .title(format!(" {path}{flag} · j/k scroll · ← tree · q close "))
+                    .title(format!(" {path}{flag} | j/k scroll | ← tree | q close "))
                     .border_style(Style::default().fg(BORDER)),
             );
             frame.render_widget(paragraph, area);
@@ -614,23 +603,23 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             };
             let rows = [
                 PickerItem {
-                    label: format!("agent model  ·  {}", app.agent_model),
+                    label: format!("agent model  |  {}", app.agent_model),
                     detail: "select to switch the working model".to_string(),
                     value: String::new(),
                 },
                 PickerItem {
-                    label: format!("compact model  ·  {}", app.compact_model),
+                    label: format!("compact model  |  {}", app.compact_model),
                     detail: "select to switch the summary model".to_string(),
                     value: String::new(),
                 },
                 PickerItem {
-                    label: format!("workspace  ·  {}", app.cwd),
+                    label: format!("workspace  |  {}", app.cwd),
                     detail: "Enter shows the /cwd hint".to_string(),
                     value: String::new(),
                 },
                 PickerItem {
                     label: format!(
-                        "session  ·  {}…  ctx {ctx_pct}%",
+                        "session  |  {}...  ctx {ctx_pct}%",
                         app.session_id.chars().take(8).collect::<String>()
                     ),
                     detail: "Enter prints full session stats".to_string(),
@@ -646,10 +635,10 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
-                kv("enter", "send · queue when busy"),
+                kv("enter", "send | queue when busy"),
                 kv("alt+enter", "queue follow-up"),
-                kv("esc", "cancel turn · clear input · close overlay"),
-                kv("ctrl+c", "clear editor · quit when empty"),
+                kv("esc", "cancel turn | clear input | close overlay"),
+                kv("ctrl+c", "clear editor | quit when empty"),
                 kv("ctrl+d", "quit"),
                 kv("ctrl+o", "collapse/expand tool output"),
                 kv("ctrl+t", "show/hide thinking"),
@@ -660,7 +649,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 kv("ctrl+g", "follow transcript end"),
                 kv("ctrl+m", "toggle mouse: off = terminal native select"),
                 kv("drag select", "copy selected transcript text"),
-                kv("pgup/pgdn · wheel", "scroll transcript"),
+                kv("pgup/pgdn | wheel", "scroll transcript"),
                 Line::from(""),
                 kv("/help", "command list"),
             ];
@@ -760,7 +749,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "  /checksum <id> · /install <id> · any key to close",
+                "  /checksum <id> | /install <id> | any key to close",
                 Style::default().fg(DIM),
             )));
             draw_info_block(frame, body, lines);
@@ -779,7 +768,7 @@ pub fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
     } else {
-        format!("{}…", text.chars().take(max).collect::<String>())
+        format!("{}...", text.chars().take(max).collect::<String>())
     }
 }
 
@@ -822,7 +811,7 @@ fn draw_picker_items(
     let head = if filter.is_empty() {
         format!(" {title}")
     } else {
-        format!(" {title} · filter {filter}")
+        format!(" {title} | filter {filter}")
     };
     lines.push(Line::from(Span::styled(
         head,

@@ -1,7 +1,7 @@
 //! Pi-style terminal frontend for RustedHarness.
 //!
 //! Layout (top to bottom, borderless like Pi):
-//!   transcript · [overlay] · editor rule · status line · footer
+//!   transcript | [overlay] | editor rule | status line | footer
 //!
 //! Feature parity with the web GUI: sessions (list/resume/new), file tree
 //! + viewer, model picker, settings, todos, LSP status, processes, download
@@ -235,7 +235,7 @@ impl App {
             EntryKind::Notice,
             "",
             format!(
-                "RustedHarness · workspace {} · model {} · /help for commands",
+                "RustedHarness | workspace {} | model {} | /help for commands",
                 shorten_path(&app.cwd, 40),
                 app.agent_model
             ),
@@ -317,7 +317,7 @@ impl App {
         match result {
             OpResult::Checksum { server, result } => match result {
                 Ok(info) => self.notice(format!(
-                    "{server} {} · {} · sha256 {}",
+                    "{server} {} | {} | sha256 {}",
                     info.version, info.url, info.sha256
                 )),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} checksum: {err}")),
@@ -401,7 +401,7 @@ impl App {
             HarnessEvent::ToolOutput { name, text, .. } => {
                 if let Some((_, index)) = self.live_tool {
                     if let Some(entry) = self.entries.get_mut(index) {
-                        entry.title = format!("{name} …");
+                        entry.title = format!("{name} ...");
                         let tail = tail_lines(&text, 12);
                         entry.body.push('\n');
                         entry.body.push_str(&tail);
@@ -417,7 +417,7 @@ impl App {
             } => {
                 let mut body = content.trim().to_string();
                 if body.chars().count() > 4_000 {
-                    body = format!("{}…", body.chars().take(4_000).collect::<String>());
+                    body = format!("{}...", body.chars().take(4_000).collect::<String>());
                 }
                 match &self.live_tool {
                     Some((live_id, index)) if live_id == &id => {
@@ -803,7 +803,7 @@ impl App {
             KeyCode::Esc => {
                 if self.busy {
                     self.agent.cancel();
-                    self.notice("cancelling…");
+                    self.notice("cancelling...");
                 } else {
                     self.input.clear();
                     self.cursor = 0;
@@ -1159,7 +1159,7 @@ impl App {
                         EntryKind::Notice,
                         "",
                         format!(
-                            "session {}\n  cwd {}\n  model {} · compact {}\n  ctx {}/{} · in {} · out {} · cost {}",
+                            "session {}\n  cwd {}\n  model {} | compact {}\n  ctx {}/{} | in {} | out {} | cost {}",
                             self.session_id,
                             self.cwd,
                             self.agent_model,
@@ -1215,7 +1215,7 @@ impl App {
             "/resume" => self.open_session_picker(),
             "/session" => {
                 let detail = format!(
-                    "session {}\n  cwd {}\n  model {} · compact {}\n  ctx {}/{} · in {} · out {}",
+                    "session {}\n  cwd {}\n  model {} | compact {}\n  ctx {}/{} | in {} | out {}",
                     self.session_id,
                     self.cwd,
                     self.agent_model,
@@ -1253,7 +1253,7 @@ impl App {
                         .map_err(|e| e.to_string());
                     let _ = tx.send(OpResult::Checksum { server, result });
                 });
-                self.notice(format!("checksumming {arg}…"));
+                self.notice(format!("checksumming {arg}..."));
             }
             "/install" if arg.is_empty() => self.notice("usage: /install <server-id>"),
             "/install" => {
@@ -1267,7 +1267,7 @@ impl App {
                         .map_err(|e| e.to_string());
                     let _ = tx.send(OpResult::Installed { server, result });
                 });
-                self.notice(format!("installing {arg}…"));
+                self.notice(format!("installing {arg}..."));
             }
             "/copy" => self.copy_last_assistant(),
             "/quit" | "/exit" => self.quit = true,
@@ -1310,7 +1310,7 @@ impl App {
             .into_iter()
             .map(|spec| PickerItem {
                 label: spec.reference(),
-                detail: format!("{} · ctx {}", spec.name, human_count(spec.context_window)),
+                detail: format!("{} | ctx {}", spec.name, human_count(spec.context_window)),
                 value: spec.reference(),
             })
             .collect();
@@ -1341,9 +1341,9 @@ impl App {
                 label: s
                     .title
                     .clone()
-                    .unwrap_or_else(|| format!("{}…", s.id.chars().take(8).collect::<String>())),
+                    .unwrap_or_else(|| format!("{}...", s.id.chars().take(8).collect::<String>())),
                 detail: format!(
-                    "{} msgs · {} · {}",
+                    "{} msgs | {} | {}",
                     s.messages,
                     shorten_path(&s.cwd, 28),
                     s.updated_at
@@ -1474,7 +1474,7 @@ fn shorten_path(path: &str, max: usize) -> String {
         .into_iter()
         .rev()
         .collect();
-    format!("…{tail}")
+    format!("...{tail}")
 }
 
 fn brief(value: &str) -> String {
@@ -1485,7 +1485,7 @@ fn brief(value: &str) -> String {
     if flat.chars().count() <= 80 {
         flat
     } else {
-        format!("{}…", flat.chars().take(80).collect::<String>())
+        format!("{}...", flat.chars().take(80).collect::<String>())
     }
 }
 
