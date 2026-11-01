@@ -48,10 +48,17 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
         event_loop(&mut terminal, &mut app, &mut key_rx, &mut op_rx, &mut rx, &op_tx).await;
 
     stop.store(true, Ordering::Relaxed);
-    app.agent.shutdown().await;
+    graceful_shutdown(&app.agent).await;
     let _ = execute!(stdout, DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// Shut the agent down but never longer than a couple of seconds: a wedged
+/// LSP/MCP child must not be able to keep the TUI (and thus the terminal in
+/// raw/alt-screen mode) alive after the user has asked to quit.
+async fn graceful_shutdown(agent: &Arc<Agent>) {
+    let _ = tokio::time::timeout(Duration::from_secs(2), agent.shutdown()).await;
 }
 
 fn spawn_key_reader(tx: UnboundedSender<Event>, stop: Arc<AtomicBool>) {
@@ -100,7 +107,7 @@ async fn event_loop(
                 .resume
                 .as_ref()
                 .map(|id| id.chars().take(8).collect::<String>());
-            app.agent.shutdown().await;
+            graceful_shutdown(&app.agent).await;
             let (tx, new_rx) = mpsc::unbounded_channel();
             let agent = match pending.resume {
                 Some(id) => Agent::resume(app.config.clone(), &id, Some(pending.cwd), tx).await?,
