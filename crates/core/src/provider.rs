@@ -141,6 +141,11 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Prompt tokens served from the provider's prompt cache, as reported in
+    /// `usage` (OpenAI `prompt_tokens_details.cached_tokens`, DeepSeek
+    /// `prompt_cache_hit_tokens`, Anthropic-style `cache_read_input_tokens`).
+    #[serde(default)]
+    pub cached_tokens: u64,
     /// Cost reported by the provider inside `usage` (some gateways return
     /// `cost`/`total_cost` alongside the token counts).
     #[serde(default)]
@@ -522,6 +527,12 @@ struct WireFunction {
     arguments: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct WireUsageDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct WireUsage {
     #[serde(default)]
@@ -532,6 +543,15 @@ struct WireUsage {
     total_tokens: u64,
     #[serde(default, alias = "cost", alias = "total_cost")]
     cost_usd: Option<f64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<WireUsageDetails>,
+    #[serde(
+        default,
+        alias = "cached_tokens",
+        alias = "prompt_cache_hit_tokens",
+        alias = "cache_read_input_tokens"
+    )]
+    cached_tokens: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -588,6 +608,12 @@ impl Backend for Provider {
                         prompt_tokens: usage.prompt_tokens,
                         completion_tokens: usage.completion_tokens,
                         total_tokens: usage.total_tokens,
+                        cached_tokens: usage
+                            .cached_tokens
+                            .or_else(|| {
+                                usage.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens)
+                            })
+                            .unwrap_or(0),
                         cost_usd: usage.cost_usd,
                     });
                 }
@@ -706,6 +732,35 @@ pub(crate) fn is_compat_rejection(message: &str) -> bool {    let m = message.to
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
+
+    #[test]
+    fn wire_usage_accepts_cache_token_aliases() {
+        let openai: WireUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,
+                "prompt_tokens_details":{"cached_tokens":96}}"#,
+        )
+        .unwrap();
+        assert_eq!(openai.cached_tokens, None);
+        assert_eq!(
+            openai
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens),
+            Some(96)
+        );
+        let deepseek: WireUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":5,
+                "prompt_cache_hit_tokens":88}"#,
+        )
+        .unwrap();
+        assert_eq!(deepseek.cached_tokens, Some(88));
+        let anthropic: WireUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":5,
+                "cache_read_input_tokens":40}"#,
+        )
+        .unwrap();
+        assert_eq!(anthropic.cached_tokens, Some(40));
+    }
 
     #[test]
     fn rate_limit_and_quota_are_distinguished() {

@@ -84,6 +84,10 @@ pub enum HarnessEvent {
         /// Accumulated cost reported by providers inside `usage`, if any.
         #[serde(default)]
         cost_usd: Option<f64>,
+        /// Prompt-cache hit ratio of the latest report, percent 0-100, when
+        /// the provider exposes cached token counts.
+        #[serde(default)]
+        cache_hit_pct: Option<u64>,
     },
     Compaction {
         summary: String,

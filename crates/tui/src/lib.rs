@@ -14,7 +14,7 @@ mod theme;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -90,18 +90,31 @@ async fn event_loop(
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
     let mut last_overlay = app.overlay_key();
+    // Resize anti-flicker: dragging the terminal window fires a storm of
+    // Resize events, and repainting at every intermediate size stacks a
+    // full-buffer clear+redraw on top of conhost's own reflow — visible
+    // strobing. Suppress draws while resizes keep arriving and do a single
+    // forced repaint once they have been quiet for 150 ms.
+    const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+    let mut resize_at: Option<Instant> = None;
+    let mut resize_dirty = false;
     loop {
+        let settling = resize_at.is_some_and(|t| t.elapsed() < RESIZE_SETTLE);
         // Force a full repaint when the overlay changes (opens, closes, or
         // switches to a different size/type). Incremental diffs can leave stale
         // border glyphs in the blank transcript area on terminals that don't
         // erase untouched cells (notably the Windows console).
         let overlay = app.overlay_key();
-        if overlay != last_overlay {
-            app.lines_sig = (usize::MAX, 0);
-            terminal.clear()?;
-        }
+        let overlay_changed = overlay != last_overlay;
         last_overlay = overlay;
-        terminal.draw(|frame| render::draw(app, frame))?;
+        if !settling {
+            if overlay_changed || resize_dirty {
+                resize_dirty = false;
+                app.lines_sig = (usize::MAX, 0);
+                terminal.clear()?;
+            }
+            terminal.draw(|frame| render::draw(app, frame))?;
+        }
         if let Some(pending) = app.pending.take() {
             let label = pending
                 .resume
@@ -134,7 +147,13 @@ async fn event_loop(
         }
         tokio::select! {
             biased;
-            Some(event) = key_rx.recv() => app.handle_event(event, op_tx).await,
+            Some(event) = key_rx.recv() => {
+                if matches!(event, Event::Resize(..)) {
+                    resize_at = Some(Instant::now());
+                    resize_dirty = true;
+                }
+                app.handle_event(event, op_tx).await
+            }
             Some(result) = op_rx.recv() => app.on_op_result(result),
             Some(event) = harness_rx.recv() => app.on_harness_event(event),
             _ = ticker.tick() => app.tick += 1,
@@ -150,6 +169,10 @@ async fn event_loop(
                 break;
             }
             if let Some(event) = key {
+                if matches!(event, Event::Resize(..)) {
+                    resize_at = Some(Instant::now());
+                    resize_dirty = true;
+                }
                 app.handle_event(event, op_tx).await;
             }
             if let Some(result) = op {

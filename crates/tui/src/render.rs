@@ -368,7 +368,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         GREEN
     };
-    let sep = || Span::styled("  |  ", Style::default().fg(DIM));
+    let sep = || Span::styled("|", Style::default().fg(DIM));
     let mut spans = Vec::new();
     if app.busy {
         spans.push(Span::styled(
@@ -396,12 +396,19 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     spans.push(sep());
     spans.push(Span::styled(
         format!(
-            "in {} | out {}",
+            "in {}|out {}",
             crate::app::human_count(app.input_tokens),
             crate::app::human_count(app.output_tokens)
         ),
         Style::default().fg(DIM),
     ));
+    if let Some(pct) = app.cache_hit_pct {
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("CacheHit{pct}%"),
+            Style::default().fg(if pct >= 80 { GREEN } else { YELLOW }),
+        ));
+    }
     if let Some(cost) = app.cost_usd {
         spans.push(sep());
         spans.push(Span::styled(format_cost(cost), Style::default().fg(ACCENT)));

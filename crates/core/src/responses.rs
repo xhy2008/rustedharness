@@ -495,6 +495,13 @@ impl ResponsesAccumulator {
                     .get("total_tokens")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
+                cached_tokens: usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .or_else(|| usage.get("cached_tokens"))
+                    .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
                 cost_usd: usage
                     .get("cost")
                     .or_else(|| usage.get("total_cost"))
@@ -746,6 +753,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cached_tokens: 0,
                 cost_usd: None,
             })
         );

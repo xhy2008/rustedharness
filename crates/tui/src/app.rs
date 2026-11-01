@@ -140,6 +140,7 @@ pub struct App {
     pub context_tokens: u64,
     pub context_limit: u64,
     pub cost_usd: Option<f64>,
+    pub cache_hit_pct: Option<u64>,
     pub last_stop: Option<String>,
 
     pub scroll: usize,
@@ -211,6 +212,7 @@ impl App {
             context_tokens: 0,
             context_limit: 0,
             cost_usd: None,
+            cache_hit_pct: None,
             last_stop: None,
             scroll: 0,
             follow: true,
@@ -519,12 +521,14 @@ impl App {
                 context_tokens,
                 context_limit,
                 cost_usd,
+                cache_hit_pct,
             } => {
                 self.input_tokens = input_tokens;
                 self.output_tokens = output_tokens;
                 self.context_tokens = context_tokens;
                 self.context_limit = context_limit;
                 self.cost_usd = cost_usd;
+                self.cache_hit_pct = cache_hit_pct;
             }
             HarnessEvent::Compaction {
                 summary,

@@ -281,6 +281,7 @@ mod tests {
             prompt_tokens: 700,
             completion_tokens: 99,
             total_tokens: 799,
+            cached_tokens: 0,
             cost_usd: None,
         });
         assert!(!c.needs_compaction());
@@ -288,6 +289,7 @@ mod tests {
             prompt_tokens: 700,
             completion_tokens: 100,
             total_tokens: 800,
+            cached_tokens: 0,
             cost_usd: None,
         });
         assert!(c.needs_compaction());

@@ -83,6 +83,17 @@ impl UsageTracker {
         }
     }
 
+    /// Cache hit ratio of the most recent report, when the provider exposes
+    /// cached prompt tokens. Percent (0-100) of prompt tokens served from
+    /// cache; None means the provider reports no cache data at all.
+    pub fn cache_hit_pct(&self) -> Option<u64> {
+        let last = self.last()?;
+        if last.prompt_tokens == 0 || last.cached_tokens == 0 {
+            return None;
+        }
+        Some(((last.cached_tokens * 100) / last.prompt_tokens).min(100))
+    }
+
     /// Forget the last report. Called after compaction because the previous
     /// request no longer describes the context now being sent; the next API
     /// response re-establishes an accurate value.
@@ -126,6 +137,7 @@ mod tests {
             prompt_tokens: 120,
             completion_tokens: 30,
             total_tokens: 150,
+            cached_tokens: 0,
             cost_usd: None,
         };
         assert_eq!(tracker.record(&first), first);
@@ -135,6 +147,7 @@ mod tests {
             prompt_tokens: 400,
             completion_tokens: 20,
             total_tokens: 420,
+            cached_tokens: 0,
             cost_usd: None,
         };
         tracker.record(&second);
@@ -158,6 +171,7 @@ mod tests {
             prompt_tokens: 9,
             completion_tokens: 4,
             total_tokens: 0,
+            cached_tokens: 0,
             cost_usd: None,
         });
         assert_eq!(tracker.context_tokens(), 13);
@@ -170,12 +184,35 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            cached_tokens: 0,
             cost_usd: None,
         });
         tracker.reset_context();
         assert_eq!(tracker.context_tokens(), 0);
         assert_eq!(tracker.last(), None);
         assert_eq!(tracker.totals().requests, 1);
+    }
+
+    #[test]
+    fn cache_hit_pct_uses_latest_report() {
+        let tracker = UsageTracker::new();
+        assert_eq!(tracker.cache_hit_pct(), None);
+        tracker.record(&Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 5,
+            total_tokens: 1005,
+            cached_tokens: 980,
+            cost_usd: None,
+        });
+        assert_eq!(tracker.cache_hit_pct(), Some(98));
+        tracker.record(&Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 5,
+            total_tokens: 1005,
+            cached_tokens: 0,
+            cost_usd: None,
+        });
+        assert_eq!(tracker.cache_hit_pct(), None);
     }
 
     #[test]

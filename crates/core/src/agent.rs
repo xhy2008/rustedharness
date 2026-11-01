@@ -775,6 +775,7 @@ impl Agent {
             context_tokens: self.usage.context_tokens(),
             context_limit: self.context_limit(),
             cost_usd: self.usage.total_cost_usd(),
+            cache_hit_pct: self.usage.cache_hit_pct(),
         });
     }
 
@@ -819,6 +820,7 @@ impl Agent {
             context_tokens: 0,
             context_limit: self.context_limit(),
             cost_usd: self.usage.total_cost_usd(),
+            cache_hit_pct: None,
         });
         Ok(())
     }
@@ -904,6 +906,7 @@ mod tests {
                         prompt_tokens: 100,
                         completion_tokens: 10,
                         total_tokens: 110,
+                        cached_tokens: 0,
                         cost_usd: None,
                     }),
                     finish_reason: Some("tool_calls".into()),
@@ -919,6 +922,7 @@ mod tests {
                         prompt_tokens: 120,
                         completion_tokens: 2,
                         total_tokens: 122,
+                        cached_tokens: 0,
                         cost_usd: None,
                     }),
                     finish_reason: Some("stop".into()),
@@ -968,6 +972,7 @@ mod tests {
                         prompt_tokens: 10,
                         completion_tokens: 5,
                         total_tokens: 15,
+                        cached_tokens: 0,
                         cost_usd: None,
                     }),
                     finish_reason: Some("tool_calls".into()),
@@ -980,6 +985,7 @@ mod tests {
                         prompt_tokens: 20,
                         completion_tokens: 2,
                         total_tokens: 22,
+                        cached_tokens: 0,
                         cost_usd: None,
                     }),
                     finish_reason: Some("stop".into()),
