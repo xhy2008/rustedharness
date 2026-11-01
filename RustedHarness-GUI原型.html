@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustedHarness · GUI 原型</title>
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<style>
+:root{
+  --theme-color:#FF6600; --theme-light:rgba(255,102,0,.14);
+  --bg:#12141a; --card:#1a1d24; --panel2:#16191f; --tp:#e8eaed; --ts:#a8b0bb; --tt:#767e8a;
+  --line:#2a2f38; --track:#2a2f38; --inline-bg:#23272f;
+  --xs:4px; --sm:8px; --md:12px; --lg:16px; --xl:24px;
+  --r-sm:8px; --r-md:12px;
+  --code-bg:#282c34; --code-fg:#abb2bf; --kw:#c678dd; --str:#98c379; --cm:#7f848e; --fn:#61afef; --num:#d19a66; --type:#e5c07b;
+  --ok:#3fbf6f; --run:#6ea8fe; --warn:#e5a040;
+}
+:root[data-theme="light"]{
+  --theme-light:#FFF3EA;
+  --bg:#f5f7fa; --card:#ffffff; --panel2:#fafbfc; --tp:#1a1a1a; --ts:#666; --tt:#999;
+  --line:#eee; --track:var(--track); --inline-bg:#f2f4f7;
+  --ok:#2e9e5b; --run:#2f6fed; --warn:#d97706;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;background:var(--bg);color:var(--tp);line-height:1.5;-webkit-font-smoothing:antialiased}
+.window{max-width:1440px;margin:0 auto;height:100vh;min-height:760px;display:flex;flex-direction:column;background:var(--bg);box-shadow:0 0 0 1px var(--line)}
+.topbar{height:40px;display:flex;align-items:center;gap:var(--md);padding:0 var(--lg);background:var(--card);border-bottom:1px solid var(--line);font-size:13px;color:var(--ts)}
+.topbar .logo{width:20px;height:20px;border-radius:6px;background:linear-gradient(135deg,var(--theme-color),#ffb27a);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+.layout{flex:1;display:flex;min-height:0}
+/* ---------- 左栏 ---------- */
+.left{width:264px;background:var(--card);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.left-head{padding:var(--md) var(--lg);display:flex;align-items:center;gap:var(--sm);border-bottom:1px solid var(--line)}
+.icon-btn{width:28px;height:28px;border:none;background:none;border-radius:var(--r-sm);cursor:pointer;color:var(--ts);display:flex;align-items:center;justify-content:center}
+.icon-btn:hover{background:var(--theme-light);color:var(--theme-color)}
+.ws-path{flex:1;font-size:12px;color:var(--ts);background:var(--bg);border-radius:var(--r-sm);padding:5px 8px;display:flex;align-items:center;gap:4px;overflow:hidden;white-space:nowrap;cursor:pointer}
+.ws-path .material-icons{font-size:14px;color:var(--theme-color)}
+.tree{flex:1;overflow:auto;padding:var(--sm) 0;font-size:13px}
+.tree .row{display:flex;align-items:center;gap:6px;padding:4px 16px;cursor:pointer;color:var(--tp);white-space:nowrap}
+.tree .row:hover{background:var(--theme-light)}
+.tree .row.active{background:var(--theme-light);color:var(--theme-color);font-weight:600}
+.tree .row .material-icons{font-size:16px;color:var(--tt)}
+.tree .row.folder .material-icons:first-child{color:var(--theme-color)}
+.tree .lv2{padding-left:32px}.tree .lv3{padding-left:48px}
+.left-git{border-top:1px solid var(--line);padding:var(--md) var(--lg);font-size:12px;color:var(--ts);display:flex;flex-direction:column;gap:6px}
+.git-line{display:flex;align-items:center;gap:6px}
+.git-line .material-icons{font-size:14px}
+.badge-dirty{color:var(--warn);font-weight:600}
+/* ---------- 中栏 ---------- */
+.center{flex:1;display:flex;flex-direction:column;min-width:0}
+.stream{flex:1;overflow-y:auto;padding:var(--lg) var(--xl);display:flex;flex-direction:column;gap:var(--md)}
+.vnote{align-self:center;font-size:11px;color:var(--tt);background:var(--card);border:1px dashed var(--line);border-radius:999px;padding:3px 12px;display:flex;align-items:center;gap:4px}
+.vnote .material-icons{font-size:13px;color:var(--theme-color)}
+.msg{max-width:78%;border-radius:var(--r-md);padding:10px 14px;font-size:14px}
+.msg.user{align-self:flex-end;background:var(--theme-color);color:#fff;border-bottom-right-radius:2px}
+.msg.agent{align-self:flex-start;background:var(--card);border:1px solid var(--line);border-bottom-left-radius:2px}
+.msg.agent h4{font-size:14px;margin:6px 0 4px}
+.msg.agent ul{margin:4px 0 6px 18px}
+.msg.agent code{background:var(--inline-bg);border-radius:4px;padding:1px 5px;font-size:12.5px;font-family:ui-monospace,Menlo,Consolas,monospace}
+.mdcode{background:var(--code-bg);color:var(--code-fg);border-radius:var(--r-sm);padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;overflow-x:auto;margin:6px 0}
+.kw{color:var(--kw)}.str{color:var(--str)}.cm{color:var(--cm)}.fn{color:var(--fn)}.num{color:var(--num)}.type{color:var(--type)}
+.think{align-self:flex-start;max-width:78%;background:#fafafa;border:1px solid var(--line);border-radius:var(--r-md);font-size:13px;color:var(--ts)}
+.think summary,.tool summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:8px 12px;font-size:12.5px}
+.think summary::-webkit-details-marker,.tool summary::-webkit-details-marker{display:none}
+.think .material-icons,.tool .ti{font-size:15px}
+.think .body,.tool .body{padding:0 12px 10px;border-top:1px dashed var(--line);padding-top:8px;font-size:12.5px;color:var(--ts);font-style:italic}
+.tool{align-self:stretch;background:var(--card);border:1px solid var(--line);border-radius:var(--r-md);font-size:13px;max-width:100%}
+.tool summary{font-weight:600;gap:8px}
+.tool summary .chev{margin-left:auto;color:var(--tt);font-size:16px;transition:transform .2s}
+.tool[open]>summary .chev{transform:rotate(180deg)}
+.tname{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--tp);font-size:12.5px}
+.tstat{font-size:11px;border-radius:999px;padding:1px 8px;font-weight:600}
+.tstat.ok{background:rgba(63,191,111,.16);color:var(--ok)}
+.tstat.run{background:rgba(110,168,254,.18);color:var(--run)}
+.tmeta{margin-left:auto;color:var(--tt);font-weight:400;font-size:11.5px}
+.tool[open]>summary+.body{display:block}
+.tool .body{padding:2px 12px 10px;color:var(--tp);font-style:normal}
+.diff{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;background:#0f1117;color:#c9d1d9;border-radius:var(--r-sm);padding:8px 10px;white-space:pre;overflow-x:auto}
+.diff .del{color:#ff7b72}.diff .add{color:#7ee787}.diff .hunk{color:#79c0ff}
+.anchor{display:inline-block;background:var(--theme-light);color:var(--theme-color);border-radius:4px;font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:0 5px;margin:2px 4px 0 0}
+.progress{height:6px;background:var(--track);border-radius:3px;overflow:hidden;margin:6px 0;position:relative}
+.progress i{position:absolute;left:0;top:0;bottom:0;width:64%;background:linear-gradient(90deg,var(--theme-color),#ffb27a);border-radius:3px}
+.plog{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--ts);white-space:pre-wrap}
+.res{display:flex;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+.res .num2{width:18px;height:18px;border-radius:5px;background:var(--theme-light);color:var(--theme-color);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.res a{color:var(--tp);text-decoration:none;cursor:pointer}.res a:hover{color:var(--theme-color)}
+.res .src{color:var(--tt);font-size:11px}
+.streamend{align-self:flex-start;color:var(--tt);font-size:12px;padding:4px 12px;cursor:pointer;border:1px dashed var(--line);border-radius:999px;background:var(--card)}
+.streamend:hover{color:var(--theme-color);border-color:var(--theme-color)}
+.cursor{display:inline-block;width:7px;height:15px;background:var(--theme-color);vertical-align:-2px;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:0}}
+/* todo 与输入区 */
+.dock{border-top:1px solid var(--line);background:var(--card);padding:0 var(--xl) var(--sm)}
+.todo{margin-top:var(--sm);border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden}
+.todo-head{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;font-size:12.5px;font-weight:600;background:var(--panel2)}
+.todo-head .chev{margin-left:auto;transition:transform .2s;color:var(--tt);font-size:16px}
+.todo.closed .todo-head .chev{transform:rotate(-90deg)}
+.todo.closed .todo-list{display:none}
+.todo-list{padding:6px 12px 8px;display:flex;flex-direction:column;gap:4px;font-size:12.5px}
+.titem{display:flex;align-items:center;gap:8px;color:var(--ts)}
+.titem .material-icons{font-size:15px}
+.titem.done{color:var(--tt);text-decoration:line-through}
+.titem.done .material-icons{color:var(--ok)}
+.titem.now .material-icons{color:var(--run)}
+.titem pend{color:var(--ts)}
+.tprog{margin-left:auto;font-size:11px;color:var(--tt)}
+.composer{margin-top:var(--sm);border:1px solid var(--line);border-radius:var(--r-md);background:var(--card);box-shadow:0 1px 4px rgba(16,24,40,.04)}
+.composer:focus-within{border-color:var(--theme-color);box-shadow:0 0 0 3px rgba(255,102,0,.12)}
+.composer textarea{width:100%;border:none;outline:none;resize:none;padding:12px 14px 4px;font:inherit;font-size:14px;background:transparent}
+.crow{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:4px 10px 6px}
+.stats{display:flex;gap:14px;font-size:11.5px;color:var(--tt);align-items:center;flex-wrap:wrap;padding:6px 12px;border-top:1px dashed var(--line);border-radius:0 0 var(--r-md) var(--r-md);background:var(--panel2)}
+.stats b{color:var(--ts);font-weight:600}
+.ctxbar{width:64px;height:5px;background:var(--track);border-radius:3px;overflow:hidden;display:inline-block;vertical-align:-1px}
+.ctxbar i{display:block;height:100%;width:68%;background:var(--theme-color)}
+.ctrls{display:flex;align-items:center;gap:8px}
+.msel{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--ts);background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:3px 6px 3px 10px;cursor:pointer}
+.msel .material-icons{font-size:14px}
+.msel em{font-style:normal;color:var(--theme-color);font-weight:600}
+.chip-compact{font-size:11px;background:rgba(110,168,254,.16);color:var(--run);border-radius:999px;padding:3px 8px;white-space:nowrap}
+.btn-send{min-width:88px;padding:7px 14px;border:none;border-radius:var(--r-sm);background:var(--theme-color);color:#fff;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px;transition:opacity .2s}
+.btn-send:hover{opacity:.88}
+.btn-send.stop{background:#e5484d}
+/* ---------- 右栏 ---------- */
+.right{width:396px;background:var(--card);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.view-head{padding:var(--md) var(--lg);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.view-file{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:var(--tp);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.view-lock{font-size:11px;color:var(--tt);display:flex;align-items:center;margin-left:auto;white-space:nowrap}
+.view-lock .material-icons{font-size:14px}
+.tabs{display:flex;gap:4px;padding:var(--sm) var(--lg) 0;border-bottom:1px solid var(--line)}
+.tab{font-size:12.5px;color:var(--ts);padding:6px 14px;border-radius:8px 8px 0 0;cursor:pointer;border:1px solid transparent;border-bottom:none}
+.tab:hover{background:var(--bg)}
+.tab.active{background:var(--card);border-color:var(--line);color:var(--theme-color);font-weight:700;position:relative;top:1px}
+.pane{flex:1;overflow:auto;display:none}
+.pane.active{display:block}
+.code-pane{background:var(--code-bg);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--code-fg);padding:var(--md) 0}
+.cl{display:flex;padding:0 12px}.cl:hover{background:#2f343d}
+.cl .ln{width:36px;flex-shrink:0;text-align:right;color:#4b5263;user-select:none}
+.cl mark{background:rgba(255,102,0,.22);color:inherit;border-radius:3px;padding:0 3px}
+.md-pane{padding:var(--lg) var(--xl);font-size:13.5px;color:var(--tp)}
+.md-pane h3{margin:10px 0 6px}
+.md-pane ul{margin:6px 0 6px 18px}
+.md-pane code{background:var(--inline-bg);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,Menlo,monospace}
+.md-pane table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12.5px}
+.md-pane th,.md-pane td{border:1px solid var(--line);padding:6px 8px;text-align:left}
+.md-pane th{background:var(--bg)}
+.html-pane{padding:var(--md)}
+.mock{border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden}
+.mock .m-hero{height:88px;background:linear-gradient(135deg,#1a1a2e,#3a2b55);color:#fff;display:flex;flex-direction:column;justify-content:center;padding:0 16px;gap:6px}
+.mock .m-hero b{font-size:15px}
+.mock .m-hero span{font-size:11.5px;color:#c9b8ff}
+.mock .m-body{display:flex;gap:8px;padding:12px}
+.mock .m-card{flex:1;background:var(--bg);border-radius:8px;padding:10px;font-size:11px;color:var(--ts)}
+.mock .m-card b{display:block;font-size:16px;color:var(--theme-color)}
+.resizer{width:6px;cursor:col-resize;flex-shrink:0;position:relative;background:transparent;z-index:4}
+.resizer::after{content:'';position:absolute;top:0;bottom:0;left:2px;width:2px;background:var(--line)}
+.resizer:hover::after{background:var(--theme-color)}
+.left.collapsed,.right.collapsed{width:0!important;overflow:hidden;border-color:transparent}
+.layout{position:relative}
+.edge{position:absolute;top:50%;transform:translateY(-50%);width:18px;height:72px;background:var(--card);border:1px solid var(--line);display:none;align-items:center;justify-content:center;cursor:pointer;color:var(--tt);z-index:6}
+.edge:hover{color:var(--theme-color);border-color:var(--theme-color)}
+.edge.show{display:flex}
+.edge.l{left:0;border-left:none;border-radius:0 8px 8px 0}
+.edge.r{right:0;border-right:none;border-radius:8px 0 0 8px}
+.toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);padding:12px 24px;background:rgba(0,0,0,.75);color:#fff;border-radius:var(--r-sm);font-size:14px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="topbar">
+    <div class="logo">R</div>
+    <b style="color:var(--tp);font-weight:600">RustedHarness</b>
+    <span style="margin-left:auto">session 22:31 · cwd: ~/code/rustedharness</span>
+    <button class="icon-btn" title="深色/浅色主题" onclick="toggleTheme()"><span class="material-icons" id="themeIcon">light_mode</span></button>
+  </div>
+  <div class="layout">
+    <div class="edge l" id="edgeL" onclick="expandPanel('left')" title="展开工作区"><span class="material-icons" style="font-size:14px">chevron_right</span></div>
+    <div class="edge r" id="edgeR" onclick="expandPanel('right')" title="展开查看器"><span class="material-icons" style="font-size:14px">chevron_left</span></div>
+
+    <!-- ============ 左栏：工作区 ============ -->
+    <aside class="left">
+      <div class="left-head">
+        <button class="icon-btn" title="设置" onclick="showToast('打开设置：Provider / 模型角色 / shell 偏好 / 注册表')"><span class="material-icons">settings</span></button>
+        <div class="ws-path" onclick="showToast('切换工作目录（相对路径全部锚定它）')"><span class="material-icons">folder_open</span>~/code/rustedharness</div>
+        <button class="icon-btn" title="折叠侧栏" onclick="collapsePanel('left')"><span class="material-icons">chevron_left</span></button>
+      </div>
+      <div class="tree" id="tree">
+        <div class="row folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>rustedharness</div>
+        <div class="row lv2 folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>src</div>
+        <div class="row lv3 folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>core</div>
+        <div class="row lv3 active" data-view="hashline.rs" onclick="openFile(this)"><span class="material-icons">data_object</span>hashline.rs</div>
+        <div class="row lv3" data-view="agent_loop.rs" onclick="openFile(this)"><span class="material-icons">data_object</span>agent_loop.rs</div>
+        <div class="row lv3" data-view="provider.rs" onclick="openFile(this)"><span class="material-icons">data_object</span>provider.rs</div>
+        <div class="row lv3 folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>lsp</div>
+        <div class="row lv3" data-view="supervisor.rs" onclick="openFile(this)"><span class="material-icons">data_object</span>supervisor.rs</div>
+        <div class="row lv2 folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>tui</div>
+        <div class="row lv2 folder"><span class="material-icons">expand_more</span><span class="material-icons">folder</span>gui</div>
+        <div class="row lv2 folder"><span class="material-icons">chevron_right</span><span class="material-icons">folder</span>web</div>
+        <div class="row lv2" data-view="PRD-RustedHarness.md" onclick="openFile(this)"><span class="material-icons">description</span>PRD-RustedHarness.md</div>
+        <div class="row lv2" data-view="Cargo.toml" onclick="openFile(this)"><span class="material-icons">settings</span>Cargo.toml</div>
+      </div>
+      <div class="left-git">
+        <div class="git-line"><span class="material-icons" style="color:var(--theme-color)">call_split</span><b>main</b><span class="badge-dirty">● dirty</span><span style="margin-left:auto">↑2 ↓1</span></div>
+        <div class="git-line"><span class="material-icons">edit_note</span>3 modified · 1 untracked<span style="margin-left:auto;color:var(--tt)">+142 −37</span></div>
+      </div>
+    </aside>
+    <div class="resizer" id="rzL"></div>
+
+    <!-- ============ 中栏：Agent 会话 ============ -->
+    <main class="center">
+      <div class="stream" id="stream">
+        <div class="vnote"><span class="material-icons">inventory_2</span>弹性消息列表 · 窗口化虚拟滚动：仅可视区挂载 DOM，长上下文低内存（原型为静态演示）</div>
+
+        <div class="msg user">帮我给 hashline.rs 的 compute_anchor 增加对空文件的保护，并跑一下测试</div>
+
+        <details class="think"><summary><span class="material-icons" style="color:var(--tt)">psychology</span>思考过程（点击展开）</summary>
+          <div class="body">先定位 compute_anchor：hashline.rs:24。空文件时 prev/next 越界……加 early return，再补单元测试。用 symbol 索引确认后直接锚点编辑。</div>
+        </details>
+
+        <details class="tool" open><summary><span class="material-icons ti" style="color:var(--fn)">magnify</span><span class="tname">lsp · workspace_symbols</span><span class="tstat ok">完成</span><span class="tmeta">match:"lsp-precise" · 2 处定义</span><span class="material-icons chev">expand_more</span></summary>
+          <div class="body plog">hashline.rs:24  fn compute_anchor(prev,curr,next) -> String
+hashline.rs:88  fn compute_anchor_full(text) -> Vec&lt;String&gt;</div>
+        </details>
+
+        <div class="msg agent">定位到 <code>compute_anchor</code>（hashline.rs:24，LSP 精确匹配）。计划：
+          <ul><li>入口处对 <code>curr.is_empty()</code> 直接返回固定锚点 <code>00</code></li><li>补 2 个单测（空文件 / 单空行文件）</li></ul></div>
+
+        <details class="tool" open><summary><span class="material-icons ti" style="color:var(--type)">edit_note</span><span class="tname">edit · hashline.rs</span><span class="tstat ok">已应用</span><span class="tmeta">edits[2] · 快照校验通过</span><span class="material-icons chev">expand_more</span></summary>
+          <div class="body">
+            <div class="diff"><span class="hunk">@@ 24:VR 25:KP @@</span>
+<span class="del">- pub fn compute_anchor(prev: &amp;str, curr: &amp;str, next: &amp;str) -&gt; String {</span>
+<span class="add">+ pub fn compute_anchor(prev: &amp;str, curr: &amp;str, next: &amp;str) -&gt; String {</span>
+<span class="add">+     if curr.is_empty() &amp;&amp; prev.is_empty() &amp;&amp; next.is_empty() {</span>
+<span class="add">+         return String::from("00");</span>
+<span class="add">+     }</span>
+<span class="hunk">@@ 29:F1 @@</span>
+<span class="del">- let mut h = XxHash32::with_seed(0, SEED);</span>
+<span class="add">+ let mut h = XxHash32::with_seed(0, SEED);</span></div>
+            <div>新锚点：<span class="anchor">25:VR</span><span class="anchor">26:KQ</span><span class="anchor">27:BM</span><span class="anchor">28:F4</span><span class="anchor">29:H7</span>（N±1 失效，其余可续用，无需重读）</div>
+            <div style="margin-top:6px;color:var(--ok)">diagnostics: no diagnostics（rust-analyzer · 41ms）</div>
+          </div>
+        </details>
+
+        <details class="tool"><summary><span class="material-icons ti" style="color:var(--run)">terminal</span><span class="tname">bash · cargo test --lib hashline</span><span class="tstat run">pty 运行中</span><span class="tmeta">pid 24817 · timeout 120s</span><span class="material-icons chev">expand_more</span></summary>
+          <div class="body">
+            <div class="plog">cargo test 编译进度（原地刷新，恒占一行）：</div>
+            <div class="progress"><i></i></div>
+            <div class="plog">64% [========>     ] 214/334 crates · ETA 00:38</div>
+            <div style="font-size:11.5px;color:var(--tt);margin-top:6px">await(24817, 30000) 将返回当前净化输出；完成或超时均回传，超时不杀进程。</div>
+          </div>
+        </details>
+
+        <details class="tool"><summary><span class="material-icons ti" style="color:var(--theme-color)">search</span><span class="tname">web_search · "xxhash32 rust crate"</span><span class="tstat ok">3 条</span><span class="tmeta">tavily · 312ms</span><span class="material-icons chev">expand_more</span></summary>
+          <div class="body">
+            <div class="res"><span class="num2">1</span><div><a onclick="showToast('read(URL) → Markdown → compact 提取')">crates.io: xxhash-rust</a><div class="src">纯 Rust xxHash32/64，特性开关含 xxhash32 · 2026-08</div></div></div>
+            <div class="res"><span class="num2">2</span><div><a onclick="showToast('read(URL)')">Docs: xxhash-rust</a><div class="src">with_seed API 用法示例</div></div></div>
+            <div class="res"><span class="num2">3</span><div><a onclick="showToast('read(URL)')">Benchmark: hash crate 对比</a><div class="src">行级哈希场景性能参考</div></div></div>
+          </div>
+        </details>
+
+        <div class="msg agent">修改已落地，测试编译中。等 <code>await</code> 结果回来我再汇报通过情况<span class="cursor"></span></div>
+
+        <div class="streamend" onclick="showToast('向上挂载更早的 312 条（虚拟列表按需渲染）')">↑ 加载更早消息（会话共 348 项，当前仅渲染可视区 9 项）</div>
+      </div>
+
+      <!-- 底部 dock：todo + 输入框 -->
+      <div class="dock">
+        <div class="todo" id="todoBox">
+          <div class="todo-head" onclick="toggleTodo()">
+            <span class="material-icons" style="font-size:15px;color:var(--theme-color)">checklist</span>ToDo
+            <span class="tstat ok">2/4 完成</span>
+            <span class="material-icons chev">expand_more</span>
+          </div>
+          <div class="todo-list">
+            <div class="titem done"><span class="material-icons">check_circle</span>定位 compute_anchor 并阅读上下文</div>
+            <div class="titem done"><span class="material-icons">check_circle</span>空文件保护补丁（edit·2 锚点）</div>
+            <div class="titem now"><span class="material-icons">radio_button_checked</span>补 2 个单元测试并跑 cargo test<span class="tprog">进行中 · bash 64%</span></div>
+            <div class="titem"><span class="material-icons">radio_button_unchecked</span>更新 PRD 验收项 US-007</div>
+          </div>
+        </div>
+        <div class="composer">
+          <textarea rows="2" placeholder="输入消息，Enter 发送 · Shift+Enter 换行（工具执行零审批，路径越界将被拦截）"></textarea>
+          <div class="crow">
+            <div class="ctrls">
+              <span class="chip-compact" title="会话压缩专用模型（models.compact）">compact: qwen-flash</span>
+              <span class="msel" onclick="showToast('切换 agent 模型：gpt-coding-5.5 / qwen-max / deepseek-v4-pro / ollama:local')"><em>agent: gpt-coding-5.5</em><span class="material-icons">expand_more</span></span>
+              <button class="btn-send" id="sendBtn" onclick="toggleSend()"><span class="material-icons" style="font-size:16px">send</span>发送</button>
+            </div>
+          </div>
+          <div class="stats">
+              <span><b>42.6</b> t/s</span>
+              <span>上下文 <b>68.3%</b> 137k/200k <span class="ctxbar"><i></i></span></span>
+              <span>缓存命中 <b>92%</b></span>
+              <span>任务用时 <b>04:37</b></span>
+            </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ============ 右栏：只读查看器 ============ -->
+    <div class="resizer" id="rzR"></div>
+    <aside class="right">
+      <div class="view-head">
+        <span class="material-icons" style="font-size:15px;color:var(--ts)">visibility</span>
+        <span class="view-file" id="viewFile">src/core/hashline.rs</span>
+        <span class="view-lock"><span class="material-icons">lock</span>只读</span>
+        <button class="icon-btn" title="折叠查看器" onclick="collapsePanel('right')"><span class="material-icons">chevron_right</span></button>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-pane="paneCode" onclick="switchTab(this)">代码</div>
+        <div class="tab" data-pane="paneMd" onclick="switchTab(this)">Markdown</div>
+        <div class="tab" data-pane="paneHtml" onclick="switchTab(this)">HTML</div>
+      </div>
+      <div class="pane code-pane active" id="paneCode">
+        <div class="cl"><span class="ln">22</span><span><span class="cm">/// 行锚点 = xxHash32(prev ⊕ curr ⊕ next) → 16 字符零混淆字母表</span></span></div>
+        <div class="cl"><span class="ln">23</span><span></span></div>
+        <div class="cl"><span class="ln">24</span><span><mark><span class="kw">pub fn</span> <span class="fn">compute_anchor</span>(prev: &amp;<span class="type">str</span>, curr: &amp;<span class="type">str</span>, next: &amp;<span class="type">str</span>) -&gt; <span class="type">String</span> {</mark></span></div>
+        <div class="cl"><span class="ln">25</span><span class="add" style="background:none;color:#7ee787">    <span class="kw">if</span> curr.<span class="fn">is_empty</span>() &amp;&amp; prev.<span class="fn">is_empty</span>() &amp;&amp; next.<span class="fn">is_empty</span>() {</span></div>
+        <div class="cl"><span class="ln">26</span><span style="color:#7ee787">        <span class="kw">return</span> <span class="type">String</span>::<span class="fn">from</span>(<span class="str">"00"</span>);</span></div>
+        <div class="cl"><span class="ln">27</span><span style="color:#7ee787">    }</span></div>
+        <div class="cl"><span class="ln">28</span><span>    <span class="kw">let</span> norm = <span class="fn">normalize</span>(curr);</span></div>
+        <div class="cl"><span class="ln">29</span><span>    <span class="kw">let mut</span> h = <span class="type">XxHash32</span>::<span class="fn">with_seed</span>(<span class="num">0</span>, SEED);</span></div>
+        <div class="cl"><span class="ln">30</span><span>    h.<span class="fn">update</span>(prev.<span class="fn">as_bytes</span>());</span></div>
+        <div class="cl"><span class="ln">31</span><span>    h.<span class="fn">update</span>(norm.<span class="fn">as_bytes</span>());</span></div>
+        <div class="cl"><span class="ln">32</span><span>    h.<span class="fn">update</span>(next.<span class="fn">as_bytes</span>());</span></div>
+        <div class="cl"><span class="ln">33</span><span>    <span class="fn">to_alphabet</span>(h.<span class="fn">digest</span>() <span class="op">as</span> <span class="type">usize</span>)</span></div>
+        <div class="cl"><span class="ln">34</span><span>}</span></div>
+      </div>
+      <div class="pane md-pane" id="paneMd">
+        <h3>RustedHarness — PRD 摘要（v1.7）</h3>
+        <p>面向代码库的 <b>AI Agent Harness</b>：core crate + TUI / Tauri / WebUI 三前端。</p>
+        <ul>
+          <li><code>Hashline</code> 上下文哈希锚点编辑，批量补丁整批拒绝</li>
+          <li><code>LSP</code> 一等公民 + 运行时自动下载（SHA-256 + 域名白名单）</li>
+          <li>命令走 <code>pty</code>：进度条原地刷新，模型只收屏终态</li>
+        </ul>
+        <table><tr><th>工具</th><th>权限</th><th>安全闸门</th></tr><tr><td>edit/write</td><td>一律 allow</td><td>R4 路径边界</td></tr><tr><td>bash/powershell</td><td>一律 allow</td><td>R4 路径边界</td></tr></table>
+      </div>
+      <div class="pane html-pane" id="paneHtml">
+        <div class="mock">
+          <div class="m-hero"><b>webui · rustedharness serve</b><span>index.html 渲染预览（沙箱内嵌，只读）</span></div>
+          <div class="m-body">
+            <div class="m-card"><b>34.2k</b>今日 tokens</div>
+            <div class="m-card"><b>92%</b>缓存命中</div>
+            <div class="m-card"><b>4</b>活跃会话</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+function showToast(msg){
+  var t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');
+  setTimeout(function(){t.classList.remove('show');},1800);
+}
+function toggleSend(){
+  var b=document.getElementById('sendBtn');
+  if(b.classList.contains('stop')){b.classList.remove('stop');b.innerHTML='<span class="material-icons" style="font-size:16px">send</span>发送';showToast('已恢复发送态');}
+  else{b.classList.add('stop');b.innerHTML='<span class="material-icons" style="font-size:16px">stop</span>停止';showToast('消息已发送（工具零审批执行中）');}
+}
+function toggleTodo(){document.getElementById('todoBox').classList.toggle('closed');}
+function switchTab(el){
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active');});
+  document.querySelectorAll('.pane').forEach(function(p){p.classList.remove('active');});
+  el.classList.add('active');document.getElementById(el.dataset.pane).classList.add('active');
+}
+var fileTitles={'hashline.rs':'src/core/hashline.rs','agent_loop.rs':'src/core/agent_loop.rs','provider.rs':'src/core/provider.rs','supervisor.rs':'src/core/lsp/supervisor.rs','PRD-RustedHarness.md':'PRD-RustedHarness.md','Cargo.toml':'Cargo.toml'};
+var mdOnly={'PRD-RustedHarness.md':'paneMd'};
+function openFile(el){
+  document.querySelectorAll('.tree .row').forEach(function(r){r.classList.remove('active');});
+  el.classList.add('active');
+  var name=el.dataset.view;
+  document.getElementById('viewFile').textContent=fileTitles[name]||name;
+  var pane=mdOnly[name]?'paneMd':'paneCode';
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active',t.dataset.pane===pane);});
+  document.querySelectorAll('.pane').forEach(function(p){p.classList.toggle('active',p.id===pane);});
+  showToast('右栏只读查看：'+name);
+}
+function toggleTheme(){
+  var h=document.documentElement;
+  if(h.getAttribute('data-theme')==='light'){h.removeAttribute('data-theme');document.getElementById('themeIcon').textContent='light_mode';showToast('已切换：深色主题');}
+  else{h.setAttribute('data-theme','light');document.getElementById('themeIcon').textContent='dark_mode';showToast('已切换：浅色主题');}
+}
+function collapsePanel(side){
+  document.querySelector('.'+side).classList.add('collapsed');
+  document.getElementById(side==='left'?'rzL':'rzR').style.display='none';
+  document.getElementById(side==='left'?'edgeL':'edgeR').classList.add('show');
+}
+function expandPanel(side){
+  document.querySelector('.'+side).classList.remove('collapsed');
+  document.getElementById(side==='left'?'rzL':'rzR').style.display='';
+  document.getElementById(side==='left'?'edgeL':'edgeR').classList.remove('show');
+}
+(function(){
+  var L=document.querySelector('.left'),R=document.querySelector('.right');
+  L.style.width='264px';R.style.width='396px';
+  function bindDrag(el,rz,side,min,max){
+    rz.addEventListener('pointerdown',function(e){
+      if(el.classList.contains('collapsed'))return;
+      var sx=e.clientX,sw=el.offsetWidth;rz.setPointerCapture(e.pointerId);
+      function mv(ev){var dx=ev.clientX-sx;var w=(side==='left')?sw+dx:sw-dx;
+        el.style.width=Math.max(min,Math.min(max,w))+'px';}
+      function up(){rz.removeEventListener('pointermove',mv);rz.removeEventListener('pointerup',up);}
+      rz.addEventListener('pointermove',mv);rz.addEventListener('pointerup',up);
+    });
+  }
+  bindDrag(L,document.getElementById('rzL'),'left',180,440);
+  bindDrag(R,document.getElementById('rzR'),'right',240,640);
+})();
+</script>
+</body>
+</html>

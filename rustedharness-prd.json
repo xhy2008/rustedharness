@@ -1,0 +1,481 @@
+{
+  "project": "RustedHarness",
+  "branchName": "ralph/rustedharness-core",
+  "description": "Rust AI Agent Harness v1.4: LSP as first-class code intelligence (runtime auto-download with consent + SHA-256 + official-channel registry); symbol_search/symbol_references/outline REMOVED and merged into single lsp meta-tool ops with transparent tree-sitter (L0) fallback; OpenAI-compatible tools protocol; unified-allow tool surface (no per-tool approval, path-boundary-only safety) + pty(TTY)+terminal-emulator capture (progress bars render in place, model receives final-screen lines); Hashline edits[] batch patch; unified read handles file/dir/URL; bash background pid + await; todo auto-nudge; per-role models (agent/compact); MCP client via rmcp; TUI+Tauri+WebUI",
+  "changelog_vs_v1_6": [
+    "V1.7 pty decision: command capture switched from non-TTY pipe + 5-step sanitizer to portable-pty (ConPTY on Windows) + in-process terminal emulator; programs see a TTY so tqdm/curl/pip/npm redraw progress in-place (single line); model-visible output = emulator screen final lines + exit_code; raw byte stream kept per-pid for UI replay; capture=raw escape hatch; pipe+CR-coalesce kept only as fallback when pty allocation fails; activity-timeout now driven by screen-change; stdout/stderr merge is inherent terminal semantics (redirect for split)",
+    "PRD condensed per user request: research narratives/tables removed, kept decisions+specs+registry+stories; decision log section 7 added; version chain compressed to one line"
+  ],
+  "changelog_vs_v1_5": [
+    "PERMISSION MODEL v1.6: all per-tool ask/approval REMOVED - every tool auto-allowed; sole gate = R4 path boundary. rename = dry-run preview default + apply=true immediate; MCP wildcards downgraded to optional deny blacklist (empty default); frontend diff cards non-blocking; LSP download consent KEPT (supply-chain gate, orthogonal to tool permissions); mitigations: git-rollback safety net + v2 cap-std sandbox eval",
+    "4.7.3 OUTPUT SANITIZATION PIPELINE (progress-bar flooding): risk confirmed - non-TTY still gets CR frames + ANSI from curl/wget/pip/rich (tqdm auto-throttles ~10s but frames persist); pipeline on delivery (buffer keeps raw for UI): CR segment+last-frame coalesce -> ANSI CSI/OSC strip -> similar-frame fold (>=3 normalized matches -> first+last+[xN]) -> truncation head2KB/tail8KB + sanitize_stats(raw/sanitized/coalesced); config output.sanitize on/off; pty mode v2; guardrail fixtures in US-017/018",
+    "US-003/014/017/018/022 revised; risk rows +2"
+  ],
+  "changelog_vs_v1_4": [
+    "windows shell misdirection fix (research-backed): command tool registered per-platform with EXCLUSIVE naming (POSIX=bash, Windows=powershell; pwsh.exe -> powershell.exe probing; bash only on Windows via explicit shell.prefer=git-bash) - no dual Bash+PowerShell co-registration (Claude Code choice rejected: doubles permission surface and wobbles model selection)",
+    "ShellSpec single-source-of-truth invariant: system prompt <env> section (OS/shell/version/<=8-line syntax cheatsheet) generated from same registry entry as tool description; CI unit test asserts equality (guards against Claude Code issue #51788 class regression where prompt said Shell: bash while PowerShell tool was registered)",
+    "bashism interception layer: pre-exec detection (&&, /dev/null, rm -rf, heredoc, $( ), forward-slash paths) -> return equivalent PowerShell syntax instead of executing a guaranteed-first-fail",
+    "readonly permission allowlist keyed per shell semantics (Get-ChildItem/Test-Path vs ls/cat/test); UTF-8 output encoding forced on powershell launch; CRLF-safe via hashline normalization",
+    "research sources: Claude Code dual-tool + env toggles; Codex experimental-windows + community AGENTS.md/pwsh7 PATH fix; Gemini CLI issues #2353/#3126/#18374; Cline issues #10444/#10446; OpenCode git-bash-vs-powershell thread; oh-my-pi embedded brush (v2 eval item)",
+    "US-017/US-018 redefined; risk rows +3"
+  ],
+  "changelog_vs_v1_3": [
+    "REDUNDANCY AUDIT v1.4: symbol_search/symbol_references/outline tools deleted; capabilities = lsp ops workspace_symbols/references/document_symbols; L0 tree-sitter index becomes internal impl layer with transparent fallback (match:'name-based') instead of lsp_unavailable dead-end",
+    "glob kept with added optional path scope param; documented purpose: file-PATH pattern discovery (gitignore-aware, mtime sorted) complementing grep content search (Claude Code Glob parity)",
+    "PRD section 5 restored as FULL inline tool behavior catalog (11 entries, params/behavior/returns/perms), no cross-version references",
+    "mainstream naming alignment: bash background -> run_in_background; all timeouts ms (timeout_ms on bash/await/lsp); web_search count -> num_results; grep output_mode files -> files_with_matches; todo -> TodoWrite-style full-list replacement (omit items = list; merge=true incremental)",
+    "non-redundancy rulings recorded: grep(files_with_matches) vs glob different semantics keep both; lsp diagnostics op (query untouched files) vs auto post-edit injection complementary; no kill tool (system commands via bash); guard: if single lsp tool degrades weak-model call accuracy in eval, re-add 3 sugar wrappers sharing one impl",
+    "acceptance revised: US-005/010/014/017/018/019/020; risk table +2; total stories 27 unchanged"
+  ],
+  "changelog_vs_v1_2": [
+    "LSP promoted to L1 primary code-intelligence layer per user decision (compiler-accurate definition/references/hover/rename/diagnostics)",
+    "LSP client engineering spec: lsp-types 3.16 + self-built JSON-RPC state machine (ecosystem clients lsp-client/async-lsp-client/tokio-lsp are immature; tower-lsp is server-side)",
+    "LspSupervisor: on-demand didOpen, incremental didChange after edit/write, crash backoff restart <=3 then degrade, idle reclaim 10min, cancellation",
+    "Runtime auto-download (LSP Manager): built-in ServerRegistry; resolution order config override -> PATH -> local cache -> download; HTTPS + official-domain allowlist + mandatory SHA-256 + first-use consent; NON-interactive mode never auto-downloads (falls back to L0); rustedharness lsp list/install/update; offline manual install",
+    "Language server registry table with official channels for 24 mainstream languages (rust-analyzer, clangd, gopls, pyright, typescript-language-server, jdtls, kotlin-lsp/fwcd, csharp-ls, ruby-lsp, sourcekit-lsp, metals, lua-language-server, elixir-ls, haskell-language-server, bash/yaml/vscode-langservers npm family, + flagged-unverified: php/dart/zig/ocaml/R/fortran/dockerfile)",
+    "new lsp meta-tool (10 ops; rename -> WorkspaceEdit preview + ask); auto diagnostics injection after edit/write (2s cap)",
+    "SCIP route downgraded to v2 optional",
+    "new stories US-012..014; all stories renumbered, total 27; +5 risk rows (resource, supply chain, env fragmentation, server capability variance, diagnostics noise)"
+  ],
+  "keyLibraries": {
+    "llm": [
+      "async-openai",
+      "reqwest",
+      "schemars"
+    ],
+    "tui": [
+      "ratatui",
+      "crossterm",
+      "syntect",
+      "tui-markdown"
+    ],
+    "gui": [
+      "tauri 2.x"
+    ],
+    "web": [
+      "axum 0.8",
+      "tower-http",
+      "tokio-tungstenite"
+    ],
+    "hashline": [
+      "xxhash-rust (context hashing prev+curr+next)"
+    ],
+    "lsp": [
+      "lsp-types (protocol types)",
+      "self-built JSON-RPC state machine on tokio stdio",
+      "candidates: lsp-client / async-lsp-client / tokio-lsp (all small, evaluate, expect custom client)"
+    ],
+    "downloader": [
+      "reqwest",
+      "sha2",
+      "flate2/tar/zip"
+    ],
+    "codeIndex_fallback": [
+      "tree-sitter",
+      "tree-sitter-language-pack",
+      "rusqlite",
+      "ignore",
+      "globset",
+      "notify"
+    ],
+    "process": [
+      "portable-pty (unix openpty / windows ConPTY)",
+      "terminal emulator: vt100 / tui-emulator (or custom escape state machine)",
+      "tokio::process",
+      "nix",
+      "Job Object (win)"
+    ],
+    "net": [
+      "html-to-markdown",
+      "moka",
+      "SearchProvider: brave/tavily/duckduckgo"
+    ],
+    "mcp": [
+      "rmcp 1.4",
+      "rust-mcp-sdk (fallback)"
+    ],
+    "tokens": [
+      "tiktoken-rs"
+    ],
+    "misc": [
+      "clap",
+      "serde",
+      "toml/serde_yaml",
+      "directories",
+      "similar",
+      "anyhow",
+      "thiserror",
+      "tracing",
+      "rayon",
+      "dunce",
+      "grep-regex",
+      "grep-searcher"
+    ]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Cargo workspace skeleton + CLI entry",
+      "description": "5-crate workspace (core/tui/gui/web/server) with clap CLI.",
+      "acceptanceCriteria": [
+        "3-OS build",
+        "clippy -D warnings clean",
+        "tracing+anyhow wired"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "OpenAI-compatible provider layer with Tools schema",
+      "description": "Any OpenAI-compatible endpoint via base_url; ProviderAdapter switches.",
+      "acceptanceCriteria": [
+        "SSE tool_calls aggregation",
+        "wiremock green",
+        "Ollama + cloud round-trip"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Agent loop + Tool Registry (unified-allow v1.6)",
+      "description": "Tool trait + schemars; cancellation; NO per-tool approval - calls execute directly, guarded only by R4 path boundary; deny blacklist = empty-default config option.",
+      "acceptanceCriteria": [
+        "2-tool sequential eval",
+        "no orphan tasks after interrupt",
+        "assertion: no ask/approval hook in execution path",
+        "workspace-escape refused with structured error; in-bounds never prompts"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "v1.6 permission unification"
+    },
+    {
+      "id": "US-004",
+      "title": "WorkspacePathResolver, no persistent cd",
+      "description": "session_cwd anchoring; bash fresh child every call.",
+      "acceptanceCriteria": [
+        "path class tests green",
+        "cd then pwd returns session_cwd",
+        "relative-path echo only"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "read(anchors+raw) / grep(anchors opt-in) / glob(path scope)",
+      "description": "grep->edit anchor loop; ripgrep core in-process; glob takes optional path scope for file-name pattern discovery.",
+      "acceptanceCriteria": [
+        "grep anchors output accepted verbatim by edit (e2e)",
+        "100k-file grep <3s",
+        "raw=true no prefixes",
+        "grep output_mode values content|files_with_matches|count",
+        "glob pattern-only call defaults to session_cwd; scoped call with path works; gitignore respected"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "v1.4: path param + output_mode naming"
+    },
+    {
+      "id": "US-006",
+      "title": "write append-on-exists",
+      "description": "Existing -> append + '文件已存在，内容已追加' + start line/bytes; overwrite atomic replace.",
+      "acceptanceCriteria": [
+        "create/append/overwrite tests",
+        "no silent overwrite"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Hashline codec with context hashing",
+      "description": "f(prev,curr,next) xxHash32 -> ZPMQVRWSNKTXJBYH; length 2-4.",
+      "acceptanceCriteria": [
+        "golden files green incl dup-line context split",
+        "edit line N invalidates only N-1..N+1"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "edit edits[] batch patch",
+      "description": "op/pos/end/lines flat schema; stale 3-way recovery; E_INVALID_PATCH/E_NOOP_LOOP; chained anchors; atomic write.",
+      "acceptanceCriteria": [
+        "per-op evals",
+        "batch-vs-single success eval + max_ops_per_call switch",
+        "external change -> whole-batch reject + fresh anchors",
+        "diagnostics refill in tool result after edit when rust-analyzer available (v1.3)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "CodeIndex (L0 fallback): tree-sitter -> SQLite",
+      "description": "Keep for outline/name-fallback/grep-anchors; langs batch1+batch2.",
+      "acceptanceCriteria": [
+        "2k-file cold index <60s",
+        "name-based ground truth >=95%",
+        "corrupt db rebuild"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "role narrowed by v1.3 LSP decision"
+    },
+    {
+      "id": "US-010",
+      "title": "lsp meta-tool op contract + L1->L0 routing (V1.4 REWORK)",
+      "description": "Single lsp tool for all code intelligence; workspace_symbols/references/document_symbols fall back to tree-sitter index transparently; standalone symbol tools removed from surface.",
+      "acceptanceCriteria": [
+        "all 10 ops contract-tested vs mock server",
+        "Java 3-overload + 7-callsite fixtures pass on BOTH L1 and L0 paths with match:'lsp-precise'/'name-based' assertions",
+        "warmup_hint when server indexing",
+        "document_symbols of 1k-line file <200 tokens",
+        "tool surface contains NO symbol_search/symbol_references/outline names (schema assertion)",
+        "eval: weak-model op-enum call accuracy vs 3-tool baseline recorded; regression triggers sugar-wrapper fallback"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "v1.4 redundancy merge"
+    },
+    {
+      "id": "US-011",
+      "title": "Incremental index refresh (L0)",
+      "description": "notify + InputEdit reparse + branch switch.",
+      "acceptanceCriteria": [
+        "1s edit refresh",
+        "5s branch switch",
+        "2h soak stable"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "LSP client + Supervisor (NEW v1.3)",
+      "description": "lsp-types + custom JSON-RPC state machine; on-demand didOpen; incremental didChange after edit/write; crash backoff <=3 then degrade; idle reclaim; cancellation.",
+      "acceptanceCriteria": [
+        "real rust-analyzer + pyright: initialize->definition->references->rename-preview loop",
+        "kill -9 server -> auto restart mid-session",
+        "3 crashes -> symbol tools fall back match:'name-based'",
+        "shutdown cascades process-group kill"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "client crates immature: evaluate lsp-client/async-lsp-client/tokio-lsp, expect custom"
+    },
+    {
+      "id": "US-013",
+      "title": "ServerRegistry + runtime auto-download (NEW v1.3)",
+      "description": "Embedded JSON registry per PRD 4.4.4; resolution override->PATH->cache->download; HTTPS+allowlist+SHA-256+consent; non-interactive never auto-downloads; lsp list/install/update CLI.",
+      "acceptanceCriteria": [
+        "clean env: consent->download rust-analyzer->verify->launch->answers definition",
+        "tampered sha256 -> refuse+error",
+        "offline -> L0 fallback, no hang",
+        "runtime_reqs missing (no Node) -> one-time guidance not repeated prompts",
+        "flagged unverified entries verified and promoted in registry PR"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "supply-chain allowlist = official domains in registry only"
+    },
+    {
+      "id": "US-014",
+      "title": "auto diagnostics injection + rename apply flow",
+      "description": "post-edit/write publishDiagnostics <=2s appended (error level); rename: default dry-run WorkspaceEdit preview, apply=true atomic write + per-file diffs, NO approval; structured lsp_unavailable listing L0 ops.",
+      "acceptanceCriteria": [
+        "type-error fixture: edit result contains diagnostic line",
+        "rename dry-run touches disk zero; apply=true -> atomic cross-file write + per-file diff return",
+        "lsp_unavailable lists L0 fallback ops",
+        "diagnostics error-only default, configurable"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "v1.6 approval removed"
+    },
+    {
+      "id": "US-015",
+      "title": "Token counting + structured compaction",
+      "description": "tiktoken + fallback + usage recalib; >=80% 5-field summary.",
+      "acceptanceCriteria": [
+        "100-turn no overflow",
+        "hard constraints preserved"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Role-based model routing (agent/compact)",
+      "description": "compaction asserts compact model; hot-switch.",
+      "acceptanceCriteria": [
+        "request body assertions"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "platform shell + pty capture (root-fix progress bars)",
+      "description": "ShellSpec exclusive naming + same-source <env>/description; bashism interception; capture via portable-pty (ConPTY on Windows), TERM=xterm-256color 200x50; in-process terminal emulator maintains final screen rows; model output = screen final-state text (progress bar = 1 line) + exit_code; ring buffer keeps raw bytes for UI replay; capture=raw hatch; fallback pipe+CR-coalesce on pty failure; activity-timeout from screen change; groups/timeouts/run_in_background/pid per v1.5.",
+      "acceptanceCriteria": [
+        "Windows default schema has no bash-named tool",
+        "prompt <env> == registered interpreter (unit assert)",
+        "bashism fixtures advice-before-exec",
+        "tqdm 5000-iter -> 1 progress line + final",
+        "curl/pip fixtures single folded line, zero ANSI residue in model view",
+        "docker-pull-style multi-line layer bars -> one line per layer",
+        "raw bytes intact & replayable; capture=raw returns them",
+        "pty alloc failure -> pipe fallback still folds CR frames",
+        "no leftover procs after session exit"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "v1.7 pty decision replaces 5-step sanitizer as primary mechanism"
+    },
+    {
+      "id": "US-018",
+      "title": "await(pid, timeout_ms) on pty sessions",
+      "description": "both outcomes return current sanitized screen text + status + exit_code(if done) + elapsed; timeout non-lethal; kill via same-shell system command.",
+      "acceptanceCriteria": [
+        "mid-run snapshot non-empty; progress folded to one line",
+        "alive after timeout",
+        "exit_code on completion",
+        "raw replay available per pid"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "v1.7"
+    },
+    {
+      "id": "US-019",
+      "title": "todo (TodoWrite-style) + stall auto-nudge",
+      "description": "omit items = list; items = full replacement; merge=true incremental by id; every call returns full list; stall injects full list <=3/event then escalate.",
+      "acceptanceCriteria": [
+        "halt fixture resumes after nudge",
+        "3-nudge cap then human escalation",
+        "empty/complete list -> zero nudges",
+        "merge=true updates single status without resending list",
+        "survives --resume"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": "v1.4 format aligned to Claude Code TodoWrite"
+    },
+    {
+      "id": "US-020",
+      "title": "web_search fallback chain (num_results)",
+      "description": "brave/tavily/duckduckgo; domain post-filter; num_results naming.",
+      "acceptanceCriteria": [
+        "zero-key still returns via DDG",
+        "per-provider mocks + real smoke"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": "v1.4 naming"
+    },
+    {
+      "id": "US-021",
+      "title": "read(URL) pipeline (no web_fetch)",
+      "description": "GET->md->100KB trunc->TTL cache->compact extraction; external_content wrap.",
+      "acceptanceCriteria": [
+        "cache_hit flag",
+        "main model never sees raw HTML",
+        "no web_fetch in tool list"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "MCP client via rmcp (deny-blacklist default empty)",
+      "description": "mcp.json; stdio + streamable HTTP; mcp__ namespace; crash isolation/timeout kept; all calls auto-allowed v1.6; optional deny list.",
+      "acceptanceCriteria": [
+        "server-everything stdio list+call",
+        "killed server de-registers only its tools",
+        "deny entry blocks match; empty default never blocks"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": "v1.6 permissions unified"
+    },
+    {
+      "id": "US-023",
+      "title": "HarnessEvent + TUI",
+      "description": "streams/diff cards/todo panel/proc cards + v1.3: LSP status panel (absent/downloading/running/degraded + warmup) and download consent card.",
+      "acceptanceCriteria": [
+        "full loop",
+        "Ctrl+C cascade",
+        "80-col stable",
+        "consent card blocks download until accepted"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "WebUI via axum serve",
+      "description": "REST+WS; keys server-side; same bundle.",
+      "acceptanceCriteria": [
+        "full loop",
+        "no cross-tab streams; reconnect replay"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Tauri 2 GUI",
+      "description": "reuse frontend; IPC bridge; native integration.",
+      "acceptanceCriteria": [
+        "3-OS loop",
+        "installer <15MB"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Session persistence + resume",
+      "description": "SQLite tree incl todo/proc/LSP-pinned-versions snapshots.",
+      "acceptanceCriteria": [
+        "kill -9 recovery",
+        "stale anchors rejected from disk state",
+        "resume restores server version pins"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Docs, registry maintenance guide, evals, CI",
+      "description": "README, config reference, tool docs = section 5, registry table + per-entry verification checklist, benchmarks, 3-OS CI.",
+      "acceptanceCriteria": [
+        "CI green",
+        "docs consistent",
+        "all ⚠️ registry entries promoted"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

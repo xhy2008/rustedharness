@@ -1,0 +1,442 @@
+# RustedHarness
+
+An autonomous coding agent written in Rust, with anchored file editing, a
+terminal UI, a web UI, and an optional Tauri desktop shell.
+
+The implementation follows the RustedHarness PRD v1.7 (2026-10-23). It speaks
+the OpenAI Chat Completions API (including compatible local servers), runs an
+agent loop with tools, and keeps every frontend on the same typed event and
+command protocol.
+
+## Workspace
+
+| Crate | Purpose |
+| --- | --- |
+| `rustedharness-core` | Provider, agent loop, tools, Hashline editing, LSP/MCP clients, sessions, compaction, code index |
+| `rustedharness-cli` | `rustedharness` binary: `run`, `serve`, `tui`, `lsp`, `sessions`, `config` |
+| `rustedharness-tui` | Full-screen ratatui interface |
+| `rustedharness-web` | Axum REST + WebSocket server and embedded UI |
+| `rustedharness-gui` | Optional Tauri 2 shell; reuses the web UI over a loopback socket |
+
+All frontends consume `HarnessEvent` and send `HarnessCommand`. The GUI crate is
+excluded from `default-members` so a normal build needs no webview libraries.
+
+## Requirements
+
+- Rust 1.85 or newer (edition 2021).
+- An OpenAI-compatible endpoint and an API key in `OPENAI_API_KEY`, or a local
+  server such as Ollama added to `models.json`.
+- Optional: language servers for semantic code intelligence. The agent falls
+  back to a built-in name-based index when none is available.
+
+## Quick start
+
+```sh
+cargo build --release
+export OPENAI_API_KEY=sk-...
+
+# Create ~/.rustedharness/config.json and models.json (optional; defaults work)
+./target/release/rustedharness config init
+
+# One-shot, headless
+./target/release/rustedharness run "Add a test for the parser and run it"
+
+# Streaming REPL (no TUI)
+./target/release/rustedharness run
+
+# Full-screen terminal UI
+./target/release/rustedharness tui
+
+# Web UI: http://127.0.0.1:8787
+./target/release/rustedharness serve --token "$RUSTEDHARNESS_TOKEN"
+
+# Optional desktop shell (needs platform webview libraries)
+cargo run -p rustedharness-gui --features desktop
+```
+
+`--cwd DIR` anchors the workspace (R4) and `--model MODEL` overrides the agent
+model for any subcommand. `MODEL` may be `provider/model` or a bare model id
+that is unique across the configured providers. `run --json` emits one JSON
+event per line, and `run --resume <id>` continues a saved session. `run --yes`
+approves language server downloads without prompting (still requires a pinned
+SHA-256).
+
+## Configuration
+
+Configuration lives in `~/.rustedharness` by default. Override the directory
+with `RUSTEDHARNESS_DIR` (or `RUSTEDHARNESS_CONFIG_DIR`). This keeps config,
+sessions, the code index and downloaded language servers together:
+
+| Path | Purpose |
+| --- | --- |
+| `config.json` | Default model and harness settings |
+| `models.json` | Providers, endpoints and their models (Pi-style) |
+| `mcp.json` | Optional MCP servers shared by every project |
+| `sessions/` | Append-only JSONL sessions |
+| `index/` | L0 tree-sitter index |
+| `lsp/` | Cached language-server installations |
+
+`rustedharness config init` creates `config.json` and `models.json` without
+overwriting existing files. `config path` prints every path, `config show`
+prints the effective configuration with credentials redacted, `config models`
+lists the resolved model catalog, and `config edit [config|models]` opens the
+file in `$VISUAL`/`$EDITOR` (or the platform default).
+
+`--config PATH` accepts a `config.json`, a `models.json`, a directory containing
+both, or a legacy `config.toml`; a legacy file in the platform config directory
+is also read as a migration fallback.
+
+### models.json
+
+Declare as many providers as you like. A model is selected as
+`provider/model`; bare ids are accepted when they are unique. Model ids that
+contain slashes (for example OpenRouter ids) can be used as-is when unique, or
+prefixed with their provider.
+
+```json
+{
+  "providers": {
+    "openai": {
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": [
+        { "id": "gpt-4o", "contextWindow": 128000 },
+        { "id": "gpt-4o-mini", "contextWindow": 128000 }
+      ]
+    },
+    "gpt-responses": {
+      "name": "OpenAI Responses",
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": [
+        { "id": "gpt-5", "contextWindow": 400000, "reasoning": true }
+      ]
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "$DEEPSEEK_API_KEY",
+      "headers": { "X-Title": "RustedHarness" },
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "reasoningContent": true
+      },
+      "models": [
+        { "id": "deepseek-chat", "contextWindow": 128000 },
+        { "id": "deepseek-reasoner", "contextWindow": 128000, "reasoning": true }
+      ]
+    },
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "models": [
+        { "id": "qwen2.5-coder:7b", "contextWindow": 32768 }
+      ]
+    }
+  }
+}
+```
+
+`apiKey` and header values accept a literal, `$NAME`/`${NAME}` environment
+interpolation, or `!command` output. `$$` and `$!` produce literal `$` and `!`.
+`apiKeyEnv` is still accepted for old configurations. Local endpoints may use a
+dummy key or omit it.
+
+Provider fields: `name`, `baseUrl`, `api` (`openai-completions` or
+`openai-responses`), `apiKey`, `apiKeyEnv`, `headers`, `compat`, and `models`.
+Model fields: `id`, `name`, `contextWindow` (default 128000), `maxTokens`
+(optional output cap), and `reasoning`. A model entry with an existing id
+replaces it; new entries are appended. A provider with an empty `baseUrl` is
+treated as disabled.
+
+`api` selects the wire protocol:
+
+- `openai-completions` (default) — `POST {baseUrl}/chat/completions`.
+- `openai-responses` — `POST {baseUrl}/responses`. The Responses backend maps
+  the agent transcript to `input` items and `instructions`, flattens function
+  tools, streams `response.output_text.*`, `response.reasoning_*` and
+  `response.function_call_arguments.*` events, and reads `input_tokens` /
+  `output_tokens` from `usage`. Rejected knobs (`temperature`, `tool_choice`,
+  `parallel_tool_calls`, `store`, `max_output_tokens`) are retried without that
+  field. Reasoning items are not replayed between turns, so stateless use does
+  not require server-side response storage.
+
+`compat` defaults are `maxTokensField: "max_tokens"`, `systemRole: "system"`,
+and `reasoningContent`, `toolChoice`, `parallelToolCalls`, `streamUsage` all
+enabled. Rejected knobs are retried one at a time.
+
+### config.json
+
+```json
+{
+  "model": "openai/gpt-4o",
+  "compactModel": "openai/gpt-4o-mini",
+  "contextWindow": 128000,
+  "agent": {
+    "maxTurns": 100,
+    "compactThreshold": 0.8,
+    "keepRecentTurns": 8,
+    "autoCompact": true,
+    "temperature": 0.2,
+    "chaseLimit": 3,
+    "maxOutputTokens": 8192
+  },
+  "edit": {
+    "anchorWidth": 2,
+    "enableReplaceText": true,
+    "diagnosticsTimeoutMs": 2000
+  },
+  "shell": {
+    "prefer": "default",
+    "timeoutMs": 30000,
+    "activityTimeoutMs": 300000,
+    "maxOutputBytes": 1048576,
+    "ptyRows": 50,
+    "ptyCols": 200
+  },
+  "lsp": {
+    "enabled": true,
+    "autoDownload": true,
+    "allowDownloadsNoninteractive": false,
+    "idleTimeoutSecs": 600,
+    "maxRestarts": 3,
+    "requestTimeoutMs": 5000
+  },
+  "mcp": {
+    "enabled": true,
+    "deny": [],
+    "callTimeoutMs": 30000
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8787
+  }
+}
+```
+
+`model` and `compactModel` may point at different providers; the backend routes
+each request independently. `contextWindow` is the fallback for models that do
+not declare one. `agent.maxOutputTokens` is the fallback when a model has no
+`maxTokens`. Environment variables `RUSTEDHARNESS_MODEL`,
+`RUSTEDHARNESS_COMPACT_MODEL`, and `RUSTEDHARNESS_PROVIDER` override the file.
+
+The legacy `[models]` block (`agent`, `compact`, `context_window`) and legacy
+TOML `[providers.<name>]` entries are still accepted, so existing configs keep
+working while you migrate. `config init` converts a legacy `config.toml` into
+the split JSON files without touching the original. `config show` redacts inline
+keys and header values.
+
+## Agent behavior
+
+The loop streams assistant text and reasoning, executes tool calls, feeds
+results back, and repeats until the model stops or a limit is reached.
+Cancellation is cooperative. After edits, language-server diagnostics are
+appended to the tool result.
+
+- **Model routing**: `model` drives the loop; `compactModel` is used only for
+  summaries. Each request is routed to the provider that owns its model, so the
+  two roles can live on different providers.
+- **Compaction**: when the provider-reported context size reaches 80% of the
+  active model's `contextWindow`, the transcript is replaced by a five-section
+  summary (goal, done, constraints, pending, pitfalls). The most recent turns
+  are kept verbatim.
+- **Token accounting**: counts come exclusively from the `usage` object returned
+  by the provider; nothing is estimated or tokenized locally. If a gateway omits
+  `usage`, the harness warns once and reports no invented numbers.
+- **Todos**: `todo` maintains a plan. If work remains and the model stops, the
+  harness injects a bounded chase message (at most `chase_limit` times).
+- **Sessions**: append-only JSONL under `~/.rustedharness/sessions`, with
+  torn-tail recovery, pruning, and unique-prefix lookup. Saved sessions can be
+  resumed from the CLI, TUI, or web UI; compaction records are replayed so the
+  resumed transcript matches the compacted view.
+- **Workspace anchoring (R1–R4)**: relative paths resolve against the session
+  workspace; absolute paths outside it are rejected. Symlinks are resolved
+  before the check. Every tool is auto-allowed except a would-be R4 escape.
+
+### Tools
+
+| Tool | Description |
+| --- | --- |
+| `read` | Read text or binary ranges from files, or fetch an `http(s)` URL as markdown. |
+| `write` | Create/overwrite a file, or append when it already exists. |
+| `edit` | Hashline anchored edits, optionally several per call. |
+| `glob` | Workspace file discovery (respects `.gitignore`). |
+| `grep` | Regex content search with glob filters. |
+| `bash` / `powershell` | Run commands in a pty; background mode returns a pid. |
+| `await` | Wait for a background process and return output/exit status. |
+| `todo` | Replace, merge, or inspect the task list. |
+| `web_search` | Brave → Tavily → DuckDuckGo fallback chain. |
+| `lsp` | Ten semantic operations backed by a real language server, with L0 fallback. |
+| `mcp__server__tool` | Tools exposed by configured MCP servers. |
+
+Remote `read` results are wrapped as untrusted external content so fetched pages
+cannot impersonate instructions. `web_search` uses `BRAVE_API_KEY` and
+`TAVILY_API_KEY` when present and always falls back to keyless DuckDuckGo.
+
+### Anchored editing (Hashline)
+
+`read` returns lines tagged as `line#anchor|content`. The anchor is an xxHash32
+of the line and its neighbourhood, rendered in the alphabet
+`ZPMQVRWSNKTXJBYH`. `edit` accepts a batch:
+
+```json
+{
+  "path": "src/lib.rs",
+  "edits": [
+    { "op": "replace", "pos": "12#VQ", "lines": ["fn main() {}"] },
+    { "op": "insert_after", "pos": "18#KZ", "lines": ["// new"] }
+  ]
+}
+```
+
+Anchor width defaults to 2 characters and can be raised to 4 in `[edit]`. Ops
+are `replace`, `insert_before`, `insert_after`, `delete`, and `replace_text`.
+
+If any anchor is stale, the whole batch is rejected with `E_STALE_ANCHOR`; no
+partial write occurs. Editing a line invalidates the anchors of its neighbours,
+and `write` into an existing file appends without destroying content. The
+append result message is exactly `文件已存在，内容已追加`.
+
+## Language servers
+
+The `lsp` tool supports `definition`, `type_definition`, `implementation`,
+`references`, `hover`, `document_symbols`, `workspace_symbols`,
+`call_hierarchy`, `rename`, and `diagnostics`. Servers are spawned lazily,
+restarted a bounded number of times, and shut down when idle.
+
+When a server is missing, the harness can offer to download one, but only when
+all of these hold:
+
+- HTTPS only, with redirects re-checked against a host whitelist;
+- an explicit SHA-256 is pinned under `[lsp.downloads.<server>]` or supplied
+  with `--sha256`;
+- the archive is at most 256 MiB and extracts without escapes;
+- the user consents interactively, or `allow_downloads_noninteractive` /
+  `--yes` is set.
+
+Checksums are never invented. If you do not know the digest, ask the harness to
+read the official release metadata:
+
+```sh
+rustedharness lsp checksum rust-analyzer
+```
+
+This queries the GitHub release asset `digest` (falling back to a published
+`.sha256` sidecar), then prints the hash, a ready-to-paste
+`[lsp.downloads.<server>]` snippet, and an install command. Pin it in config,
+or install directly:
+
+```sh
+rustedharness lsp install rust-analyzer --sha256 <digest>
+rustedharness lsp update rust-analyzer --sha256 <digest>
+```
+
+`lsp list` shows the registry and availability. The checksum lookup only reads
+metadata; installation still requires the explicit pin.
+
+Without a server, L0 provides definitions, references, and identifier lookup
+from a real tree-sitter parse indexed in SQLite. All 17 bundled grammars are
+available: Rust, C, C++, Go, TypeScript, TSX, JavaScript, Python, Java, Kotlin,
+C#, Ruby, PHP, Swift, Scala, Lua, and Elixir. L0 answers are labelled
+name-based and lower confidence than LSP results.
+
+## Web UI and API
+
+`rustedharness serve` binds to `127.0.0.1:8787` by default. Set `--token` (or
+`web.auth_token`) to require `Authorization: Bearer …`; the WebSocket accepts
+the token as a query parameter because browsers cannot set headers on a
+WebSocket handshake.
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /` | Embedded single-page UI |
+| `GET /api/health` | Unauthenticated health probe |
+| `GET /api/config` | Redacted runtime configuration and resolved model catalog |
+| `GET /api/sessions` | Saved session summaries |
+| `GET /api/sessions/{id}` | Full transcript |
+| `DELETE /api/sessions/{id}` | Delete a saved session |
+| `GET /api/tree?session=…&path=…` | Lazy directory listing for the session workspace |
+| `GET /api/file?session=…&path=…` | Read-only text payload (256 KiB cap) |
+| `GET /ws` | Bidirectional event/command stream |
+
+Each WebSocket connection gets its own `Agent`; closing the tab cancels the
+turn and shuts the agent down. The UI is a three-column workspace: a lazy
+session/file tree, the chat stream with a todo dock and composer, and a
+read-only inspector for code, Markdown/JSON preview, and LSP/process activity.
+It streams text and reasoning, renders tool cards and consent prompts, offers
+dark/light themes, and uses the real `HarnessEvent` protocol without demo data.
+Reasoning cards stay expanded while thinking streams and fold automatically once
+the message completes. Tool cards stay open while running, show sanitized live
+screen updates from `bash` commands (throttled 16 KiB tails), then fold when the
+result arrives. Large transcripts open with only the newest page rendered; a
+"load earlier" control walks backwards in bounded pages (up to 1200 messages)
+instead of building one DOM node per historical message.
+The same page is responsive: the right inspector becomes an off-canvas drawer
+below 1180 px, the workspace tree below 900 px, and phone layouts use
+safe-area padding, bottom-sheet modals, and 16 px composer text to avoid iOS
+zoom. HTML/SVG files are never executed in the preview.
+
+The tree and file endpoints resolve paths through `WorkspacePathResolver`;
+they reject traversal and symlinks, skip hidden and build directories, cap
+listings at 500 entries, and return binary/oversized files without rendering.
+
+The Tauri GUI starts the same server on an ephemeral loopback port and points a
+native window at it, so the desktop and browser experiences stay identical.
+
+## MCP
+
+MCP servers are loaded from `mcp.json` in the workspace, then the config
+directory, unless `[mcp].config_path` points elsewhere. Stdio and HTTP+SSE transports are supported. Exposed tools
+are namespaced as `mcp__server__tool`; `[mcp].deny` removes specific tools or
+whole servers. MCP tool calls are subject to the same workspace anchoring and
+timeouts as built-in tools.
+
+## Security notes
+
+- The workspace boundary is enforced on every filesystem tool, including
+  symlink resolution; `..` traversal is rejected.
+- The web server binds to loopback by default. If exposed, use a token and a
+  TLS-terminating proxy.
+- LSP downloads require explicit consent plus an explicitly pinned checksum.
+  `lsp checksum` only reads published release metadata; there is no
+  "trust anything from GitHub" install path.
+- Fetched web content is clearly marked untrusted and truncated.
+- Shell commands run with the user's privileges. The harness is not a sandbox;
+  run it in a container or VM if you need isolation.
+
+## Development
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace
+```
+
+CI runs formatting, clippy with warnings denied, tests, and builds on Linux,
+macOS, and Windows. The GUI is built in its default configuration, which does
+not require webview libraries; building `--features desktop` additionally needs
+the platform webview stack
+(WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS).
+
+## Deliberate choices
+
+These are documented substitutions or additions that keep the build portable
+and the trust model explicit:
+
+- **Language-server downloads** never invent checksums; the user must pin one.
+  `lsp checksum` helps discover the official digest but does not weaken this.
+- **GUI** is an optional `desktop` feature rather than a default build target.
+
+## License
+
+MIT. See `LICENSE`.
+
+`html2md` (used for `read(URL)` HTML conversion) is **GPL-3.0+**. Building and
+distributing a binary that links it means the combined distribution must comply
+with GPL-3.0; the project's own source remains MIT. If a fully permissive build
+is required, replace the one call in `crates/core/src/web.rs` with a converter
+that has compatible licensing.

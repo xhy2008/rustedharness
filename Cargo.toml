@@ -1,0 +1,94 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/cli",
+    "crates/tui",
+    "crates/web",
+    "crates/gui",
+]
+default-members = [
+    "crates/core",
+    "crates/cli",
+    "crates/tui",
+    "crates/web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["RustedHarness contributors"]
+repository = "https://example.invalid/rustedharness"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+async-openai = { version = "0.42", default-features = false, features = ["chat-completion", "byot", "rustls"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.29"
+directories = "6"
+dunce = "1"
+flate2 = "1"
+futures-util = "0.3"
+globset = "0.4"
+hex = "0.4"
+html2md = "0.2.17"
+ignore = "0.4"
+moka = { version = "0.12", features = ["future"] }
+nix = { version = "0.30", features = ["signal", "process"] }
+portable-pty = "0.9"
+ratatui = "0.30"
+rayon = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip", "brotli"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+similar = "2"
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tree-sitter = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-elixir = "0.3"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-lua = "0.5"
+tree-sitter-php = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-scala = "0.26"
+tree-sitter-swift = "0.7"
+tree-sitter-typescript = "0.23"
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+rustedharness-core = { path = "crates/core" }
+rustedharness-tui = { path = "crates/tui" }
+rustedharness-web = { path = "crates/web" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

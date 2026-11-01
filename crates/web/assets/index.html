@@ -1,0 +1,3721 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" id="themeColor" content="#12141a">
+<meta name="color-scheme" content="dark light">
+<title>RustedHarness</title>
+<script>
+try {
+  var savedTheme = localStorage.getItem('rh_theme');
+  if (savedTheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+} catch (e) {}
+</script>
+<style>
+  :root {
+    --brand: #ff6600;
+    --brand-hi: #ff8a3d;
+    --brand-soft: rgba(255, 102, 0, .12);
+    --bg: #12141a;
+    --card: #1a1d24;
+    --panel-2: #16191f;
+    --elevated: #20242c;
+    --text: #e8eaed;
+    --sub: #a8b0bb;
+    --faint: #767e8a;
+    --line: #2a2f38;
+    --track: #2a2f38;
+    --inline: #23272f;
+    --code-bg: #1e222a;
+    --code-fg: #abb2bf;
+    --ok: #3fbf6f;
+    --run: #6ea8fe;
+    --warn: #e5a040;
+    --danger: #ef6468;
+    --purple: #c678dd;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --topbar: 44px;
+  }
+  :root[data-theme="light"] {
+    --brand-soft: #fff0e6;
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --panel-2: #fafbfc;
+    --elevated: #ffffff;
+    --text: #1a1a1a;
+    --sub: #5d6673;
+    --faint: #98a1ad;
+    --line: #e6e8ec;
+    --track: #e9ecf1;
+    --inline: #f2f4f7;
+    --ok: #2e9e5b;
+    --run: #2f6fed;
+    --warn: #d97706;
+    --danger: #d9363e;
+    color-scheme: light;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  html { color-scheme: dark; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 var(--sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  button, textarea, input, select { font: inherit; color: inherit; }
+  button { background: none; border: 0; padding: 0; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  a { color: var(--brand); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ::selection { background: rgba(255, 102, 0, .28); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .icon {
+    width: 18px; height: 18px; flex: none; display: block;
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+  /* ---------- shell ---------- */
+  .app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+  .topbar {
+    flex: none; display: flex; align-items: center; gap: 8px;
+    height: calc(var(--topbar) + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) calc(14px + env(safe-area-inset-right, 0px)) 0 calc(14px + env(safe-area-inset-left, 0px));
+    background: var(--card); border-bottom: 1px solid var(--line);
+    position: relative; z-index: 50;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex-shrink: 1; margin-right: 2px; }
+  .logo {
+    width: 24px; height: 24px; border-radius: 7px; flex: none;
+    background: linear-gradient(135deg, var(--brand), #ffb27a);
+    color: #fff; font-size: 13px; font-weight: 800; display: grid; place-items: center;
+    box-shadow: 0 2px 10px rgba(255, 102, 0, .32);
+  }
+  .brand-name { font-size: 14px; font-weight: 700; letter-spacing: -.15px; white-space: nowrap; }
+  .brand-tag { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+  .conn {
+    display: flex; align-items: center; gap: 6px; flex: none;
+    font-size: 11px; color: var(--sub); padding: 3px 9px;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2);
+    max-width: 168px; min-width: 0;
+  }
+  .conn-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); display: inline-block; flex: none; }
+  .dot.online { background: var(--ok); box-shadow: 0 0 0 3px rgba(63, 191, 111, .13); }
+  .dot.connecting { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+  .dot.offline { background: var(--danger); }
+  .top-spacer { flex: 1; min-width: 4px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--sub);
+    border-radius: 999px; padding: 4px 10px; font-size: 11px; white-space: nowrap;
+  }
+  button.chip:hover { border-color: var(--brand); color: var(--text); }
+  .chip-key { color: var(--faint); font-size: 9.5px; text-transform: uppercase; letter-spacing: .5px; }
+  .session-chip { font-family: var(--mono); max-width: 230px; overflow: hidden; }
+  .session-chip span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 8px; flex: none; position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--sub); border: 1px solid transparent;
+  }
+  .icon-btn:hover { background: var(--brand-soft); color: var(--brand); }
+  .icon-btn:disabled { opacity: .35; }
+  .badge-dot {
+    position: absolute; top: 5px; right: 5px; width: 7px; height: 7px;
+    border-radius: 50%; background: var(--warn); border: 2px solid var(--card);
+  }
+  .btn-new {
+    flex: none; height: 32px; padding: 0 12px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    background: var(--brand); color: #fff; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(255, 102, 0, .24); transition: filter .15s, transform .15s;
+  }
+  .btn-new:hover { filter: brightness(1.07); }
+  .btn-new:active { transform: translateY(1px); }
+  .btn-new .icon { width: 15px; height: 15px; stroke-width: 2.3; }
+  .mob-only { display: none !important; }
+
+  .layout { flex: 1; min-height: 0; display: flex; position: relative; overflow: hidden; }
+
+  /* ---------- sidebars ---------- */
+  .side { flex: none; display: flex; flex-direction: column; min-height: 0; background: var(--card); position: relative; }
+  .left { border-right: 1px solid var(--line); }
+  .right { border-left: 1px solid var(--line); }
+  .side-head {
+    flex: none; display: flex; align-items: center; gap: 6px;
+    padding: 9px 10px; min-height: 49px; border-bottom: 1px solid var(--line);
+  }
+  .ws-path {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--sub); font-size: 11.5px; text-align: left;
+    overflow: hidden;
+  }
+  .ws-path:hover { border-color: var(--brand); color: var(--text); }
+  .ws-path .icon { width: 14px; height: 14px; color: var(--brand); }
+  .ws-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-tabs {
+    flex: none; display: flex; gap: 2px; padding: 7px 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .stab {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 9px 8px; margin-bottom: -1px;
+    border-bottom: 2px solid transparent; color: var(--sub); font-size: 12.5px;
+  }
+  .stab:hover { color: var(--text); }
+  .stab.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+  .count {
+    min-width: 17px; padding: 0 5px; line-height: 15px; text-align: center;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--panel-2);
+    color: var(--faint); font-size: 9.5px; font-weight: 400;
+  }
+  .side-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .tree-wrap, .sessions-wrap { flex: 1; min-height: 0; overflow-y: auto; }
+  .tree { padding: 6px 0 16px; }
+  .trow {
+    display: flex; align-items: center; gap: 6px; min-height: 31px;
+    padding: 3px 8px 3px 0; margin: 0 6px; border-radius: 6px;
+    color: var(--text); font-size: 13px; white-space: nowrap; cursor: pointer;
+    user-select: none;
+  }
+  .trow:hover { background: var(--brand-soft); }
+  .trow.active { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+  .trow .chev { width: 14px; height: 14px; flex: none; color: var(--faint); transition: transform .15s; }
+  .trow.open > .chev { transform: rotate(90deg); }
+  .trow .fico { width: 15px; height: 15px; flex: none; color: var(--brand); }
+  .trow .filico { width: 15px; height: 15px; flex: none; color: var(--faint); }
+  .trow.active .filico { color: var(--brand); }
+  .tspacer { width: 14px; flex: none; }
+  .tname { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .tsize { margin-left: auto; padding-left: 8px; flex: none; color: var(--faint); font-family: var(--mono); font-size: 9.5px; }
+  .trow.loading, .trow.empty { color: var(--faint); cursor: default; font-size: 11.5px; font-style: italic; }
+  .trow.loading:hover, .trow.empty:hover { background: transparent; }
+  .trow.loading .icon { width: 13px; height: 13px; }
+  .tree-note { margin: 7px 14px; color: var(--faint); font-size: 10.5px; line-height: 1.5; }
+  .tree-error { margin: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--sub); font-size: 11.5px; }
+  .tree-error .mini-btn { margin-top: 6px; }
+  .tkids { display: block; }
+
+  .sessions-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 12px 4px; color: var(--faint); font-size: 10.5px; }
+  .mini-btn {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px;
+    border-radius: 6px; color: var(--sub); font-size: 10.5px; white-space: nowrap;
+  }
+  .mini-btn:hover { background: var(--brand-soft); color: var(--brand); }
+  .mini-btn .icon { width: 12px; height: 12px; }
+  .session-list { list-style: none; margin: 0; padding: 4px 8px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .session-item {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px;
+    padding: 8px 9px; border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+  }
+  .session-item:hover { background: var(--brand-soft); }
+  .session-item.active { background: var(--brand-soft); border-color: rgba(255, 102, 0, .32); }
+  .s-title { grid-column: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-meta { grid-column: 1; color: var(--faint); font-family: var(--mono); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-del { grid-column: 2; grid-row: 1 / 3; align-self: center; width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--faint); opacity: .55; }
+  .s-del .icon { width: 13px; height: 13px; }
+  .s-del:hover { color: var(--danger); background: rgba(239, 100, 104, .1); opacity: 1; }
+  .empty-list { padding: 26px 14px; color: var(--faint); font-size: 11.5px; text-align: center; line-height: 1.7; }
+  .side-foot {
+    flex: none; border-top: 1px solid var(--line); padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 3px; color: var(--faint); font-size: 10.5px;
+  }
+  .foot-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .status-mini { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #footMeta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 9.5px; }
+
+  /* ---------- center ---------- */
+  .center { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; background: var(--bg); }
+  .feed {
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    padding: 18px 22px 26px; display: flex; flex-direction: column; gap: 12px;
+    scroll-behavior: smooth;
+  }
+  .feed > .msg, .feed > .think, .feed > .tool, .feed > .note, .feed > .error-card { flex: none; }
+  .empty {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 28px 16px; gap: 8px; animation: fade .25s ease;
+  }
+  .empty-logo {
+    width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--brand), #ffb27a); color: #fff;
+    font-size: 27px; font-weight: 800; margin-bottom: 4px;
+    box-shadow: 0 12px 34px rgba(255, 102, 0, .26);
+  }
+  .empty h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.25px; }
+  .empty > p { margin: 0; max-width: 500px; color: var(--sub); font-size: 12.5px; }
+  .empty-chips { width: min(560px, 100%); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+  .empty-chip {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    color: var(--sub); font-size: 12px; text-align: left;
+  }
+  .empty-chip:hover { border-color: var(--brand); color: var(--text); background: var(--brand-soft); }
+  .empty-chip .icon { width: 15px; height: 15px; color: var(--brand); }
+  .empty-hint { margin-top: 6px; color: var(--faint); font-size: 10.5px; line-height: 1.7; }
+
+  .msg { min-width: 0; overflow-wrap: anywhere; }
+  .msg.user {
+    align-self: flex-end; max-width: min(78%, 720px);
+    display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+    animation: rise .15s ease;
+  }
+  .msg.user .bubble {
+    padding: 9px 13px; border-radius: 12px 12px 3px 12px;
+    background: linear-gradient(135deg, var(--brand), #ff7a1f); color: #fff;
+    font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere;
+    box-shadow: 0 2px 12px rgba(255, 102, 0, .17);
+  }
+  .msg.user .meta { padding-right: 4px; color: var(--faint); font-size: 9.5px; }
+  .msg.agent {
+    align-self: flex-start; max-width: min(90%, 940px);
+    padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px;
+    border-top-left-radius: 3px; background: var(--card);
+    animation: rise .15s ease;
+  }
+  .agent-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--faint); font-size: 11px; font-weight: 600; min-width: 0; }
+  .agent-avatar { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; background: var(--brand-soft); color: var(--brand); flex: none; }
+  .agent-avatar .icon { width: 12px; height: 12px; }
+  .model-tag {
+    max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 0 6px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--panel-2); color: var(--faint); font-family: var(--mono); font-size: 9.5px; font-weight: 400;
+  }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--brand); animation: pulse 1s ease-in-out infinite; flex: none; }
+
+  .think {
+    align-self: flex-start; max-width: min(82%, 880px); overflow: hidden;
+    border: 1px dashed var(--line); border-radius: 10px; background: var(--panel-2);
+    color: var(--sub); font-size: 12.5px; animation: fade .15s ease;
+  }
+  .think summary { list-style: none; display: flex; align-items: center; gap: 7px; padding: 7px 11px; color: var(--faint); font-size: 11px; cursor: pointer; user-select: none; }
+  .think summary::-webkit-details-marker, .tool summary::-webkit-details-marker { display: none; }
+  .think summary .icon { width: 14px; height: 14px; }
+  .think summary .icon.chev { width: 13px; height: 13px; margin-left: auto; transition: transform .2s; }
+  .think[open] summary .icon.chev { transform: rotate(180deg); }
+  .think-count { color: var(--faint); font-size: 9.5px; }
+  .think-body {
+    padding: 7px 11px 9px; margin-top: -1px; border-top: 1px dashed var(--line);
+    color: var(--sub); font-size: 12px; font-style: italic; line-height: 1.65;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto;
+  }
+
+  .tool { align-self: stretch; max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--card); animation: rise .15s ease; }
+  .tool summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 7px 11px; min-height: 36px; cursor: pointer; user-select: none; }
+  .tool-ico { width: 17px; height: 17px; flex: none; color: var(--run); }
+  .tname { flex: none; color: var(--text); font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
+  .targs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
+  .tstat { flex: none; padding: 1px 7px; border-radius: 999px; font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+  .tstat.run { background: rgba(110, 168, 254, .16); color: var(--run); }
+  .tstat.ok { background: rgba(63, 191, 111, .14); color: var(--ok); }
+  .tstat.err { background: rgba(239, 100, 104, .14); color: var(--danger); }
+  .tstat.warn { background: rgba(229, 160, 64, .14); color: var(--warn); }
+  .tstat.idle { background: var(--panel-2); color: var(--faint); }
+  .tool .chev { width: 14px; height: 14px; flex: none; color: var(--faint); transition: transform .2s; }
+  .tool[open] .chev { transform: rotate(180deg); }
+  .tool-body { display: flex; flex-direction: column; gap: 7px; padding: 9px 11px 10px; border-top: 1px dashed var(--line); }
+  .tool-label { margin-bottom: 3px; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .7px; }
+  .tool pre {
+    margin: 0; padding: 8px 9px; max-height: 260px; overflow: auto;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+    color: var(--text); font-family: var(--mono); font-size: 11px; line-height: 1.55;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .tool pre.tool-result { max-height: 330px; }
+  .tool.failed { border-color: rgba(239, 100, 104, .38); }
+  .tool pre.tool-live { max-height: 240px; border-color: rgba(110, 168, 254, .28); }
+  .live-size { color: var(--run); font-family: var(--mono); font-size: 9px; }
+  .live-wrap[hidden] { display: none; }
+  .history-more {
+    align-self: center; display: inline-flex; align-items: center; gap: 6px;
+    margin: 2px 0 6px; padding: 5px 12px; border: 1px dashed var(--line); border-radius: 999px;
+    background: var(--panel-2); color: var(--sub); font-size: 10.5px; cursor: pointer;
+  }
+  .history-more:hover { border-color: var(--brand); color: var(--brand); }
+  .history-more:disabled { cursor: default; color: var(--faint); }
+  .history-more .icon { width: 12px; height: 12px; }
+  .tool-path {
+    align-self: flex-start; max-width: 100%; display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 7px; border-radius: 6px; background: var(--brand-soft); color: var(--brand);
+    font-family: var(--mono); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tool-path .icon { width: 12px; height: 12px; }
+  .tool-result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .result-size { color: var(--faint); font-family: var(--mono); font-size: 9px; }
+
+  .note {
+    align-self: center; display: flex; align-items: center; gap: 6px;
+    max-width: 92%; padding: 3px 12px; border: 1px dashed var(--line); border-radius: 999px;
+    background: var(--card); color: var(--faint); font-size: 11px; text-align: center;
+    white-space: pre-wrap; animation: fade .2s ease;
+  }
+  .note .icon { width: 13px; height: 13px; }
+  .note.warn { border-color: rgba(229, 160, 64, .35); background: rgba(229, 160, 64, .07); color: var(--warn); }
+  .note.brand { border-color: rgba(255, 102, 0, .3); background: var(--brand-soft); color: var(--brand); }
+  .note.done { border-color: rgba(63, 191, 111, .3); background: rgba(63, 191, 111, .06); color: var(--ok); }
+  .error-card {
+    align-self: stretch; display: flex; align-items: flex-start; gap: 8px;
+    padding: 9px 12px; border: 1px solid rgba(239, 100, 104, .34); border-radius: 10px;
+    background: rgba(239, 100, 104, .07); font-size: 12px; animation: fade .2s ease;
+  }
+  .error-card > .icon { width: 15px; height: 15px; margin-top: 1px; color: var(--danger); }
+  .error-body { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .error-body strong { margin-right: 5px; color: var(--danger); }
+
+  /* ---------- dock / composer ---------- */
+  .dock {
+    flex: none; padding: 0 16px calc(10px + env(safe-area-inset-bottom, 0px));
+    background: var(--bg);
+  }
+  .todo-card { margin-bottom: 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: 0 2px 10px rgba(0, 0, 0, .06); }
+  .todo-head { display: flex; align-items: center; gap: 7px; width: 100%; padding: 6px 11px; border-bottom: 1px solid transparent; background: var(--panel-2); color: var(--sub); font-size: 11.5px; font-weight: 600; text-align: left; }
+  .todo-card:not(.closed) .todo-head { border-bottom-color: var(--line); }
+  .todo-head > .icon { width: 14px; height: 14px; color: var(--brand); }
+  .todo-head .chev { width: 14px; height: 14px; margin-left: auto; color: var(--faint); transition: transform .2s; }
+  .todo-card.closed .todo-head .chev { transform: rotate(-90deg); }
+  .todo-list { display: flex; flex-direction: column; gap: 3px; padding: 6px 11px 8px; max-height: 150px; overflow: auto; }
+  .todo-card.closed .todo-list { display: none; }
+  .titem { display: flex; align-items: flex-start; gap: 7px; color: var(--sub); font-size: 11.5px; line-height: 1.5; }
+  .titem .icon { width: 13px; height: 13px; flex: none; margin-top: 1px; color: var(--faint); }
+  .titem.done { color: var(--faint); text-decoration: line-through; }
+  .titem.done .icon { color: var(--ok); }
+  .titem.now { color: var(--text); }
+  .titem.now .icon { color: var(--run); }
+  .titem .tlabel { margin-left: auto; padding-left: 8px; flex: none; color: var(--faint); font-size: 9.5px; text-decoration: none; }
+
+  .composer { border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 5px 22px rgba(0, 0, 0, .10); transition: border-color .15s, box-shadow .15s; }
+  .composer:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(255, 102, 0, .11); }
+  .composer textarea {
+    display: block; width: 100%; min-height: 44px; max-height: 170px; resize: none;
+    padding: 10px 13px 3px; border: 0; outline: none; background: transparent;
+    color: var(--text); font-size: 14px; line-height: 1.55;
+  }
+  .composer textarea::placeholder { color: var(--faint); }
+  .composer-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 9px 6px; }
+  .chips { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; flex-wrap: wrap; }
+  .model-chip { max-width: 270px; overflow: hidden; }
+  .model-chip span { overflow: hidden; text-overflow: ellipsis; }
+  .compact-chip { color: var(--run); border-color: rgba(110, 168, 254, .22); background: rgba(110, 168, 254, .09); }
+  .send-wrap { flex: none; margin-left: auto; }
+  .btn-send {
+    min-width: 84px; height: 34px; padding: 0 13px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    background: var(--brand); color: #fff; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(255, 102, 0, .2); transition: filter .15s, background .15s;
+  }
+  .btn-send:hover:not(:disabled) { filter: brightness(1.07); }
+  .btn-send:disabled { box-shadow: none; }
+  .btn-send.stop { background: var(--danger); box-shadow: 0 2px 10px rgba(239, 100, 104, .18); }
+  .btn-send .icon { width: 14px; height: 14px; stroke-width: 2; }
+  .stats {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 5px 13px;
+    padding: 5px 11px 7px; border-top: 1px dashed var(--line); border-radius: 0 0 12px 12px;
+    background: var(--panel-2); color: var(--faint); font-size: 10px;
+  }
+  .stats b { color: var(--sub); font-family: var(--mono); font-size: 10px; font-weight: 600; }
+  .ctxbar { display: inline-block; width: 54px; height: 5px; overflow: hidden; border-radius: 3px; background: var(--track); vertical-align: -1px; }
+  .ctxbar i { display: block; width: 0; height: 100%; border-radius: 3px; background: var(--brand); transition: width .25s; }
+  .ctxbar i.warn { background: var(--warn); }
+  .stat-session { margin-left: auto; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+
+  /* ---------- inspector ---------- */
+  .view-icon { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); color: var(--sub); }
+  .view-icon .icon { width: 15px; height: 15px; }
+  .view-title { flex: 1; min-width: 0; }
+  .view-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-family: var(--mono); font-size: 11.5px; }
+  .view-meta { margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 9.5px; }
+  .inspector-tabs { flex: none; display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); background: var(--card); }
+  .itab { display: inline-flex; align-items: center; gap: 5px; padding: 8px 11px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--sub); font-size: 12px; }
+  .itab:hover { color: var(--text); }
+  .itab.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+  .dotbadge { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); display: inline-block; }
+  .inspector-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  .ipane { position: absolute; inset: 0; display: none; overflow: auto; }
+  .ipane.active { display: block; }
+  .empty-view {
+    min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 30px 22px; color: var(--faint); text-align: center;
+  }
+  .empty-view > .icon { width: 30px; height: 30px; color: var(--line); stroke-width: 1.4; }
+  .empty-view h3 { margin: 0; color: var(--sub); font-size: 13px; font-weight: 600; }
+  .empty-view p { margin: 0; max-width: 270px; color: var(--faint); font-size: 11px; line-height: 1.65; }
+  .empty-view .btn { margin-top: 4px; }
+  .loading-view .icon { color: var(--brand); width: 22px; height: 22px; }
+
+  .file-banner { display: flex; align-items: center; gap: 6px; margin: 10px 10px 0; padding: 7px 9px; border: 1px solid rgba(229, 160, 64, .32); border-radius: 7px; background: rgba(229, 160, 64, .08); color: var(--warn); font-size: 10.5px; }
+  .file-banner .icon { width: 13px; height: 13px; }
+  .code-wrap { min-height: 100%; padding: 8px 0 30px; background: var(--code-bg); color: var(--code-fg); font-family: var(--mono); font-size: 12px; line-height: 1.6; --lnw: 44px; }
+  .code-info { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; padding: 2px 12px 8px; border-bottom: 1px solid rgba(255, 255, 255, .04); color: #6b7280; font-family: var(--mono); font-size: 9.5px; flex-wrap: wrap; }
+  .code-lines { min-width: 100%; width: max-content; }
+  .cl { display: flex; width: 100%; min-width: max-content; }
+  .cl:hover { background: rgba(255, 255, 255, .035); }
+  .ln { position: sticky; left: 0; z-index: 1; width: var(--lnw); flex: none; padding-right: 12px; background: var(--code-bg); color: #4b5263; text-align: right; user-select: none; }
+  .cl:hover .ln { color: #8b93a3; }
+  .lc { padding-right: 24px; white-space: pre; }
+  .tok-kw { color: #c678dd; }
+  .tok-str { color: #98c379; }
+  .tok-num { color: #d19a66; }
+  .tok-cm { color: #7f848e; font-style: italic; }
+  .tok-fn { color: #61afef; }
+  .tok-type { color: #e5c07b; }
+  .json-preview { min-height: 100%; margin: 0; padding: 14px 16px; background: var(--code-bg); color: var(--code-fg); font-family: var(--mono); font-size: 11.5px; line-height: 1.65; white-space: pre; overflow: auto; }
+  .safety-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 16px; padding: 16px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel-2); }
+  .safety-card > .icon { width: 22px; height: 22px; color: var(--warn); }
+  .safety-card h3 { margin: 0; font-size: 13px; }
+  .safety-card p { margin: 0; color: var(--sub); font-size: 11.5px; line-height: 1.65; }
+  .preview-meta { margin: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+  .preview-meta h3 { margin: 0 0 8px; font-size: 12.5px; }
+
+  .md { color: var(--text); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 10px; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 16px 0 7px; line-height: 1.35; font-weight: 650; }
+  .md h1 { font-size: 19px; }
+  .md h2 { font-size: 17px; }
+  .md h3 { font-size: 15px; }
+  .md h4, .md h5, .md h6 { font-size: 14px; }
+  .md ul, .md ol { margin: 6px 0 10px; padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md li::marker { color: var(--faint); }
+  .md .taskbox { display: inline-grid; place-items: center; width: 13px; height: 13px; margin-right: 6px; vertical-align: -2px; border: 1px solid var(--line); border-radius: 3px; color: #fff; }
+  .md .taskbox.checked { border-color: var(--ok); background: var(--ok); }
+  .md .taskbox .icon { width: 10px; height: 10px; stroke-width: 3; }
+  .md blockquote { margin: 8px 0; padding: 2px 0 2px 11px; border-left: 3px solid rgba(255, 102, 0, .3); color: var(--sub); }
+  .md hr { margin: 14px 0; border: 0; border-top: 1px solid var(--line); }
+  .md a { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; }
+  .md code { padding: 1px 5px; border-radius: 4px; background: var(--inline); font-family: var(--mono); font-size: .88em; overflow-wrap: anywhere; }
+  .md pre code { padding: 0; border-radius: 0; background: none; font-size: inherit; }
+  .md .table-scroll { margin: 10px 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; }
+  .md table { display: table; width: 100%; border-collapse: collapse; overflow-wrap: anywhere; font-size: 12.5px; }
+  .md th, .md td { padding: 6px 8px; border: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .md th:first-child, .md td:first-child { white-space: nowrap; }
+  .md th:last-child, .md td:last-child { border-right: 0; }
+  .md tbody tr:last-child td { border-bottom: 0; }
+  .md th { background: var(--panel-2); font-weight: 600; }
+  .md .codeblock { margin: 9px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--code-bg); }
+  .md .cb-head { display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; border-bottom: 1px solid rgba(255, 255, 255, .06); background: rgba(255, 255, 255, .02); }
+  .md .cb-lang { color: #7f848e; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
+  .md .cb-copy { display: inline-flex; align-items: center; gap: 4px; padding: 2px 5px; border-radius: 4px; color: #8b93a3; font-size: 9.5px; }
+  .md .cb-copy .icon { width: 10px; height: 10px; }
+  .md .cb-copy:hover { background: rgba(255, 255, 255, .06); color: #fff; }
+  .md .codeblock pre { margin: 0; padding: 9px 11px; max-height: 480px; overflow: auto; border: 0; }
+  .md .codeblock code { display: block; color: var(--code-fg); font-size: 12px; line-height: 1.55; white-space: pre; }
+  .md-pane { padding: 16px 18px 30px; overflow-wrap: anywhere; }
+
+  .act-section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .act-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .7px; text-transform: uppercase; }
+  .act-head .icon { width: 13px; height: 13px; }
+  .act-title { display: inline-flex; align-items: center; gap: 5px; }
+  .kv { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 4px 8px; margin: 0; font-size: 11px; }
+  .kv dt { color: var(--faint); }
+  .kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sub); font-family: var(--mono); font-size: 10.5px; }
+  .lsp-item { display: flex; flex-direction: column; gap: 3px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .lsp-item:last-child { border-bottom: 0; padding-bottom: 0; }
+  .lsp-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .lsp-lang { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-family: var(--mono); font-size: 11.5px; font-weight: 600; }
+  .lsp-line .tstat { margin-left: auto; }
+  .lsp-detail { color: var(--faint); font-size: 10px; line-height: 1.5; word-break: break-word; }
+  .proc-item { margin-bottom: 6px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+  .proc-head { display: flex; align-items: center; gap: 6px; color: var(--faint); font-family: var(--mono); font-size: 10px; }
+  .proc-head .tstat { margin-left: auto; }
+  .proc-item pre { margin: 6px 0 0; padding: 6px 7px; max-height: 110px; overflow: auto; border-radius: 5px; background: var(--bg); color: var(--sub); font-family: var(--mono); font-size: 10px; line-height: 1.45; white-space: pre-wrap; }
+  .act-empty { padding: 4px 0 6px; color: var(--faint); font-size: 11px; line-height: 1.6; }
+
+  /* ---------- modals ---------- */
+  .modal { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; padding: 18px; background: rgba(8, 10, 14, .62); backdrop-filter: blur(3px); }
+  .modal-card { width: min(540px, 100%); max-height: 90dvh; overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: 0 24px 80px rgba(0, 0, 0, .48); }
+  .modal-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 13px; }
+  .modal-head > .icon { width: 20px; height: 20px; margin-top: 1px; color: var(--brand); }
+  .modal-head h2 { margin: 0; font-size: 16px; line-height: 1.3; }
+  .modal-head p { margin: 3px 0 0; color: var(--faint); font-size: 11px; }
+  .modal-close { margin-left: auto; flex: none; }
+  .form-grid { display: flex; flex-direction: column; gap: 12px; }
+  .field label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: var(--sub); font-size: 11.5px; }
+  .field .hint { color: var(--faint); font-size: 9.5px; font-weight: 400; }
+  .field input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--bg); color: var(--text); font-size: 13px; }
+  .field input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(255, 102, 0, .1); }
+  .field input[readonly] { background: var(--panel-2); color: var(--faint); cursor: not-allowed; }
+  .field-hint { margin-top: 3px; color: var(--faint); font-size: 9.5px; line-height: 1.55; }
+  .form-error { padding: 7px 9px; border: 1px solid rgba(239, 100, 104, .26); border-radius: 7px; background: rgba(239, 100, 104, .08); color: var(--danger); font-size: 11px; white-space: pre-wrap; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .btn { height: 34px; padding: 0 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-size: 12px; }
+  .btn:hover:not(:disabled) { border-color: var(--faint); }
+  .btn.primary { border-color: var(--brand); background: var(--brand); color: #fff; font-weight: 600; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.07); }
+  .btn.danger { border-color: var(--danger); background: var(--danger); color: #fff; font-weight: 600; }
+  .consent-lead { margin: 0 0 8px; color: var(--sub); font-size: 12px; line-height: 1.7; }
+  .consent-box { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--sub); font-family: var(--mono); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+  .consent-label { display: block; margin-bottom: 2px; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
+
+  /* ---------- overlays ---------- */
+  .scrim { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .45); backdrop-filter: blur(1px); }
+  .resizer { width: 6px; flex: none; position: relative; z-index: 5; cursor: col-resize; background: transparent; touch-action: none; }
+  .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: transparent; transition: background .15s; }
+  .resizer:hover::after, .resizer.dragging::after { background: var(--brand); }
+  .resizing, .resizing * { cursor: col-resize !important; user-select: none !important; }
+  .edge {
+    position: absolute; top: 50%; z-index: 6; transform: translateY(-50%);
+    width: 16px; height: 64px; display: none; align-items: center; justify-content: center;
+    border: 1px solid var(--line); background: var(--card); color: var(--faint);
+  }
+  .edge:not([hidden]) { display: flex; }
+  .edge .icon { width: 13px; height: 13px; }
+  .edge:hover { border-color: var(--brand); color: var(--brand); }
+  .edge.left { left: 0; border-left: 0; border-radius: 0 7px 7px 0; }
+  .edge.right { right: 0; border-right: 0; border-radius: 7px 0 0 7px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 200;
+    max-width: min(90vw, 480px); padding: 9px 15px; transform: translate(-50%, 8px);
+    border: 1px solid var(--line); border-radius: 9px; background: var(--elevated); color: var(--text);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .35); font-size: 12px; text-align: center;
+    opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.error { border-color: rgba(239, 100, 104, .4); }
+
+  @media (min-width: 901px) {
+    body.left-collapsed #leftPanel { width: 0 !important; overflow: hidden; border-right-color: transparent; }
+    body.left-collapsed #rzLeft { display: none !important; }
+  }
+  @media (min-width: 1181px) {
+    body.right-collapsed #rightPanel { width: 0 !important; overflow: hidden; border-left-color: transparent; }
+    body.right-collapsed #rzRight { display: none !important; }
+  }
+
+  /* ---------- tablets: right inspector becomes a drawer ---------- */
+  @media (max-width: 1180px) {    #rightToggle { display: inline-flex !important; }
+    .right {
+      position: fixed; top: 0; right: 0; bottom: 0; z-index: 80;
+      width: min(92vw, 420px) !important; max-width: 100vw;
+      border-left: 1px solid var(--line);
+      box-shadow: -24px 0 60px rgba(0, 0, 0, .38);
+      transform: translateX(105%);
+      transition: transform .22s ease;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-right: env(safe-area-inset-right, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      will-change: transform;
+    }
+    body.right-open .right { transform: none; }
+    #rightCollapse { display: none !important; }
+    #rightClose { display: inline-flex !important; }
+    #rzRight { display: none !important; }
+    .edge.right { display: none !important; }
+  }
+
+  /* ---------- phones/tablets: left workspace becomes a drawer ---------- */
+  @media (max-width: 900px) {
+    #leftToggle { display: inline-flex !important; }
+    .left {
+      position: fixed; top: 0; left: 0; bottom: 0; z-index: 80;
+      width: min(88vw, 320px) !important; max-width: 100vw;
+      border-right: 1px solid var(--line);
+      box-shadow: 24px 0 60px rgba(0, 0, 0, .38);
+      transform: translateX(-105%);
+      transition: transform .22s ease;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      will-change: transform;
+    }
+    body.left-open .left { transform: none; }
+    #leftCollapse { display: none !important; }
+    #leftClose { display: inline-flex !important; }
+    #rzLeft { display: none !important; }
+    .edge.left { display: none !important; }
+    .feed { padding-left: calc(18px + env(safe-area-inset-left, 0px)); padding-right: calc(18px + env(safe-area-inset-right, 0px)); }
+    .dock { padding-left: calc(16px + env(safe-area-inset-left, 0px)); padding-right: calc(16px + env(safe-area-inset-right, 0px)); }
+  }
+
+  @media (max-width: 1050px) {
+    .session-chip { display: none !important; }
+    .brand-tag { display: none; }
+  }
+
+  /* ---------- compact phones ---------- */
+  @media (max-width: 640px) {
+    .topbar { padding-left: calc(8px + env(safe-area-inset-left, 0px)); padding-right: calc(8px + env(safe-area-inset-right, 0px)); gap: 4px; }
+    .brand { gap: 6px; margin-right: 0; }
+    .brand-name { font-size: 13px; }
+    .conn { display: none !important; }
+    #activityBtn { display: none !important; }
+    .btn-new { width: 34px; padding: 0; }
+    .new-label { display: none; }
+    .icon-btn { width: 34px; height: 34px; }
+    .right { width: 100% !important; }
+    .side-head { padding: 8px 9px; }
+    .feed { padding: 14px calc(12px + env(safe-area-inset-right, 0px)) 20px calc(12px + env(safe-area-inset-left, 0px)); gap: 10px; }
+    .msg.user { max-width: 90%; }
+    .msg.agent { max-width: 100%; padding: 9px 11px; }
+    .think { max-width: 100%; }
+    .targs { display: none; }
+    .tname { max-width: 42%; overflow: hidden; text-overflow: ellipsis; }
+    .tool summary { gap: 6px; padding: 7px 9px; }
+    .tool-body { padding: 8px 9px 9px; }
+    .dock { padding: 0 calc(10px + env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); }
+    .composer textarea { font-size: 16px; padding: 9px 11px 2px; max-height: 140px; }
+    .composer-bar { padding: 3px 7px 5px; gap: 5px; }
+    .model-chip { max-width: 185px; }
+    .compact-chip { display: none !important; }
+    .btn-send { min-width: 76px; }
+    .stats { gap: 4px 10px; padding: 5px 9px 6px; }
+    .stat-session { display: none !important; }
+    .ctxbar { width: 44px; }
+    .todo-list { max-height: 128px; }
+    .empty { justify-content: flex-start; padding: 30px 8px 18px; }
+    .empty h1 { font-size: 20px; }
+    .empty-chips { grid-template-columns: 1fr; width: 100%; max-width: 420px; }
+    .empty-chip { padding: 9px 11px; }
+    .empty-hint { max-width: 340px; }
+    .modal { align-items: flex-end; padding: 0; }
+    .modal-card {
+      width: 100%; max-width: 100%; max-height: 92dvh;
+      border-radius: 16px 16px 0 0; border-bottom: 0;
+      padding: 18px calc(16px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px));
+    }
+    .toast { bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+    .code-wrap { font-size: 11.5px; }
+    .md-pane { padding: 13px 13px 26px; }
+    .act-section { padding: 11px 13px; }
+  }
+
+  @media (max-width: 400px) {
+    .brand-tag { display: none; }
+    .brand-name { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+    .stats .stat-inout { display: none; }
+  }
+
+  @media (max-height: 520px) {
+    .empty { justify-content: flex-start; overflow-y: auto; padding: 18px 10px; }
+    .empty-logo { display: none; }
+    .empty > p, .empty-hint { display: none; }
+    .empty h1 { font-size: 20px; }
+    .empty-chips { margin-top: 6px; width: min(620px, 100%); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a6.8 6.8 0 0 0 11 11z"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.96 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.96a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.96 4.6 1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V8.96c.15.64.68 1.04 1.56 1.04H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></symbol>
+  <symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M4 17l6-5-6-5M12 19h8"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2l2.2 6.8L21 11l-6.8 2.2L12 20l-2.2-6.8L3 11l6.8-2.2z"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.7L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-todo" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.5-2.5z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14L21 3"/></symbol>
+</svg>
+
+<div class="app" id="app">
+  <header class="topbar">
+    <button id="leftToggle" class="icon-btn mob-only" type="button" title="工作区" aria-label="打开工作区">
+      <svg class="icon" aria-hidden="true"><use href="#i-menu"></use></svg>
+    </button>
+    <div class="brand">
+      <div class="logo" aria-hidden="true">R</div>
+      <span class="brand-name">RustedHarness</span>
+      <span class="brand-tag">AI Agent Harness</span>
+    </div>
+    <div id="connPill" class="conn connecting" title="连接状态">
+      <span id="statusDot" class="dot connecting"></span>
+      <span id="statusText" class="conn-text">连接中…</span>
+    </div>
+    <div class="top-spacer"></div>
+    <button id="sessionChip" class="chip session-chip" type="button" title="当前会话">
+      <span class="chip-key">session</span><span id="sessionChipValue">—</span>
+    </button>
+    <button id="activityBtn" class="icon-btn" type="button" title="活动：LSP 与后台进程" aria-label="活动">
+      <svg class="icon" aria-hidden="true"><use href="#i-activity"></use></svg>
+      <span id="activityBadge" class="badge-dot" hidden></span>
+    </button>
+    <button id="rightToggle" class="icon-btn mob-only" type="button" title="查看器" aria-label="打开查看器">
+      <svg class="icon" aria-hidden="true"><use href="#i-panel"></use></svg>
+    </button>
+    <button id="themeBtn" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">
+      <svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg>
+    </button>
+    <button id="settingsBtn" class="icon-btn" type="button" title="设置" aria-label="设置">
+      <svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>
+    </button>
+    <button id="newBtn" class="btn-new" type="button" title="新建会话">
+      <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span class="new-label">新会话</span>
+    </button>
+  </header>
+
+  <div class="layout" id="layout">
+    <aside class="side left" id="leftPanel" aria-label="工作区">
+      <div class="side-head">
+        <button class="ws-path" id="wsPath" type="button" title="切换工作目录">
+          <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+          <span id="wsPathText">未连接工作区</span>
+        </button>
+        <button class="icon-btn" id="treeRefresh" type="button" title="刷新文件树" aria-label="刷新文件树">
+          <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+        </button>
+        <button class="icon-btn desk-only" id="leftCollapse" type="button" title="折叠工作区" aria-label="折叠工作区">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+        </button>
+        <button class="icon-btn mob-only" id="leftClose" type="button" title="关闭工作区" aria-label="关闭工作区">
+          <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+        </button>
+      </div>
+      <div class="side-tabs" role="tablist" aria-label="工作区面板">
+        <button class="stab active" type="button" data-tab="files" role="tab">文件</button>
+        <button class="stab" type="button" data-tab="sessions" role="tab">会话 <span class="count" id="sessionCount">0</span></button>
+      </div>
+      <div class="side-body">
+        <div class="tree-wrap" id="filesTab">
+          <div class="tree" id="tree">
+            <div class="trow loading"><svg class="icon spin" aria-hidden="true"><use href="#i-refresh"></use></svg>正在读取工作区…</div>
+          </div>
+        </div>
+        <div class="sessions-wrap" id="sessionsTab" hidden>
+          <div class="sessions-head">
+            <span>本地会话记录</span>
+            <button class="mini-btn" id="refreshSessions" type="button">
+              <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>刷新
+            </button>
+          </div>
+          <ul class="session-list" id="sessions"></ul>
+        </div>
+      </div>
+      <div class="side-foot">
+        <div class="foot-row">
+          <span class="status-mini"><span id="footDot" class="dot connecting"></span><span id="footStatus">连接中…</span></span>
+          <button class="mini-btn" id="reconnectBtn" type="button" hidden>重连</button>
+        </div>
+        <div id="footMeta">尚未建立会话</div>
+      </div>
+    </aside>
+
+    <div class="resizer" id="rzLeft" role="separator" aria-label="调整工作区宽度"></div>
+    <div class="edge left" id="edgeLeft" hidden title="展开工作区">
+      <svg class="icon" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+    </div>
+
+    <main class="center">
+      <section class="feed" id="feed" aria-live="polite" aria-label="会话消息"></section>
+      <div class="dock">
+        <section class="todo-card closed" id="todoCard" hidden>
+          <button class="todo-head" id="todoHead" type="button" aria-expanded="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-todo"></use></svg>
+            <span>任务</span>
+            <span class="tstat idle" id="todoCount">0/0</span>
+            <svg class="icon chev" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+          </button>
+          <div class="todo-list" id="todoList"></div>
+        </section>
+        <section class="composer" aria-label="消息输入">
+          <textarea id="input" rows="1" placeholder="给智能体派任务。Enter 发送，Shift+Enter 换行。"></textarea>
+          <div class="composer-bar">
+            <div class="chips">
+              <button class="chip model-chip" id="modelChip" type="button" title="切换 agent 模型">
+                <span class="chip-key">agent</span><span id="modelChipValue">—</span>
+              </button>
+              <button class="chip compact-chip" id="compactChip" type="button" title="压缩模型（来自配置，只读）">
+                <span class="chip-key">compact</span><span id="compactChipValue">—</span>
+              </button>
+            </div>
+            <div class="send-wrap">
+              <button class="btn-send" id="sendBtn" type="button" title="发送">
+                <svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg><span id="sendLabel">发送</span>
+              </button>
+            </div>
+          </div>
+          <div class="stats" id="stats" title="token 统计完全来自 API 返回的 usage 字段，不做本地估算">
+            <span class="stat">上下文 <b id="ctxText">—</b> <span id="ctxNums"></span></span>
+            <span class="ctxbar" aria-hidden="true"><i id="ctxFill"></i></span>
+            <span class="stat stat-inout">in <b id="statIn">0</b></span>
+            <span class="stat stat-inout">out <b id="statOut">0</b></span>
+            <span class="stat stat-session" id="statSession">会话 —</span>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <div class="resizer" id="rzRight" role="separator" aria-label="调整查看器宽度"></div>
+    <div class="edge right" id="edgeRight" hidden title="展开查看器">
+      <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+    </div>
+
+    <aside class="side right" id="rightPanel" aria-label="只读查看器">
+      <div class="side-head">
+        <span class="view-icon" id="viewIcon">
+          <svg class="icon" aria-hidden="true"><use href="#i-eye"></use></svg>
+        </span>
+        <div class="view-title">
+          <div class="view-file" id="viewFile">未打开文件</div>
+          <div class="view-meta" id="viewMeta">从左侧文件树选择</div>
+        </div>
+        <button class="icon-btn" id="fileRefresh" type="button" title="重新读取" aria-label="重新读取" disabled>
+          <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+        </button>
+        <button class="icon-btn" id="copyFileBtn" type="button" title="复制文件内容" aria-label="复制文件内容" disabled>
+          <svg class="icon" aria-hidden="true"><use href="#i-copy"></use></svg>
+        </button>
+        <button class="icon-btn desk-only" id="rightCollapse" type="button" title="折叠查看器" aria-label="折叠查看器">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+        </button>
+        <button class="icon-btn mob-only" id="rightClose" type="button" title="关闭查看器" aria-label="关闭查看器">
+          <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+        </button>
+      </div>
+      <div class="inspector-tabs" role="tablist" aria-label="查看器面板">
+        <button class="itab active" type="button" data-itab="code" role="tab">代码</button>
+        <button class="itab" type="button" data-itab="preview" role="tab">预览</button>
+        <button class="itab" type="button" data-itab="activity" role="tab">
+          活动 <span class="dotbadge" id="activityDot" hidden></span>
+        </button>
+      </div>
+      <div class="inspector-body">
+        <div class="ipane active" id="paneCode">
+          <div class="empty-view" id="codeEmpty">
+            <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
+            <h3>尚未打开文件</h3>
+            <p>从左侧文件树选择一个文件，这里会显示只读源码、行号与预览。</p>
+          </div>
+          <div id="codeContent" hidden></div>
+        </div>
+        <div class="ipane" id="panePreview">
+          <div class="empty-view" id="previewEmpty">
+            <svg class="icon" aria-hidden="true"><use href="#i-eye"></use></svg>
+            <h3>没有可预览的内容</h3>
+            <p>Markdown 会渲染为文档，JSON 会格式化展示；HTML 出于安全考虑不会执行。</p>
+          </div>
+          <div id="previewContent" hidden></div>
+        </div>
+        <div class="ipane" id="paneActivity">
+          <div id="activityContent"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<div id="settingsModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>
+      <div>
+        <h2 id="settingsTitle">会话设置</h2>
+        <p>设置会立即作用于当前会话；令牌只保存在本机浏览器。</p>
+      </div>
+      <button class="icon-btn modal-close" type="button" data-close="#settingsModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <form id="settingsForm">
+      <div class="form-grid">
+        <div class="field">
+          <label for="setModel">Agent 模型 <span class="hint">当前会话</span></label>
+          <input id="setModel" type="text" autocomplete="off" spellcheck="false" placeholder="例如 gpt-4.1">
+          <div class="field-hint">通过 set_agent_model 立即切换；下一次请求开始生效。</div>
+        </div>
+        <div class="field">
+          <label for="setCompact">压缩模型 <span class="hint">只读</span></label>
+          <input id="setCompact" type="text" readonly tabindex="-1">
+          <div class="field-hint">来自配置 models.compact；达到上下文阈值时由后端自动压缩。</div>
+        </div>
+        <div class="field">
+          <label for="setCwd">工作目录 <span class="hint">路径锚点</span></label>
+          <input id="setCwd" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/workspace">
+          <div class="field-hint">切换后，所有相对路径、文件树与只读查看器都锚定到该目录。</div>
+        </div>
+        <div class="field">
+          <label for="setToken">访问令牌 <span class="hint">Bearer token</span></label>
+          <input id="setToken" type="password" autocomplete="off" placeholder="服务未启用鉴权时可留空">
+          <div class="field-hint">保存在 localStorage，通过 Authorization 与 WebSocket 查询参数发送。</div>
+        </div>
+        <div class="form-error" id="settingsError" hidden></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" type="button" data-close="#settingsModal">取消</button>
+        <button class="btn primary" type="submit" id="settingsSave">应用设置</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="consentModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="consentTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
+      <div>
+        <h2 id="consentTitle">下载语言服务器？</h2>
+        <p>桌面代码智能依赖本地 LSP；文件会校验 SHA-256 后解压。</p>
+      </div>
+    </div>
+    <p class="consent-lead" id="consentLead"></p>
+    <div class="consent-box"><span class="consent-label">下载地址</span><span id="consentUrl"></span></div>
+    <div class="consent-box"><span class="consent-label">SHA-256</span><span id="consentSha"></span></div>
+    <div class="consent-box"><span class="consent-label">运行时依赖</span><span id="consentRuntime">—</span></div>
+    <p class="consent-lead">下载仅允许 HTTPS 与白名单主机，并在解压前校验固定摘要。</p>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="denyBtn">拒绝</button>
+      <button class="btn primary" type="button" id="allowBtn">允许下载</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+(() => {
+  'use strict';
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = (id) => document.getElementById(id);
+  const feedEl = $('feed');
+  const inputEl = $('input');
+  const mqLeft = window.matchMedia('(max-width: 900px)');
+  const mqRight = window.matchMedia('(max-width: 1180px)');
+  const clampInt = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
+
+  const KEYWORDS = new Set((
+    'as async await break case catch class const continue crate def default delete do dyn else elif enum except export extends extern false finally fn for from function go goto if impl implements import in instanceof interface is lambda let loop match mod move mut new none None null of or pass private protected pub public raise readonly ref return self Self static struct super switch this throw trait true try type typeof undefined unsafe use var void where while with yield ' +
+    'abstract boolean byte char double final float native short strictfp synchronized throws transient volatile ' +
+    'select insert update delete create table drop alter join left right inner outer on group order by limit offset union all distinct having values into set and not like between exists ' +
+    'package func defer chan map range fallthrough ' +
+    'echo local export readonly declare function fi then done esac ' +
+    'not in is'
+  ).split(/\s+/).filter(Boolean));
+
+  const HISTORY_INITIAL = 160;
+  const HISTORY_PAGE = 120;
+  const HISTORY_MAX = 1200;
+
+  const state = {
+    ws: null,
+    token: '',
+    resumeId: null,
+    sessionId: null,
+    cwd: '',
+    agentModel: '',
+    compactModel: '',
+    config: null,
+    busy: false,
+    consentId: null,
+    manualClose: false,
+    todos: [],
+    lsp: new Map(),
+    processes: new Map(),
+    contextTokens: 0,
+    contextLimit: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    assistantEl: null,
+    assistantRaf: 0,
+    reasoningEl: null,
+    toolCards: new Map(),
+    batchRender: false,
+    appendTarget: null,
+    history: null,
+    historyBtn: null,
+    activeFile: null,
+    fileInfo: null,
+    fileToken: 0,
+    inspectorTab: 'code',
+    treeGen: 0,
+    treeTimer: 0,
+    sessions: [],
+    sideTab: 'files',
+    todoClosed: false,
+    leftWidth: 264,
+    rightWidth: 396,
+    leftCollapsed: false,
+    rightCollapsed: false
+  };
+  let toastTimer = 0;
+
+  /* ---------------- small helpers ---------------- */
+  function icon(name, cls) {
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'icon' + (cls ? ' ' + cls : ''));
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS(NS, 'use');
+    use.setAttribute('href', '#i-' + name);
+    svg.appendChild(use);
+    return svg;
+  }
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function storeGet(key, fallback) {
+    try {
+      const value = localStorage.getItem(key);
+      return value == null ? fallback : value;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function storeSet(key, value) {
+    try {
+      if (value == null) localStorage.removeItem(key);
+      else localStorage.setItem(key, value);
+    } catch (_) {}
+  }
+
+  const shortId = (id) => (String(id || '').slice(0, 8) || '—');
+  const basename = (path) => {
+    const parts = String(path || '').split(/[\\/]+/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : '';
+  };
+  const isConnected = () => !!state.ws && state.ws.readyState === WebSocket.OPEN;
+
+  function fmtBytes(value) {
+    const n = Number(value) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  function fmtTokens(value) {
+    const n = Number(value) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1000000) {
+      const v = n / 1000;
+      return (v < 10 ? v.toFixed(1) : String(Math.round(v))) + 'k';
+    }
+    const v = n / 1000000;
+    return (v < 10 ? v.toFixed(2) : v.toFixed(1)) + 'M';
+  }
+
+  function fmtWhen(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value || '').slice(0, 16);
+    const now = new Date();
+    const sameDay = date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    if (sameDay) return hh + ':' + mm;
+    return String(date.getMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getDate()).padStart(2, '0') + ' ' + hh + ':' + mm;
+  }
+
+  function truncateText(value, max) {
+    const text = String(value == null ? '' : value);
+    if (text.length <= max) return text;
+    return text.slice(0, max) + '\n…（已截断 ' + (text.length - max) + ' 个字符）';
+  }
+
+  function toast(message, kind) {
+    const node = $('toast');
+    if (!node) return;
+    const dock = document.querySelector('.dock');
+    if (dock) {
+      const above = window.innerHeight - dock.getBoundingClientRect().top + 10;
+      node.style.bottom = Math.max(16, Math.min(above, window.innerHeight - 64)) + 'px';
+    }
+    node.textContent = String(message);
+    node.className = 'toast show' + (kind === 'error' ? ' error' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { node.className = 'toast'; }, 2600);
+  }
+
+  async function copyText(value) {
+    const text = String(value == null ? '' : value);
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      area.style.pointerEvents = 'none';
+      document.body.appendChild(area);
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /* ---------------- theme ---------------- */
+  function themeIsLight() {
+    return document.documentElement.getAttribute('data-theme') === 'light';
+  }
+
+  function applyTheme(light, persist) {
+    if (light) document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    if (persist) storeSet('rh_theme', light ? 'light' : 'dark');
+    const meta = $('themeColor');
+    if (meta) meta.setAttribute('content', light ? '#f5f7fa' : '#12141a');
+    const button = $('themeBtn');
+    if (button) {
+      button.replaceChildren(icon(light ? 'moon' : 'sun'));
+      button.title = light ? '切换到深色主题' : '切换到浅色主题';
+      button.setAttribute('aria-label', button.title);
+    }
+  }
+
+  function toggleTheme() {
+    applyTheme(!themeIsLight(), true);
+  }
+
+  /* ---------------- modals / settings ---------------- */
+  function openModal(id) {
+    const modal = $(id);
+    if (!modal) return;
+    modal.hidden = false;
+  }
+
+  function closeModal(id) {
+    const modal = $(id);
+    if (!modal) return;
+    modal.hidden = true;
+  }
+
+  function setSettingsError(message) {
+    const node = $('settingsError');
+    if (!node) return;
+    node.textContent = message || '';
+    node.hidden = !message;
+  }
+
+  function openSettings(focus) {
+    const cfg = state.config || {};
+    $('setModel').value = state.agentModel || cfg.agent_model || '';
+    $('setCompact').value = state.compactModel || cfg.compact_model || '';
+    $('setCwd').value = state.cwd || cfg.cwd || '';
+    $('setToken').value = state.token || '';
+    setSettingsError('');
+    openModal('settingsModal');
+    setTimeout(() => {
+      let target = $('setModel');
+      if (focus === 'token') target = $('setToken');
+      else if (focus === 'cwd') target = $('setCwd');
+      else if (focus === 'compact') target = $('setCompact');
+      try {
+        target.focus();
+        if (target.select) target.select();
+      } catch (_) {}
+    }, 40);
+  }
+
+  function saveSettings(event) {
+    if (event) event.preventDefault();
+    const model = $('setModel').value.trim();
+    const cwd = $('setCwd').value.trim();
+    const token = $('setToken').value.trim();
+    const connected = isConnected();
+    if (connected && !model) {
+      setSettingsError('Agent 模型不能为空。');
+      $('setModel').focus();
+      return;
+    }
+    if (connected && !cwd) {
+      setSettingsError('工作目录不能为空。');
+      $('setCwd').focus();
+      return;
+    }
+    if (!connected) {
+      if (token !== state.token) {
+        state.token = token;
+        storeSet('rh_token', token || null);
+        closeModal('settingsModal');
+        connect(state.sessionId || state.resumeId || null);
+        toast('令牌已保存，正在重新连接');
+      } else {
+        setSettingsError('连接尚未建立，无法切换模型或工作目录。');
+      }
+      return;
+    }
+    let modelChanged = false;
+    let cwdChanged = false;
+    let tokenChanged = false;
+
+    if (model !== state.agentModel) {
+      if (!sendCommand({ type: 'set_agent_model', model })) {
+        setSettingsError('发送模型切换命令失败。');
+        return;
+      }
+      state.agentModel = model;
+      modelChanged = true;
+      updateModelChips();
+      updateActivityIfVisible();
+    }
+
+    if (cwd !== state.cwd) {
+      if (!sendCommand({ type: 'set_cwd', path: cwd })) {
+        setSettingsError('发送工作目录切换命令失败。');
+        return;
+      }
+      cwdChanged = true;
+    }
+
+    if (token !== state.token) {
+      state.token = token;
+      storeSet('rh_token', token || null);
+      tokenChanged = true;
+    }
+
+    closeModal('settingsModal');
+
+    if (modelChanged && cwdChanged) toast('模型已切换，正在切换工作目录…');
+    else if (modelChanged) toast('模型已切换为 ' + model);
+    else if (cwdChanged) toast('正在切换工作目录…');
+    else if (tokenChanged) toast('令牌已保存，将在下次连接时生效');
+    else toast('设置已保存');
+  }
+
+  function showConsent(event) {
+    state.consentId = event.id;
+    $('consentTitle').textContent = '下载 ' + event.display_name + ' ' + event.version + '？';
+    $('consentLead').textContent = '工作区需要 ' + event.display_name + ' ' + event.version +
+      ' 才能提供精确的代码智能。是否允许现在下载？';
+    $('consentUrl').textContent = event.url || '';
+    $('consentSha').textContent = event.sha256 || '';
+    $('consentRuntime').textContent = event.runtime_hint || '无额外运行时依赖';
+    openModal('consentModal');
+  }
+
+  function decideConsent(allow) {
+    if (state.consentId && isConnected()) {
+      sendCommand({ type: 'download_consent', id: state.consentId, allow: !!allow });
+      addNote(allow ? '已允许下载语言服务器' : '已拒绝下载语言服务器', allow ? 'done' : 'warn');
+    }
+    state.consentId = null;
+    closeModal('consentModal');
+  }
+
+  /* ---------------- connection status ---------------- */
+  function setConn(kind, text) {
+    const dot = $('statusDot');
+    const footDot = $('footDot');
+    if (dot) dot.className = 'dot ' + kind;
+    if (footDot) footDot.className = 'dot ' + kind;
+    if ($('statusText')) $('statusText').textContent = text;
+    if ($('footStatus')) $('footStatus').textContent = text;
+    const pill = $('connPill');
+    if (pill) {
+      pill.className = 'conn ' + kind;
+      pill.title = text;
+    }
+    if ($('reconnectBtn')) $('reconnectBtn').hidden = kind !== 'offline';
+    updateActivityIfVisible();
+    updateComposer();
+  }
+
+  /* ---------------- responsive panels ---------------- */
+  const isLeftDrawer = () => mqLeft.matches;
+  const isRightDrawer = () => mqRight.matches;
+
+  function syncScrim() {
+    const scrim = $('scrim');
+    if (!scrim) return;
+    scrim.hidden = !(document.body.classList.contains('left-open') ||
+      document.body.classList.contains('right-open'));
+  }
+
+  function closeLeftDrawer() {
+    document.body.classList.remove('left-open');
+    syncScrim();
+  }
+
+  function closeRightDrawer() {
+    document.body.classList.remove('right-open');
+    syncScrim();
+  }
+
+  function closeDrawers() {
+    document.body.classList.remove('left-open');
+    document.body.classList.remove('right-open');
+    syncScrim();
+  }
+
+  function openLeftDrawer() {
+    if (!isLeftDrawer()) {
+      setLeftCollapsed(false);
+      return;
+    }
+    closeRightDrawer();
+    document.body.classList.add('left-open');
+    syncScrim();
+  }
+
+  function toggleLeftDrawer() {
+    if (document.body.classList.contains('left-open')) closeLeftDrawer();
+    else openLeftDrawer();
+  }
+
+  function openRightPanel() {
+    if (isRightDrawer()) {
+      closeLeftDrawer();
+      document.body.classList.add('right-open');
+      syncScrim();
+    } else if (state.rightCollapsed) {
+      setRightCollapsed(false);
+    }
+  }
+
+  function toggleRightPanel() {
+    if (isRightDrawer()) {
+      if (document.body.classList.contains('right-open')) closeRightDrawer();
+      else openRightPanel();
+    } else {
+      setRightCollapsed(!state.rightCollapsed);
+    }
+  }
+
+  function syncEdges() {
+    const rightDrawer = isRightDrawer();
+    const leftDrawer = isLeftDrawer();
+    $('edgeLeft').hidden = !(state.leftCollapsed && !leftDrawer);
+    $('edgeRight').hidden = !(state.rightCollapsed && !rightDrawer);
+    $('rzLeft').hidden = state.leftCollapsed || leftDrawer;
+    $('rzRight').hidden = state.rightCollapsed || rightDrawer;
+  }
+
+  function setLeftCollapsed(collapsed) {
+    state.leftCollapsed = !!collapsed;
+    storeSet('rh_left_collapsed', collapsed ? '1' : '0');
+    document.body.classList.toggle('left-collapsed', state.leftCollapsed);
+    syncEdges();
+  }
+
+  function setRightCollapsed(collapsed) {
+    state.rightCollapsed = !!collapsed;
+    storeSet('rh_right_collapsed', collapsed ? '1' : '0');
+    document.body.classList.toggle('right-collapsed', state.rightCollapsed);
+    syncEdges();
+  }
+
+  function initLayout() {
+    state.leftWidth = clampInt(parseInt(storeGet('rh_left_w', '264'), 10) || 264, 210, 460);
+    state.rightWidth = clampInt(parseInt(storeGet('rh_right_w', '396'), 10) || 396, 300, 720);
+    state.leftCollapsed = storeGet('rh_left_collapsed', '0') === '1';
+    state.rightCollapsed = storeGet('rh_right_collapsed', '0') === '1';
+    state.sideTab = storeGet('rh_side_tab', 'files') === 'sessions' ? 'sessions' : 'files';
+    state.todoClosed = storeGet('rh_todo_closed', '0') === '1';
+    $('leftPanel').style.width = state.leftWidth + 'px';
+    $('rightPanel').style.width = state.rightWidth + 'px';
+    document.body.classList.toggle('left-collapsed', state.leftCollapsed);
+    document.body.classList.toggle('right-collapsed', state.rightCollapsed);
+    syncEdges();
+  }
+
+  function bindResizer(handle, side) {
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      if (side === 'left' && isLeftDrawer()) return;
+      if (side === 'right' && isRightDrawer()) return;
+      event.preventDefault();
+      const panel = $(side === 'left' ? 'leftPanel' : 'rightPanel');
+      const startX = event.clientX;
+      const startWidth = panel.getBoundingClientRect().width;
+      const controller = new AbortController();
+      handle.setPointerCapture(event.pointerId);
+      handle.classList.add('dragging');
+      document.body.classList.add('resizing');
+
+      const move = (moveEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const layoutWidth = $('layout').clientWidth;
+        const otherWidth = side === 'left'
+          ? $('rightPanel').getBoundingClientRect().width
+          : $('leftPanel').getBoundingClientRect().width;
+        const min = side === 'left' ? 210 : 300;
+        const hardMax = side === 'left' ? 460 : 720;
+        const max = Math.max(min, Math.min(hardMax, layoutWidth - otherWidth - 420 - 12));
+        const width = clampInt(side === 'left' ? startWidth + dx : startWidth - dx, min, max);
+        panel.style.width = width + 'px';
+        if (side === 'left') state.leftWidth = width;
+        else state.rightWidth = width;
+      };
+
+      const up = () => {
+        controller.abort();
+        handle.classList.remove('dragging');
+        document.body.classList.remove('resizing');
+        storeSet(side === 'left' ? 'rh_left_w' : 'rh_right_w',
+          String(side === 'left' ? state.leftWidth : state.rightWidth));
+      };
+
+      handle.addEventListener('pointermove', move, { signal: controller.signal });
+      handle.addEventListener('pointerup', up, { signal: controller.signal, once: true });
+      handle.addEventListener('pointercancel', up, { signal: controller.signal, once: true });
+    });
+  }
+
+  function handleViewportChange() {
+    closeDrawers();
+    syncEdges();
+  }
+
+  /* ---------------- session chrome ---------------- */
+  function updateModelChips() {
+    const model = state.agentModel || (state.config && state.config.agent_model) || '—';
+    const compact = state.compactModel || (state.config && state.config.compact_model) || '—';
+    $('modelChipValue').textContent = model;
+    $('modelChip').title = '切换 agent 模型：' + model;
+    $('compactChipValue').textContent = compact;
+    $('compactChip').title = '压缩模型：' + compact + '（只读）';
+  }
+
+  function updateSessionUI() {
+    $('wsPathText').textContent = state.cwd || '未连接工作区';
+    $('wsPath').title = state.cwd ? ('工作目录：' + state.cwd) : '切换工作目录';
+    $('sessionChipValue').textContent = state.sessionId ? shortId(state.sessionId) : '—';
+    $('sessionChip').title = state.sessionId
+      ? ('session ' + state.sessionId + (state.cwd ? '\n' + state.cwd : ''))
+      : '尚未建立会话';
+    $('footMeta').textContent = state.sessionId ? 'session ' + shortId(state.sessionId) : '尚未建立会话';
+    $('statSession').textContent = '会话 ' + (state.sessionId ? shortId(state.sessionId) : '—');
+    updateModelChips();
+  }
+
+  function updateStats() {
+    const limit = Number(state.contextLimit) || 0;
+    const used = Number(state.contextTokens) || 0;
+    const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+    $('ctxText').textContent = limit > 0 ? pct.toFixed(pct >= 10 ? 0 : 1) + '%' : '—';
+    $('ctxNums').textContent = limit > 0 ? ' ' + fmtTokens(used) + '/' + fmtTokens(limit) : '';
+    $('ctxFill').style.width = pct + '%';
+    $('ctxFill').classList.toggle('warn', pct >= 85);
+    $('statIn').textContent = fmtTokens(state.inputTokens);
+    $('statOut').textContent = fmtTokens(state.outputTokens);
+    $('statSession').textContent = '会话 ' + (state.sessionId ? shortId(state.sessionId) : '—');
+  }
+
+  function updateInputHint() {
+    inputEl.placeholder = window.innerWidth <= 520
+      ? '给智能体派任务…'
+      : '给智能体派任务。Enter 发送，Shift+Enter 换行。';
+  }
+
+  function updateComposer() {
+    const connected = isConnected();
+    const button = $('sendBtn');
+    if (!button) return;
+    if (state.busy) {
+      button.className = 'btn-send stop';
+      button.disabled = !connected;
+      button.title = connected ? '停止当前回合' : '未连接';
+      button.replaceChildren(icon('stop'), el('span', null, '停止'));
+    } else {
+      button.className = 'btn-send';
+      button.disabled = !connected;
+      button.title = connected ? '发送' : '未连接';
+      button.replaceChildren(icon('send'), el('span', null, '发送'));
+    }
+  }
+
+  function setBusy(busy) {
+    state.busy = !!busy;
+    updateComposer();
+  }
+
+  /* ---------------- feed ---------------- */
+  function isAtBottom() {
+    if (state.batchRender) return true;
+    return feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 110;
+  }
+
+  function scrollBottom() {
+    feedEl.scrollTop = feedEl.scrollHeight;
+  }
+
+  function scrollBottomInstant() {
+    const previous = feedEl.style.scrollBehavior;
+    feedEl.style.scrollBehavior = 'auto';
+    feedEl.scrollTop = feedEl.scrollHeight;
+    feedEl.style.scrollBehavior = previous;
+  }
+
+  function maybeScroll(stick) {
+    if (state.batchRender) return;
+    if (stick) requestAnimationFrame(scrollBottom);
+  }
+
+  function removeEmptyState() {
+    const empty = $('emptyState');
+    if (empty) empty.remove();
+  }
+
+  function pruneFeed() {
+    if (state.batchRender) return;
+    const limit = state.history ? 1600 : 420;
+    while (feedEl.children.length > limit) {
+      let first = feedEl.firstElementChild;
+      if (!first) break;
+      if (first.id === 'emptyState') {
+        if (feedEl.children.length === 1) break;
+        first.remove();
+        continue;
+      }
+      if (first.id === 'historyMore') {
+        first = first.nextElementSibling;
+        if (!first) break;
+      }
+      if (first.dataset && first.dataset.toolId) {
+        state.toolCards.delete(first.dataset.toolId);
+      }
+      first.remove();
+    }
+  }
+
+  function showEmptyState() {
+    if (feedEl.querySelector('.msg,.tool,.think,.note,.error-card')) return;
+    if ($('emptyState')) return;
+    const box = el('div', 'empty');
+    box.id = 'emptyState';
+    const logo = el('div', 'empty-logo', 'R');
+    const title = el('h1', null, '今天想让 Agent 做什么？');
+    const lead = el('p', null, '描述目标即可。相对路径锚定当前工作区，读文件、改代码、跑测试与搜索资料都由工具完成。');
+    const chips = el('div', 'empty-chips');
+    const prompts = [
+      ['解释这个仓库的架构', 'code'],
+      ['运行测试并修复失败', 'terminal'],
+      ['为当前文件补充单元测试', 'edit'],
+      ['搜索并总结最新资料', 'search']
+    ];
+    for (const [text, iconName] of prompts) {
+      const button = el('button', 'empty-chip');
+      button.type = 'button';
+      button.append(icon(iconName), el('span', null, text));
+      button.addEventListener('click', () => {
+        inputEl.value = text;
+        resizeInput();
+        inputEl.focus();
+      });
+      chips.append(button);
+    }
+    const hint = el('div', 'empty-hint', 'Enter 发送 · Shift+Enter 换行 · /help 查看命令');
+    box.append(logo, title, lead, chips, hint);
+    feedEl.append(box);
+  }
+
+  function clearFeed(showEmpty) {
+    if (state.assistantRaf) {
+      cancelAnimationFrame(state.assistantRaf);
+      state.assistantRaf = 0;
+    }
+    state.assistantEl = null;
+    state.reasoningEl = null;
+    state.toolCards.clear();
+    state.batchRender = false;
+    state.appendTarget = null;
+    state.history = null;
+    state.historyBtn = null;
+    feedEl.replaceChildren();
+    if (showEmpty !== false) showEmptyState();
+  }
+
+  function appendFeed(node) {
+    if (state.appendTarget) state.appendTarget.append(node);
+    else feedEl.append(node);
+  }
+
+  function addUserMessage(text) {
+    removeEmptyState();
+    const message = el('div', 'msg user');
+    message.append(el('div', 'bubble', text), el('div', 'meta', '你'));
+    appendFeed(message);
+    pruneFeed();
+    if (!state.batchRender) scrollBottom();
+  }
+
+  function addNote(text, kind) {
+    const stick = isAtBottom();
+    removeEmptyState();
+    const note = el('div', 'note' + (kind ? ' ' + kind : ''));
+    note.append(icon(kind === 'warn' ? 'alert' : kind === 'done' ? 'check-circle' : 'info'),
+      el('span', null, String(text)));
+    appendFeed(note);
+    pruneFeed();
+    maybeScroll(stick);
+  }
+
+  function addError(message) {
+    const stick = isAtBottom();
+    removeEmptyState();
+    const card = el('div', 'error-card');
+    card.append(icon('alert'));
+    const body = el('div', 'error-body');
+    body.append(el('strong', null, '错误'), document.createTextNode(String(message || '未知错误')));
+    card.append(body);
+    appendFeed(card);
+    pruneFeed();
+    maybeScroll(stick);
+  }
+
+  /* ---------------- markdown ---------------- */
+  function renderMarkdownInto(container, text) {
+    container.replaceChildren();
+    const source = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    try {
+      renderBlocks(container, source.split('\n'));
+    } catch (_) {
+      container.textContent = source;
+    }
+  }
+
+  function startsBlock(lines, index) {
+    const line = lines[index];
+    if (line == null) return true;
+    if (/^\s*$/.test(line)) return true;
+    if (/^\s*(`{3,}|~{3,})/.test(line)) return true;
+    if (/^\s{0,3}#{1,6}\s+/.test(line)) return true;
+    if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) return true;
+    if (/^\s{0,3}>/.test(line)) return true;
+    if (/^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(line)) return true;
+    if (isTableStart(lines, index)) return true;
+    return false;
+  }
+
+  function renderBlocks(parent, lines) {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^\s*$/.test(line)) {
+        i++;
+        continue;
+      }
+
+      const fence = line.match(/^\s*(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/);
+      if (fence) {
+        const marker = fence[1][0];
+        const size = fence[1].length;
+        const language = (fence[2] || '').toLowerCase();
+        const buffer = [];
+        let j = i + 1;
+        while (j < lines.length) {
+          const closing = lines[j].match(/^\s*(`{3,}|~{3,})\s*$/);
+          if (closing && closing[1][0] === marker && closing[1].length >= size) {
+            j++;
+            break;
+          }
+          buffer.push(lines[j]);
+          j++;
+        }
+        parent.append(makeCodeBlock(buffer.join('\n'), language));
+        i = j;
+        continue;
+      }
+
+      const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        const level = heading[1].length;
+        const node = document.createElement('h' + level);
+        appendInline(node, heading[2]);
+        parent.append(node);
+        i++;
+        continue;
+      }
+
+      if (/^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+        parent.append(document.createElement('hr'));
+        i++;
+        continue;
+      }
+
+      if (/^\s{0,3}>/.test(line)) {
+        const buffer = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i])) {
+          buffer.push(lines[i].replace(/^\s{0,3}>\s?/, ''));
+          i++;
+        }
+        const quote = document.createElement('blockquote');
+        renderBlocks(quote, buffer);
+        parent.append(quote);
+        continue;
+      }
+
+      if (isTableStart(lines, i)) {
+        i = renderTable(parent, lines, i);
+        continue;
+      }
+
+      if (/^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(line)) {
+        const result = renderList(lines, i, null);
+        if (result.next > i) {
+          parent.append(result.list);
+          i = result.next;
+          continue;
+        }
+      }
+
+      const paragraph = [];
+      while (i < lines.length && !startsBlock(lines, i)) {
+        paragraph.push(lines[i]);
+        i++;
+      }
+      if (!paragraph.length) {
+        paragraph.push(line);
+        i++;
+      }
+      const node = document.createElement('p');
+      appendInline(node, paragraph.join(' '));
+      parent.append(node);
+    }
+  }
+
+  function matchListItem(line) {
+    const match = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (!match) return null;
+    return {
+      indent: match[1].replace(/\t/g, '    ').length,
+      ordered: /^\d/.test(match[2]),
+      text: match[3]
+    };
+  }
+
+  function renderList(lines, start, baseIndent) {
+    const first = matchListItem(lines[start]);
+    if (!first) return { list: document.createElement('ul'), next: start };
+    const base = baseIndent == null ? first.indent : baseIndent;
+    const ordered = first.ordered;
+    const list = document.createElement(ordered ? 'ol' : 'ul');
+    let i = start;
+
+    while (i < lines.length) {
+      const item = matchListItem(lines[i]);
+      if (!item || item.indent < base) break;
+      if (item.indent > base) {
+        if (!list.lastElementChild) break;
+        const nested = renderList(lines, i, item.indent);
+        if (!nested.list.childElementCount || nested.next <= i) break;
+        const holder = list.lastElementChild.querySelector('.li-content') || list.lastElementChild;
+        holder.append(nested.list);
+        i = nested.next;
+        continue;
+      }
+      if (item.ordered !== ordered) break;
+
+      const li = document.createElement('li');
+      const content = el('div', 'li-content');
+      let text = item.text;
+      const task = text.match(/^\[([ xX~])\]\s+(.*)$/);
+      if (task) {
+        li.classList.add('task');
+        const box = el('span', 'taskbox');
+        if (task[1].toLowerCase() === 'x') {
+          box.classList.add('checked');
+          box.append(icon('check'));
+        } else if (task[1] === '~') {
+          box.append(icon('circle'));
+        }
+        content.append(box);
+        text = task[2];
+      }
+      appendInline(content, text);
+      li.append(content);
+      list.append(li);
+      i++;
+
+      while (i < lines.length) {
+        const next = lines[i];
+        if (/^\s*$/.test(next) || matchListItem(next)) break;
+        if (!/^\s{2,}\S/.test(next)) break;
+        content.append(document.createTextNode(' '));
+        appendInline(content, next.trim());
+        i++;
+      }
+    }
+    return { list, next: i };
+  }
+
+  function isTableStart(lines, index) {
+    if (index + 1 >= lines.length) return false;
+    if (!lines[index].includes('|')) return false;
+    const separator = lines[index + 1].trim();
+    if (!separator.includes('|')) return false;
+    const cells = splitTableRow(separator);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  }
+
+  function splitTableRow(line) {
+    let value = line.trim();
+    if (value.startsWith('|')) value = value.slice(1);
+    if (value.endsWith('|')) value = value.slice(0, -1);
+    return value.split('|').map((cell) => cell.trim());
+  }
+
+  function renderTable(parent, lines, start) {
+    const header = splitTableRow(lines[start]).slice(0, 12);
+    const separators = splitTableRow(lines[start + 1]).slice(0, 12);
+    const align = separators.map((cell) => {
+      if (/^:.*:$/.test(cell)) return 'center';
+      if (/^:/.test(cell)) return 'left';
+      if (/:$/.test(cell)) return 'right';
+      return '';
+    });
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    header.forEach((cell, index) => {
+      const th = document.createElement('th');
+      appendInline(th, cell);
+      if (align[index]) th.style.textAlign = align[index];
+      headRow.append(th);
+    });
+    thead.append(headRow);
+    table.append(thead);
+    const tbody = document.createElement('tbody');
+    let i = start + 2;
+    let rows = 0;
+    while (i < lines.length && rows < 100 && lines[i].includes('|') && !/^\s*$/.test(lines[i])) {
+      const cells = splitTableRow(lines[i]);
+      const tr = document.createElement('tr');
+      for (let c = 0; c < header.length; c++) {
+        const td = document.createElement('td');
+        appendInline(td, cells[c] || '');
+        if (align[c]) td.style.textAlign = align[c];
+        tr.append(td);
+      }
+      tbody.append(tr);
+      rows++;
+      i++;
+    }
+    table.append(tbody);
+    const scroller = el('div', 'table-scroll');
+    scroller.append(table);
+    parent.append(scroller);
+    return i;
+  }
+
+  function appendInline(parent, text, depth) {
+    const value = String(text == null ? '' : text);
+    if ((depth || 0) > 6) {
+      parent.append(document.createTextNode(value));
+      return;
+    }
+    const re = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]]+)\]\(([^)\s]+)\)/g;
+    let last = 0;
+    let match;
+    while ((match = re.exec(value))) {
+      if (match.index > last) parent.append(document.createTextNode(value.slice(last, match.index)));
+      if (match[1] !== undefined) {
+        parent.append(el('code', null, match[1]));
+      } else if (match[2] !== undefined || match[3] !== undefined) {
+        const strong = document.createElement('strong');
+        appendInline(strong, match[2] !== undefined ? match[2] : match[3], (depth || 0) + 1);
+        parent.append(strong);
+      } else if (match[4] !== undefined) {
+        const strike = document.createElement('del');
+        appendInline(strike, match[4], (depth || 0) + 1);
+        parent.append(strike);
+      } else if (match[5] !== undefined || match[6] !== undefined) {
+        const em = document.createElement('em');
+        appendInline(em, match[5] !== undefined ? match[5] : match[6], (depth || 0) + 1);
+        parent.append(em);
+      } else if (match[7] !== undefined && match[8] !== undefined) {
+        const url = match[8];
+        if (/^(https?:\/\/|mailto:)/i.test(url)) {
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.target = '_blank';
+          anchor.rel = 'noopener noreferrer';
+          anchor.title = url;
+          anchor.textContent = match[7];
+          parent.append(anchor);
+        } else {
+          parent.append(document.createTextNode(match[0]));
+        }
+      }
+      last = re.lastIndex;
+    }
+    if (last < value.length) parent.append(document.createTextNode(value.slice(last)));
+  }
+
+  function makeCodeBlock(text, language) {
+    const block = el('div', 'codeblock');
+    const head = el('div', 'cb-head');
+    head.append(el('span', 'cb-lang', language || 'code'));
+    const copy = el('button', 'cb-copy');
+    copy.type = 'button';
+    copy.append(icon('copy'), el('span', null, '复制'));
+    copy.addEventListener('click', async () => {
+      const ok = await copyText(text);
+      copy.replaceChildren(icon(ok ? 'check' : 'copy'), el('span', null, ok ? '已复制' : '复制失败'));
+      setTimeout(() => {
+        copy.replaceChildren(icon('copy'), el('span', null, '复制'));
+      }, 1400);
+    });
+    head.append(copy);
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    highlightInto(code, text, language);
+    pre.append(code);
+    block.append(head, pre);
+    return block;
+  }
+
+  function familyOf(language) {
+    const lang = String(language || '').toLowerCase();
+    if (['py', 'python', 'rb', 'ruby', 'sh', 'bash', 'zsh', 'shell', 'console', 'toml', 'yaml', 'yml', 'r', 'perl', 'makefile', 'cmake', 'dockerfile', 'ini'].includes(lang)) return 'hash';
+    if (lang === 'sql') return 'sql';
+    return 'slash';
+  }
+
+  const HIGHLIGHT_RES = {};
+  function highlightRegex(family) {
+    if (HIGHLIGHT_RES[family]) return HIGHLIGHT_RES[family];
+    let pattern;
+    if (family === 'hash') pattern = '#[^\\n]*';
+    else if (family === 'sql') pattern = '--[^\\n]*';
+    else pattern = '\\/\\/[^\\n]*';
+    pattern += '|\\/\\*[\\s\\S]*?\\*\\/';
+    pattern += '|"(?:\\\\.|[^"\\\\\\n])*"';
+    pattern += "|'(?:\\\\.|[^'\\\\\\n])*'";
+    pattern += '|`(?:\\\\.|[^`\\\\])*`';
+    pattern += '|\\b\\d+(?:\\.\\d+)?\\b';
+    pattern += '|\\b[A-Za-z_][A-Za-z0-9_]*\\b';
+    const re = new RegExp(pattern, 'g');
+    HIGHLIGHT_RES[family] = re;
+    return re;
+  }
+
+  function highlightInto(node, text, language) {
+    const value = String(text == null ? '' : text);
+    if (!value) return;
+    if (value.length > 16000) {
+      node.append(document.createTextNode(value));
+      return;
+    }
+    const family = familyOf(language);
+    const re = highlightRegex(family);
+    re.lastIndex = 0;
+    let last = 0;
+    let match;
+    while ((match = re.exec(value))) {
+      if (match.index > last) node.append(document.createTextNode(value.slice(last, match.index)));
+      const token = match[0];
+      let cls = '';
+      if (token.startsWith('//') || token.startsWith('/*') ||
+        (family === 'hash' && token.startsWith('#')) ||
+        (family === 'sql' && token.startsWith('--'))) {
+        cls = 'tok-cm';
+      } else if (/^["'`]/.test(token)) {
+        cls = 'tok-str';
+      } else if (/^\d/.test(token)) {
+        cls = 'tok-num';
+      } else if (KEYWORDS.has(token)) {
+        cls = 'tok-kw';
+      } else if (value[match.index + token.length] === '(') {
+        cls = 'tok-fn';
+      } else if (/^[A-Z]/.test(token)) {
+        cls = 'tok-type';
+      }
+      if (cls) {
+        const span = el('span', cls);
+        span.textContent = token;
+        node.append(span);
+      } else {
+        node.append(document.createTextNode(token));
+      }
+      last = match.index + token.length;
+    }
+    if (last < value.length) node.append(document.createTextNode(value.slice(last)));
+  }
+
+  /* ---------------- messages / tools ---------------- */
+  function makeAgentHead(live) {
+    const head = el('div', 'agent-head');
+    const avatar = el('span', 'agent-avatar');
+    avatar.append(icon('spark'));
+    head.append(avatar, el('span', null, 'Agent'));
+    const tag = el('span', 'model-tag', state.agentModel || 'agent');
+    tag.title = state.agentModel || '';
+    head.append(tag);
+    if (live) head.append(el('span', 'live-dot'));
+    return head;
+  }
+
+  function addAssistantCard(content, reasoning) {
+    if (reasoning) addReasoningBlock(reasoning);
+    if (!content) return null;
+    const stick = isAtBottom();
+    removeEmptyState();
+    const card = el('article', 'msg agent');
+    card.append(makeAgentHead(false));
+    const body = el('div', 'md');
+    renderMarkdownInto(body, content);
+    card.append(body);
+    appendFeed(card);
+    pruneFeed();
+    maybeScroll(stick);
+    return card;
+  }
+
+  function createReasoningBlock(value, open) {
+    const details = el('details', 'think');
+    if (open) details.open = true;
+    const summary = el('summary');
+    summary.append(icon('spark'), el('span', null, '思考过程'));
+    const count = el('span', 'think-count', value ? value.length + ' 字' : '');
+    summary.append(count, icon('chevron-down', 'chev'));
+    const body = el('div', 'think-body', value || '');
+    details.append(summary, body);
+    return { el: details, body, count, text: String(value || '') };
+  }
+
+  function addReasoningBlock(value) {
+    const stick = isAtBottom();
+    removeEmptyState();
+    const block = createReasoningBlock(value);
+    appendFeed(block.el);
+    pruneFeed();
+    maybeScroll(stick);
+    return block;
+  }
+
+  function appendReasoning(text) {
+    const stick = isAtBottom();
+    let block = state.reasoningEl;
+    if (!block) {
+      block = createReasoningBlock('', true);
+      removeEmptyState();
+      appendFeed(block.el);
+      pruneFeed();
+      state.reasoningEl = block;
+    }
+    block.text += String(text || '');
+    block.body.textContent = block.text;
+    block.count.textContent = block.text.length + ' 字';
+    maybeScroll(stick);
+  }
+
+  function closeReasoningBlock(block) {
+    if (block && block.el) block.el.open = false;
+  }
+
+  function finalizeReasoning(text, beforeEl) {
+    const value = String(text || '');
+    if (!value) return;
+    const stick = isAtBottom();
+    let block = state.reasoningEl;
+    if (!block) {
+      block = createReasoningBlock(value);
+      removeEmptyState();
+      if (state.appendTarget) state.appendTarget.append(block.el);
+      else if (beforeEl && beforeEl.parentNode === feedEl) feedEl.insertBefore(block.el, beforeEl);
+      else feedEl.append(block.el);
+      pruneFeed();
+    } else {
+      block.text = value;
+      block.body.textContent = value;
+      block.count.textContent = value.length + ' 字';
+    }
+    block.el.open = false;
+    state.reasoningEl = null;
+    maybeScroll(stick);
+  }
+
+  function ensureAssistantCard() {
+    if (state.assistantEl) return state.assistantEl;
+    removeEmptyState();
+    const card = el('article', 'msg agent streaming');
+    card.append(makeAgentHead(true));
+    const body = el('div', 'md');
+    card.append(body);
+    appendFeed(card);
+    const current = { card, body, text: '' };
+    state.assistantEl = current;
+    return current;
+  }
+
+  function appendAssistantDelta(text) {
+    const stick = isAtBottom();
+    const current = ensureAssistantCard();
+    current.text += String(text || '');
+    if (!state.assistantRaf) {
+      state.assistantRaf = requestAnimationFrame(() => {
+        state.assistantRaf = 0;
+        const active = state.assistantEl;
+        if (!active) return;
+        if (active.text.length > 80000) active.body.textContent = active.text;
+        else renderMarkdownInto(active.body, active.text);
+        if (stick) scrollBottom();
+      });
+    }
+  }
+
+  function settleStreaming() {
+    if (state.assistantRaf) {
+      cancelAnimationFrame(state.assistantRaf);
+      state.assistantRaf = 0;
+    }
+    const current = state.assistantEl;
+    if (current) {
+      current.card.classList.remove('streaming');
+      const live = current.card.querySelector('.live-dot');
+      if (live) live.remove();
+    }
+    closeReasoningBlock(state.reasoningEl);
+    state.assistantEl = null;
+    state.reasoningEl = null;
+  }
+
+  function finishAssistantMessage(event) {
+    const stick = isAtBottom();
+    const content = String(event.content || '');
+    const reasoning = String(event.reasoning || '');
+    const current = state.assistantEl;
+    finalizeReasoning(reasoning, current ? current.card : null);
+    if (!reasoning) closeReasoningBlock(state.reasoningEl);
+    if (content && !current) {
+      addAssistantCard(content, null);
+    } else if (current) {
+      if (content) {
+        current.text = content;
+        renderMarkdownInto(current.body, content);
+      }
+      current.card.classList.remove('streaming');
+      const live = current.card.querySelector('.live-dot');
+      if (live) live.remove();
+      if (!(current.body.textContent || '').trim()) current.card.remove();
+    }
+    state.assistantEl = null;
+    state.reasoningEl = null;
+    if (state.assistantRaf) {
+      cancelAnimationFrame(state.assistantRaf);
+      state.assistantRaf = 0;
+    }
+    maybeScroll(stick);
+  }
+
+  function pickPath(args) {
+    const object = argsObject(args);
+    for (const key of ['path', 'file', 'file_path', 'target']) {
+      if (typeof object[key] === 'string' && object[key].trim()) return object[key].trim();
+    }
+    return '';
+  }
+
+  function argsObject(value) {
+    if (value && typeof value === 'object') return value;
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text) return {};
+      try {
+        const parsed = JSON.parse(text);
+        return parsed && typeof parsed === 'object' ? parsed : { value: parsed };
+      } catch (_) {
+        return { value };
+      }
+    }
+    return value == null ? {} : { value };
+  }
+
+  function prettyArgs(value) {
+    let parsed = value;
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text) return '';
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {
+        parsed = value;
+      }
+    }
+    if (parsed === '' || parsed == null) return '';
+    if (typeof parsed === 'string') return parsed;
+    try {
+      return JSON.stringify(parsed, null, 2);
+    } catch (_) {
+      return String(parsed);
+    }
+  }
+
+  function summarizeArgs(value) {
+    const object = argsObject(value);
+    for (const key of ['command', 'path', 'file', 'query', 'url', 'pattern', 'name', 'prompt']) {
+      if (typeof object[key] === 'string' && object[key]) {
+        return key + ': ' + object[key].replace(/\s+/g, ' ').slice(0, 130);
+      }
+    }
+    if (Array.isArray(object.edits)) {
+      return object.edits.length + ' edits' + (object.path ? ' · ' + object.path : '');
+    }
+    const text = prettyArgs(value).replace(/\s+/g, ' ').trim();
+    return text.length > 130 ? text.slice(0, 130) + '…' : text;
+  }
+
+  function toolIconName(name) {
+    const value = String(name || '').toLowerCase();
+    if (/bash|shell|powershell|exec|terminal|pty/.test(value)) return 'terminal';
+    if (/edit|write|patch|hashline|apply/.test(value)) return 'edit';
+    if (/read|cat|view|open/.test(value)) return 'file';
+    if (/search|grep|glob|find|web/.test(value)) return 'search';
+    if (/lsp|symbol|diagnostic|hover|definition|reference|rename|completion/.test(value)) return 'code';
+    if (/todo/.test(value)) return 'todo';
+    if (/mcp/.test(value)) return 'wrench';
+    return 'wrench';
+  }
+
+  function setToolStatus(card, kind, text) {
+    const status = card.querySelector('.tstat');
+    if (!status) return;
+    status.className = 'tstat ' + kind;
+    status.textContent = text;
+  }
+
+  function addToolCard(name, args, id, options) {
+    const opts = options || {};
+    const stick = isAtBottom();
+    removeEmptyState();
+    const card = document.createElement('details');
+    card.className = 'tool';
+    card.open = opts.open !== false;
+    if (id) {
+      card.dataset.toolId = id;
+      state.toolCards.set(id, card);
+    }
+    const summary = document.createElement('summary');
+    const toolIcon = icon(toolIconName(name));
+    toolIcon.classList.add('tool-ico');
+    const nameEl = el('span', 'tname', name || 'tool');
+    const argsEl = el('span', 'targs', summarizeArgs(args));
+    const status = el('span', 'tstat run', '运行中');
+    summary.append(toolIcon, nameEl, argsEl, status, icon('chevron-down', 'chev'));
+
+    const body = el('div', 'tool-body');
+    const path = pickPath(args);
+    if (path) {
+      const open = el('button', 'tool-path');
+      open.type = 'button';
+      open.title = '在查看器中打开 ' + path;
+      open.append(icon('file'), el('span', null, path));
+      open.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openFile(path);
+      });
+      body.append(open);
+    }
+    const pretty = prettyArgs(args);
+    if (pretty) {
+      const wrap = el('div');
+      wrap.append(el('div', 'tool-label', '参数'));
+      wrap.append(el('pre', 'args-pre', truncateText(pretty, 12000)));
+      body.append(wrap);
+    }
+    const liveWrap = el('div', 'live-wrap');
+    liveWrap.hidden = true;
+    const liveHead = el('div', 'tool-result-head');
+    const liveSize = el('span', 'live-size');
+    liveHead.append(el('div', 'tool-label', '实时输出'), liveSize);
+    const live = el('pre', 'tool-live');
+    liveWrap.append(liveHead, live);
+    body.append(liveWrap);
+    const resultWrap = el('div', 'result-wrap');
+    resultWrap.hidden = true;
+    const resultHead = el('div', 'tool-result-head');
+    resultHead.append(el('div', 'tool-label', '输出'), el('span', 'result-size'));
+    const result = el('pre', 'tool-result');
+    resultWrap.append(resultHead, result);
+    body.append(resultWrap);
+
+    card.append(summary, body);
+    appendFeed(card);
+    pruneFeed();
+    maybeScroll(stick);
+    return card;
+  }
+
+  function updateToolLive(id, name, text) {
+    let card = id ? state.toolCards.get(id) : null;
+    if (!card) {
+      card = addToolCard(name || 'tool', {}, id || null, { open: true });
+    }
+    if (card.dataset.done === '1') return;
+    const stick = isAtBottom();
+    const wrap = card.querySelector('.live-wrap');
+    const live = card.querySelector('.tool-live');
+    if (!wrap || !live) return;
+    wrap.hidden = false;
+    const value = String(text == null ? '' : text);
+    live.textContent = value || '（等待输出…）';
+    live.scrollTop = live.scrollHeight;
+    const size = wrap.querySelector('.live-size');
+    if (size) size.textContent = value ? value.length + ' 字符 · 实时' : '实时';
+    if (stick) maybeScroll(stick);
+  }
+
+  function fillToolResult(card, ok, content) {
+    if (!card) return;
+    const stick = isAtBottom();
+    setToolStatus(card, ok ? 'ok' : 'err', ok ? '完成' : '失败');
+    const wrap = card.querySelector('.result-wrap');
+    const result = card.querySelector('.tool-result');
+    const size = card.querySelector('.result-wrap .result-size');
+    const text = String(content == null ? '' : content);
+    if (result) result.textContent = text ? truncateText(text, 60000) : '（无输出）';
+    if (size) size.textContent = text ? text.length + ' 字符' : '';
+    if (wrap) wrap.hidden = false;
+    const liveWrap = card.querySelector('.live-wrap');
+    if (liveWrap) liveWrap.hidden = true;
+    card.dataset.done = '1';
+    card.classList.toggle('failed', !ok);
+    // Finished calls fold away; the summary still shows status and args.
+    card.open = false;
+    maybeScroll(stick);
+  }
+
+  function attachToolResult(id, name, ok, content) {
+    let card = id ? state.toolCards.get(id) : null;
+    if (!card) card = addToolCard(name || 'tool', {}, id || null, { open: true });
+    fillToolResult(card, ok, content);
+  }
+
+  /* ---------------- compaction / activity ---------------- */
+  function addKv(list, key, value) {
+    const dt = el('dt', null, key);
+    const dd = el('dd', null, value);
+    dd.title = String(value == null ? '' : value);
+    list.append(dt, dd);
+  }
+
+  function actHead(text, iconName) {
+    const head = el('div', 'act-head');
+    const title = el('span', 'act-title');
+    title.append(icon(iconName || 'info'), el('span', null, text));
+    head.append(title);
+    return head;
+  }
+
+  function lspClass(status) {
+    if (status === 'running') return 'ok';
+    if (status === 'degraded' || status === 'absent') return 'warn';
+    return 'idle';
+  }
+
+  function lspLabel(status) {
+    if (status === 'running') return '运行中';
+    if (status === 'degraded') return '降级';
+    if (status === 'absent') return '缺失';
+    return status || '未知';
+  }
+
+  function procClass(status) {
+    if (status === 'running') return 'run';
+    if (status === 'exited') return 'ok';
+    if (status === 'timeout') return 'warn';
+    if (status === 'killed' || status === 'failed') return 'err';
+    return 'idle';
+  }
+
+  function procLabel(status) {
+    if (status === 'running') return '运行中';
+    if (status === 'exited') return '已退出';
+    if (status === 'timeout') return '等待超时';
+    if (status === 'killed') return '已终止';
+    if (status === 'failed') return '失败';
+    return status || '未知';
+  }
+
+  function updateActivityBadge() {
+    let alert = false;
+    for (const status of state.lsp.values()) {
+      if (status.state === 'degraded' || status.state === 'absent') alert = true;
+    }
+    for (const proc of state.processes.values()) {
+      if (proc.status === 'running' || proc.status === 'timeout') alert = true;
+    }
+    $('activityBadge').hidden = !alert;
+    $('activityDot').hidden = !alert;
+  }
+
+  function renderActivity() {
+    const root = $('activityContent');
+    if (!root) return;
+    const pane = $('paneActivity');
+    const scrollTop = pane.scrollTop;
+    root.replaceChildren();
+
+    const sessionSection = el('section', 'act-section');
+    sessionSection.append(actHead('会话信息', 'spark'));
+    const kv = el('dl', 'kv');
+    addKv(kv, '连接', isConnected() ? '已连接' : '未连接');
+    addKv(kv, '会话', state.sessionId || '—');
+    addKv(kv, '工作区', state.cwd || '—');
+    addKv(kv, 'Agent', state.agentModel || '—');
+    addKv(kv, 'Compact', state.compactModel || '—');
+    addKv(kv, '上下文', state.contextLimit
+      ? fmtTokens(state.contextTokens) + ' / ' + fmtTokens(state.contextLimit)
+      : '—');
+    sessionSection.append(kv);
+    root.append(sessionSection);
+
+    const lspSection = el('section', 'act-section');
+    lspSection.append(actHead('语言服务器 · ' + state.lsp.size, 'code'));
+    if (!state.lsp.size) {
+      lspSection.append(el('div', 'act-empty', '暂无 LSP 状态事件。打开代码文件或触发定义查询后会显示。'));
+    } else {
+      const languages = Array.from(state.lsp.keys()).sort();
+      for (const language of languages) {
+        const status = state.lsp.get(language);
+        const item = el('div', 'lsp-item');
+        const line = el('div', 'lsp-line');
+        line.append(el('span', 'lsp-lang', language),
+          el('span', 'tstat ' + lspClass(status.state), lspLabel(status.state)));
+        item.append(line);
+        if (status.detail) item.append(el('div', 'lsp-detail', status.detail));
+        lspSection.append(item);
+      }
+    }
+    root.append(lspSection);
+
+    const procSection = el('section', 'act-section');
+    procSection.append(actHead('后台进程 · ' + state.processes.size, 'terminal'));
+    if (!state.processes.size) {
+      procSection.append(el('div', 'act-empty', '暂无后台进程。bash 长任务会以 pid 形式出现在这里。'));
+    } else {
+      const pids = Array.from(state.processes.keys()).sort((a, b) => a - b);
+      for (const pid of pids) {
+        const proc = state.processes.get(pid);
+        const item = el('div', 'proc-item');
+        const head = el('div', 'proc-head');
+        head.append(el('span', null, 'pid ' + pid),
+          el('span', 'tstat ' + procClass(proc.status), procLabel(proc.status)));
+        if (proc.exit_code != null) head.append(el('span', null, 'exit ' + proc.exit_code));
+        item.append(head);
+        const lines = String(proc.screen || '').split('\n').slice(-20).join('\n').slice(-8000);
+        item.append(el('pre', null, lines || '（暂无输出）'));
+        procSection.append(item);
+      }
+    }
+    root.append(procSection);
+    updateActivityBadge();
+    pane.scrollTop = scrollTop;
+  }
+
+  function updateActivityIfVisible() {
+    if (state.inspectorTab === 'activity') renderActivity();
+  }
+
+  function renderTodos() {
+    const todos = Array.isArray(state.todos) ? state.todos : [];
+    const card = $('todoCard');
+    if (!todos.length) {
+      card.hidden = true;
+      $('todoList').replaceChildren();
+      $('todoCount').textContent = '0/0';
+      return;
+    }
+    card.hidden = false;
+    const completed = todos.filter((item) => item.status === 'completed').length;
+    const count = $('todoCount');
+    count.textContent = completed + '/' + todos.length;
+    count.className = 'tstat ' + (completed === todos.length ? 'ok' : 'run');
+    const list = $('todoList');
+    list.replaceChildren();
+    for (const item of todos) {
+      const status = item.status || 'pending';
+      const row = el('div', 'titem ' + (status === 'completed' ? 'done' : status === 'in_progress' ? 'now' : 'pending'));
+      row.append(icon(status === 'completed' ? 'check-circle' : status === 'in_progress' ? 'activity' : 'circle'));
+      row.append(el('span', null, item.content || ''));
+      row.append(el('span', 'tlabel',
+        status === 'completed' ? '已完成' : status === 'in_progress' ? '进行中' : '待处理'));
+      row.title = 'id: ' + (item.id || '—');
+      list.append(row);
+    }
+    card.classList.toggle('closed', state.todoClosed);
+    $('todoHead').setAttribute('aria-expanded', String(!state.todoClosed));
+  }
+
+  function toggleTodo() {
+    state.todoClosed = !state.todoClosed;
+    storeSet('rh_todo_closed', state.todoClosed ? '1' : '0');
+    renderTodos();
+  }
+
+  /* ---------------- side tabs / sessions ---------------- */
+  function switchSideTab(tab, refresh) {
+    state.sideTab = tab === 'sessions' ? 'sessions' : 'files';
+    storeSet('rh_side_tab', state.sideTab);
+    document.querySelectorAll('.stab').forEach((button) => {
+      button.classList.toggle('active', button.dataset.tab === state.sideTab);
+    });
+    $('filesTab').hidden = state.sideTab !== 'files';
+    $('sessionsTab').hidden = state.sideTab !== 'sessions';
+    if (state.sideTab === 'sessions' && refresh !== false) refreshSessions();
+  }
+
+  async function refreshSessions() {
+    try {
+      const data = await api('/api/sessions');
+      state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      renderSessions();
+    } catch (error) {
+      state.sessions = [];
+      const list = $('sessions');
+      list.replaceChildren(el('li', 'empty-list', '无法读取会话：' + error.message));
+      $('sessionCount').textContent = '0';
+    }
+  }
+
+  function renderSessions() {
+    const list = $('sessions');
+    list.replaceChildren();
+    $('sessionCount').textContent = String(state.sessions.length);
+    if (!state.sessions.length) {
+      list.append(el('li', 'empty-list', '暂无已保存会话。开始对话后会自动写入本地会话日志。'));
+      return;
+    }
+    for (const session of state.sessions) {
+      const item = el('li', 'session-item' + (session.id === state.sessionId ? ' active' : ''));
+      item.tabIndex = 0;
+      item.title = session.cwd || session.id;
+      const title = el('div', 's-title',
+        session.title || basename(session.cwd) || shortId(session.id));
+      const meta = el('div', 's-meta',
+        shortId(session.id) + ' · ' + (session.messages || 0) + ' 条 · ' + fmtWhen(session.updated_at));
+      const remove = el('button', 's-del');
+      remove.type = 'button';
+      remove.title = '删除会话';
+      remove.append(icon('trash'));
+      remove.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        if (session.id === state.sessionId) {
+          toast('当前活动会话无法删除，请先新建会话。', 'error');
+          return;
+        }
+        if (!window.confirm('删除会话 ' + shortId(session.id) + '？会话日志会从磁盘移除。')) return;
+        try {
+          await api('/api/sessions/' + encodeURIComponent(session.id), { method: 'DELETE' });
+          toast('会话已删除');
+          refreshSessions();
+        } catch (error) {
+          toast('删除失败：' + error.message, 'error');
+        }
+      });
+      item.append(title, meta, remove);
+      item.addEventListener('click', () => {
+        closeDrawers();
+        connect(session.id);
+      });
+      item.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          closeDrawers();
+          connect(session.id);
+        }
+      });
+      list.append(item);
+    }
+  }
+
+  /* ---------------- file tree ---------------- */
+  function queryString(params) {
+    const query = new URLSearchParams();
+    if (state.sessionId) query.set('session', state.sessionId);
+    for (const [key, value] of Object.entries(params || {})) query.set(key, value == null ? '' : value);
+    return query.toString();
+  }
+
+  function treeLoadingRow(text) {
+    const row = el('div', 'trow loading');
+    row.append(icon('refresh', 'spin'), el('span', null, text));
+    return row;
+  }
+
+  function treeEmptyRow(text, depth) {
+    const row = el('div', 'trow empty', text);
+    row.style.paddingLeft = (8 + (depth || 0) * 14) + 'px';
+    return row;
+  }
+
+  async function loadTree() {
+    const generation = ++state.treeGen;
+    const tree = $('tree');
+    if (!tree) return;
+    tree.replaceChildren(treeLoadingRow('正在读取工作区…'));
+    try {
+      const data = await api('/api/tree?' + queryString({ path: '' }));
+      if (generation !== state.treeGen) return;
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      const fragment = document.createDocumentFragment();
+      renderTreeEntries(fragment, entries, 0, generation);
+      if (!entries.length) fragment.append(treeEmptyRow('此目录为空', 0));
+      if (data.truncated) fragment.append(el('div', 'tree-note', '目录条目超过 500 项，仅显示前 500 项。'));
+      tree.replaceChildren(fragment);
+      highlightTree();
+    } catch (error) {
+      if (generation !== state.treeGen) return;
+      const box = el('div', 'tree-error');
+      box.append(el('div', null, '无法读取工作区：' + error.message));
+      const retry = el('button', 'mini-btn');
+      retry.type = 'button';
+      retry.append(icon('refresh'), el('span', null, '重试'));
+      retry.addEventListener('click', loadTree);
+      box.append(retry);
+      tree.replaceChildren(box);
+    }
+  }
+
+  function renderTreeEntries(container, entries, depth, generation) {
+    for (const entry of entries) {
+      if (!entry || typeof entry.path !== 'string') continue;
+      if (entry.dir) {
+        const row = el('div', 'trow dir');
+        row.style.paddingLeft = (8 + depth * 14) + 'px';
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-expanded', 'false');
+        row.append(icon('chevron-right', 'chev'), icon('folder', 'fico'), el('span', 'tname', entry.name));
+        const children = el('div', 'tkids');
+        children.hidden = true;
+        const toggle = () => toggleDir(row, children, entry, depth, generation);
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            toggle();
+          }
+        });
+        container.append(row, children);
+      } else {
+        const row = el('div', 'trow file');
+        row.dataset.path = entry.path;
+        row.style.paddingLeft = (8 + depth * 14) + 'px';
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.append(el('span', 'tspacer'), icon('file', 'filico'),
+          el('span', 'tname', entry.name),
+          el('span', 'tsize', entry.size ? fmtBytes(entry.size) : ''));
+        row.addEventListener('click', () => openFile(entry.path));
+        row.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            openFile(entry.path);
+          }
+        });
+        container.append(row);
+      }
+    }
+  }
+
+  async function toggleDir(row, children, entry, depth, generation) {
+    if (children.dataset.busy === '1') return;
+    if (children.dataset.loaded === '1') {
+      const opening = children.hidden;
+      children.hidden = !opening;
+      row.classList.toggle('open', opening);
+      row.setAttribute('aria-expanded', String(opening));
+      return;
+    }
+    children.hidden = false;
+    row.classList.add('open');
+    row.setAttribute('aria-expanded', 'true');
+    children.dataset.busy = '1';
+    children.replaceChildren(treeLoadingRow('加载中…'));
+    try {
+      const data = await api('/api/tree?' + queryString({ path: entry.path }));
+      if (generation !== state.treeGen) return;
+      const entries = Array.isArray(data.entries) ? data.entries : [];
+      const fragment = document.createDocumentFragment();
+      renderTreeEntries(fragment, entries, depth + 1, generation);
+      if (!entries.length) fragment.append(treeEmptyRow('空目录', depth + 1));
+      if (data.truncated) fragment.append(el('div', 'tree-note', '超过 500 项，仅显示前 500 项。'));
+      children.replaceChildren(fragment);
+      children.dataset.loaded = '1';
+    } catch (error) {
+      if (generation !== state.treeGen) return;
+      children.replaceChildren();
+      children.hidden = true;
+      row.classList.remove('open');
+      row.setAttribute('aria-expanded', 'false');
+      const box = el('div', 'tree-error');
+      box.style.marginLeft = ((depth + 1) * 14 + 10) + 'px';
+      box.append(el('div', null, '读取失败：' + error.message));
+      const retry = el('button', 'mini-btn');
+      retry.type = 'button';
+      retry.append(icon('refresh'), el('span', null, '重试'));
+      retry.addEventListener('click', (event) => {
+        event.stopPropagation();
+        children.dataset.loaded = '';
+        toggleDir(row, children, entry, depth, generation);
+      });
+      box.append(retry);
+      children.append(box);
+      children.hidden = false;
+    } finally {
+      delete children.dataset.busy;
+    }
+  }
+
+  function highlightTree() {
+    const tree = $('tree');
+    if (!tree) return;
+    for (const row of tree.querySelectorAll('.trow.file')) {
+      row.classList.toggle('active', !!state.activeFile && row.dataset.path === state.activeFile);
+    }
+  }
+
+  /* ---------------- inspector ---------------- */
+  function setViewIcon(name) {
+    const slot = $('viewIcon');
+    if (slot) slot.replaceChildren(icon(name));
+  }
+
+  function setInspectorTab(tab) {
+    if (!['code', 'preview', 'activity'].includes(tab)) tab = 'code';
+    state.inspectorTab = tab;
+    document.querySelectorAll('.itab').forEach((button) => {
+      button.classList.toggle('active', button.dataset.itab === tab);
+    });
+    $('paneCode').classList.toggle('active', tab === 'code');
+    $('panePreview').classList.toggle('active', tab === 'preview');
+    $('paneActivity').classList.toggle('active', tab === 'activity');
+    if (tab === 'activity') renderActivity();
+    syncInspectorHeader();
+  }
+
+  function syncInspectorHeader() {
+    const hasFile = !!state.activeFile;
+    $('fileRefresh').hidden = !hasFile;
+    $('copyFileBtn').hidden = !hasFile;
+    if (hasFile) return;
+    $('viewFile').title = '';
+    if (state.inspectorTab === 'activity') {
+      $('viewFile').textContent = '会话活动';
+      $('viewMeta').textContent = '连接状态、LSP、后台进程与上下文用量';
+      setViewIcon('activity');
+    } else {
+      $('viewFile').textContent = '未打开文件';
+      $('viewMeta').textContent = '从左侧文件树选择';
+      setViewIcon('eye');
+    }
+  }
+
+  function loadingView(text) {
+    const box = el('div', 'empty-view loading-view');
+    box.append(icon('refresh', 'spin'), el('h3', null, text));
+    return box;
+  }
+
+  function errorView(title, message) {
+    const box = el('div', 'empty-view');
+    box.append(icon('alert'), el('h3', null, title), el('p', null, message));
+    if (state.activeFile) {
+      const retry = el('button', 'btn');
+      retry.type = 'button';
+      retry.append(icon('refresh'), el('span', null, '重试'));
+      retry.addEventListener('click', () => openFile(state.activeFile, { keepTab: true }));
+      box.append(retry);
+    }
+    return box;
+  }
+
+  function previewEmptyView(title, message) {
+    const box = el('div', 'empty-view');
+    box.append(icon('eye'), el('h3', null, title), el('p', null, message));
+    return box;
+  }
+
+  const isMarkdownPath = (path) => /\.(md|markdown|mdx)$/i.test(String(path || ''));
+
+  async function openFile(path, options) {
+    if (!path) return;
+    const opts = options || {};
+    state.activeFile = String(path);
+    highlightTree();
+    if (isLeftDrawer()) closeLeftDrawer();
+    openRightPanel();
+    const token = ++state.fileToken;
+    $('viewFile').textContent = state.activeFile;
+    $('viewFile').title = state.activeFile;
+    $('viewMeta').textContent = '正在读取…';
+    setViewIcon('file');
+    $('fileRefresh').disabled = true;
+    $('copyFileBtn').disabled = true;
+    if (!opts.keepTab) {
+      if (isMarkdownPath(state.activeFile)) setInspectorTab('preview');
+      else setInspectorTab('code');
+    }
+    $('codeEmpty').hidden = true;
+    $('codeContent').hidden = false;
+    $('codeContent').replaceChildren(loadingView('正在读取文件…'));
+    $('previewEmpty').hidden = true;
+    $('previewContent').hidden = false;
+    $('previewContent').replaceChildren(loadingView('正在准备预览…'));
+    try {
+      const data = await api('/api/file?' + queryString({ path: state.activeFile }));
+      if (token !== state.fileToken) return;
+      state.fileInfo = data;
+      renderFile(data);
+    } catch (error) {
+      if (token !== state.fileToken) return;
+      state.fileInfo = null;
+      $('viewMeta').textContent = '读取失败';
+      $('codeContent').replaceChildren(errorView('无法读取文件', error.message));
+      $('previewContent').replaceChildren(errorView('无法预览', error.message));
+      toast('无法读取 ' + state.activeFile + '：' + error.message, 'error');
+    }
+  }
+
+  function renderFile(file) {
+    const language = String(file.language || '');
+    const content = String(file.content || '');
+    const lines = file.binary ? 0 : content.split('\n').length;
+    $('viewFile').textContent = file.path || state.activeFile || '未命名文件';
+    $('viewFile').title = file.path || '';
+    $('viewMeta').textContent = [
+      language ? language.toUpperCase() : '文本',
+      fmtBytes(file.size || 0),
+      file.binary ? '二进制' : lines + ' 行',
+      file.truncated ? '已截断' : '只读'
+    ].join(' · ');
+    setViewIcon(file.binary ? 'file' : 'code');
+    $('fileRefresh').disabled = false;
+    $('copyFileBtn').disabled = !!file.binary;
+    $('codeEmpty').hidden = true;
+    $('codeContent').hidden = false;
+    $('previewEmpty').hidden = true;
+    $('previewContent').hidden = false;
+    $('codeContent').replaceChildren(buildCodeView(file));
+    $('previewContent').replaceChildren(buildPreview(file));
+  }
+
+  function buildCodeView(file) {
+    if (file.binary) {
+      return previewEmptyView('二进制文件', '该文件包含 NUL 字节或不是 UTF-8 文本，无法以源码显示。');
+    }
+    const content = String(file.content || '');
+    const all = content.split('\n');
+    if (all.length > 1 && all[all.length - 1] === '') all.pop();
+    const total = all.length;
+    const max = Math.min(total, 20000);
+    const highlight = content.length <= 140000 && max <= 5000;
+    const wrap = el('div', 'code-wrap');
+    wrap.style.setProperty('--lnw', Math.max(34, String(Math.max(total, 1)).length * 8 + 18) + 'px');
+    const info = el('div', 'code-info');
+    info.append(el('span', null, (file.language || 'text').toUpperCase()),
+      el('span', null, '· ' + total + ' 行'),
+      el('span', null, '· ' + fmtBytes(file.size)),
+      el('span', null, '· 只读'));
+    wrap.append(info);
+    if (file.truncated) {
+      const banner = el('div', 'file-banner');
+      banner.append(icon('alert'), el('span', null, '文件超过 256 KiB，仅显示前 256 KiB。'));
+      wrap.append(banner);
+    }
+    const lines = el('div', 'code-lines');
+    for (let i = 0; i < max; i++) {
+      const row = el('div', 'cl');
+      row.append(el('span', 'ln', String(i + 1)));
+      const cell = el('span', 'lc');
+      const line = all[i] || '';
+      if (highlight) highlightInto(cell, line, file.language || '');
+      else cell.textContent = line;
+      row.append(cell);
+      lines.append(row);
+    }
+    wrap.append(lines);
+    if (total > max) wrap.append(el('div', 'tree-note', '仅渲染前 20000 行。'));
+    return wrap;
+  }
+
+  function limitPreview(text, max) {
+    const value = String(text || '');
+    if (value.length <= max) return { text: value, truncated: false };
+    return { text: value.slice(0, max), truncated: true };
+  }
+
+  function buildPreview(file) {
+    if (file.binary) {
+      return previewEmptyView('二进制文件', '该文件不是 UTF-8 文本，无法预览。');
+    }
+    const content = String(file.content || '');
+    const language = String(file.language || '').toLowerCase();
+    if (['md', 'markdown', 'mdx'].includes(language)) {
+      const wrap = el('div');
+      const limited = limitPreview(content, 120000);
+      if (limited.truncated) {
+        const banner = el('div', 'file-banner');
+        banner.append(icon('alert'), el('span', null, '预览仅渲染前 120 KB。'));
+        wrap.append(banner);
+      }
+      const pane = el('div', 'md-pane md');
+      renderMarkdownInto(pane, limited.text);
+      wrap.append(pane);
+      return wrap;
+    }
+    if (language === 'json') {
+      const wrap = el('div');
+      let formatted = content;
+      try {
+        formatted = JSON.stringify(JSON.parse(content), null, 2);
+      } catch (_) {}
+      const limited = limitPreview(formatted, 160000);
+      if (limited.truncated) {
+        const banner = el('div', 'file-banner');
+        banner.append(icon('alert'), el('span', null, '预览仅显示前 160 KB。'));
+        wrap.append(banner);
+      }
+      wrap.append(el('pre', 'json-preview', limited.text));
+      return wrap;
+    }
+    if (['html', 'htm', 'xhtml', 'svg'].includes(language)) {
+      const card = el('div', 'safety-card');
+      card.append(icon('shield'), el('h3', null, 'HTML 预览已禁用'),
+        el('p', null, '工作区中的 HTML/SVG 不会在应用内执行，避免脚本读取会话数据或访问令牌。'));
+      const button = el('button', 'btn');
+      button.type = 'button';
+      button.append(icon('code'), el('span', null, '查看源码'));
+      button.addEventListener('click', () => setInspectorTab('code'));
+      card.append(button);
+      return card;
+    }
+    const card = el('div', 'preview-meta');
+    card.append(el('h3', null, '文件信息'));
+    const kv = el('dl', 'kv');
+    addKv(kv, '路径', file.path || '—');
+    addKv(kv, '类型', language ? language.toUpperCase() : '文本');
+    addKv(kv, '大小', fmtBytes(file.size));
+    addKv(kv, '行数', String(content ? content.split('\n').length : 0));
+    addKv(kv, '编码', file.truncated ? 'UTF-8（已截断）' : 'UTF-8');
+    card.append(kv);
+    card.append(el('div', 'field-hint', '此类型没有专用预览；可在“代码”标签中查看带行号的只读源码。'));
+    return card;
+  }
+
+  function clearViewer() {
+    state.activeFile = null;
+    state.fileInfo = null;
+    state.fileToken++;
+    $('codeEmpty').hidden = false;
+    $('codeContent').hidden = true;
+    $('codeContent').replaceChildren();
+    $('previewEmpty').hidden = false;
+    $('previewContent').hidden = true;
+    $('previewContent').replaceChildren();
+    $('fileRefresh').disabled = true;
+    $('copyFileBtn').disabled = true;
+    if (state.inspectorTab !== 'activity') setInspectorTab('code');
+    else syncInspectorHeader();
+    highlightTree();
+  }
+
+  async function copyCurrentFile() {
+    if (!state.fileInfo || state.fileInfo.binary) {
+      toast('当前没有可复制的文本文件', 'error');
+      return;
+    }
+    const ok = await copyText(state.fileInfo.content || '');
+    toast(ok ? '已复制文件内容' : '复制失败，请手动选择文本', ok ? '' : 'error');
+  }
+
+  /* ---------------- websocket / protocol ---------------- */
+  function authHeaders() {
+    return state.token ? { Authorization: 'Bearer ' + state.token } : {};
+  }
+
+  async function api(path, options) {
+    const opts = options || {};
+    const headers = Object.assign({}, opts.headers || {}, authHeaders());
+    let response;
+    try {
+      response = await fetch(path, Object.assign({}, opts, { headers }));
+    } catch (error) {
+      throw new Error('网络请求失败：' + (error && error.message ? error.message : error));
+    }
+    if (response.status === 401) {
+      if ($('settingsModal').hidden) openSettings('token');
+      setSettingsError('需要访问令牌才能访问此服务。');
+      throw new Error('未授权：请输入访问令牌');
+    }
+    let data = null;
+    const type = response.headers.get('content-type') || '';
+    if (type.includes('application/json')) {
+      try {
+        data = await response.json();
+      } catch (_) {}
+    }
+    if (!response.ok) {
+      const message = (data && (data.error || data.message)) || (response.status + ' ' + response.statusText);
+      throw new Error(message);
+    }
+    return data || {};
+  }
+
+  async function refreshConfig() {
+    try {
+      const config = await api('/api/config');
+      state.config = config;
+      if (!state.cwd) state.cwd = config.cwd || '';
+      if (!state.agentModel) state.agentModel = config.agent_model || '';
+      if (!state.compactModel) state.compactModel = config.compact_model || '';
+      if (!state.contextLimit) state.contextLimit = Number(config.context_window) || 0;
+      updateSessionUI();
+      updateModelChips();
+      updateStats();
+      updateActivityIfVisible();
+    } catch (_) {}
+  }
+
+  function scheduleTreeReload(delay) {
+    clearTimeout(state.treeTimer);
+    state.treeTimer = setTimeout(() => { loadTree(); }, typeof delay === 'number' ? delay : 160);
+  }
+
+  function connect(resumeId) {
+    state.manualClose = true;
+    if (state.ws) {
+      try { state.ws.close(); } catch (_) {}
+      state.ws = null;
+    }
+    state.resumeId = resumeId || null;
+    state.sessionId = null;
+    state.cwd = state.config && state.config.cwd ? state.config.cwd : '';
+    state.agentModel = state.config && state.config.agent_model ? state.config.agent_model : '';
+    state.compactModel = state.config && state.config.compact_model ? state.config.compact_model : '';
+    state.contextTokens = 0;
+    state.contextLimit = state.config && state.config.context_window ? Number(state.config.context_window) : 0;
+    state.inputTokens = 0;
+    state.outputTokens = 0;
+    state.todos = [];
+    state.lsp.clear();
+    state.processes.clear();
+    settleStreaming();
+    state.toolCards.clear();
+    clearFeed();
+    renderTodos();
+    renderActivity();
+    clearViewer();
+    updateSessionUI();
+    updateStats();
+    updateComposer();
+    setBusy(false);
+    closeDrawers();
+    scheduleTreeReload(30);
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const params = new URLSearchParams();
+    if (state.token) params.set('token', state.token);
+    if (resumeId) params.set('resume', resumeId);
+    const query = params.toString();
+    const url = protocol + '//' + location.host + '/ws' + (query ? '?' + query : '');
+    setConn('connecting', resumeId ? '正在恢复会话…' : '正在连接…');
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (error) {
+      setConn('offline', '连接失败');
+      addError('无法建立 WebSocket：' + (error.message || error));
+      return;
+    }
+    state.ws = ws;
+    state.manualClose = false;
+
+    ws.onopen = () => {
+      if (state.ws !== ws) return;
+      setConn('online', '已连接');
+      updateComposer();
+      refreshConfig();
+      refreshSessions();
+      scheduleTreeReload(80);
+    };
+    ws.onmessage = (event) => {
+      if (state.ws !== ws) return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+      if (message.type === 'snapshot' && message.snapshot) applySnapshot(message.snapshot);
+      else if (message.type) handleEvent(message);
+    };
+    ws.onerror = () => {
+      if (state.ws === ws) setConn('offline', '连接失败 — 检查令牌');
+    };
+    ws.onclose = () => {
+      if (state.ws !== ws) return;
+      state.ws = null;
+      setBusy(false);
+      settleStreaming();
+      if (state.manualClose) {
+        setConn('offline', '已断开');
+      } else {
+        setConn('offline', '连接已断开');
+        addNote('连接已断开，请检查服务或令牌后重连。', 'warn');
+      }
+      updateActivityIfVisible();
+    };
+  }
+
+  function historyStartFor(messages, count) {
+    let start = Math.max(0, messages.length - count);
+    // Prefer starting at a user turn so a page never begins with an orphaned
+    // tool result whose assistant call is outside the window.
+    for (let i = start; i >= Math.max(0, start - 8); i--) {
+      if (messages[i] && messages[i].role === 'user') return i;
+    }
+    return start;
+  }
+
+  function renderHistoryRange(from, to) {
+    const history = state.history;
+    if (!history) return;
+    const previousBatch = state.batchRender;
+    const previousTarget = state.appendTarget;
+    state.batchRender = true;
+    try {
+      for (let i = from; i < to; i++) renderSnapshotMessage(history.messages[i]);
+    } finally {
+      state.batchRender = previousBatch;
+      state.appendTarget = previousTarget;
+    }
+  }
+
+  function syncHistoryButton() {
+    const history = state.history;
+    let button = state.historyBtn;
+    if (!history || history.start <= 0) {
+      if (button) button.hidden = true;
+      return;
+    }
+    if (!button) {
+      button = el('button', 'history-more');
+      button.type = 'button';
+      button.id = 'historyMore';
+      button.addEventListener('click', loadEarlierHistory);
+      state.historyBtn = button;
+      feedEl.prepend(button);
+    }
+    button.hidden = false;
+    const rendered = history.end - history.start;
+    if (rendered >= HISTORY_MAX) {
+      button.disabled = true;
+      button.textContent = '更早的 ' + history.start + ' 条消息已折叠以控制内存';
+    } else {
+      button.disabled = false;
+      const take = Math.min(HISTORY_PAGE, history.start);
+      button.replaceChildren(icon('chevron-up'),
+        el('span', null, '载入更早的 ' + take + ' 条 · 共 ' + history.start + ' 条'));
+    }
+  }
+
+  function loadEarlierHistory() {
+    const history = state.history;
+    if (!history || history.start <= 0) return;
+    if (history.end - history.start >= HISTORY_MAX) return;
+    let from = Math.max(0, history.start - HISTORY_PAGE);
+    for (let i = from; i >= Math.max(0, from - 8); i--) {
+      if (history.messages[i] && history.messages[i].role === 'user') {
+        from = i;
+        break;
+      }
+    }
+    const stick = isAtBottom();
+    const beforeHeight = feedEl.scrollHeight;
+    const beforeTop = feedEl.scrollTop;
+    const fragment = document.createDocumentFragment();
+    state.appendTarget = fragment;
+    try {
+      renderHistoryRange(from, history.start);
+    } finally {
+      state.appendTarget = null;
+    }
+    history.start = from;
+    const anchor = state.historyBtn ? state.historyBtn.nextSibling : feedEl.firstChild;
+    feedEl.insertBefore(fragment, anchor);
+    if (!stick) {
+      const previous = feedEl.style.scrollBehavior;
+      feedEl.style.scrollBehavior = 'auto';
+      feedEl.scrollTop = beforeTop + (feedEl.scrollHeight - beforeHeight);
+      feedEl.style.scrollBehavior = previous;
+    }
+    syncHistoryButton();
+  }
+
+  function applySnapshot(snapshot) {
+    const previous = state.sessionId;
+    state.sessionId = snapshot.session_id;
+    state.cwd = snapshot.cwd || state.cwd;
+    state.agentModel = snapshot.agent_model || state.agentModel;
+    state.compactModel = snapshot.compact_model || state.compactModel;
+    state.contextTokens = Number(snapshot.context_tokens) || 0;
+    state.contextLimit = Number(snapshot.context_limit) || state.contextLimit;
+    state.inputTokens = 0;
+    state.outputTokens = 0;
+    state.resumeId = snapshot.session_id;
+    if (previous && previous !== state.sessionId) clearViewer();
+    settleStreaming();
+    clearFeed(false);
+    const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    const start = historyStartFor(messages, HISTORY_INITIAL);
+    state.history = messages.length ? { messages, start, end: messages.length } : null;
+    if (messages.length) {
+      renderHistoryRange(start, messages.length);
+      syncHistoryButton();
+    }
+    state.todos = Array.isArray(snapshot.todos) ? snapshot.todos : [];
+    updateSessionUI();
+    updateModelChips();
+    updateStats();
+    renderTodos();
+    renderActivity();
+    if (!messages.length) showEmptyState();
+    scrollBottomInstant();
+    scheduleTreeReload(120);
+    refreshSessions();
+  }
+
+  function renderSnapshotMessage(message) {
+    if (!message || !message.role) return;
+    if (message.role === 'system') return;
+    if (message.role === 'user') {
+      if (message.content) addUserMessage(message.content);
+      return;
+    }
+    if (message.role === 'assistant') {
+      if (message.reasoning_content) addReasoningBlock(message.reasoning_content);
+      if (message.content) addAssistantCard(message.content, null);
+      for (const call of (message.tool_calls || [])) {
+        const fn = call.function || {};
+        addToolCard(fn.name || 'tool', fn.arguments, call.id, { open: false });
+      }
+      return;
+    }
+    if (message.role === 'tool') {
+      const id = message.tool_call_id;
+      const existing = id ? state.toolCards.get(id) : null;
+      if (existing) {
+        fillToolResult(existing, true, message.content || '');
+      } else {
+        const card = addToolCard(message.name || 'tool', {}, null, { open: false });
+        fillToolResult(card, true, message.content || '');
+      }
+    }
+  }
+
+  function handleEvent(event) {
+    switch (event.type) {
+      case 'session_started':
+        state.sessionId = event.session_id;
+        state.cwd = event.cwd || state.cwd;
+        state.agentModel = event.agent_model || state.agentModel;
+        state.compactModel = event.compact_model || state.compactModel;
+        state.resumeId = event.session_id;
+        updateSessionUI();
+        updateModelChips();
+        updateActivityIfVisible();
+        scheduleTreeReload(80);
+        refreshSessions();
+        break;
+      case 'user_message':
+        addUserMessage(event.text);
+        break;
+      case 'assistant_delta':
+        appendAssistantDelta(event.text);
+        break;
+      case 'assistant_reasoning':
+        appendReasoning(event.text);
+        break;
+      case 'assistant_message':
+        finishAssistantMessage(event);
+        break;
+      case 'tool_call':
+        settleStreaming();
+        addToolCard(event.name, event.arguments, event.id, { open: true });
+        break;
+      case 'tool_output':
+        updateToolLive(event.id, event.name, event.text);
+        break;
+      case 'tool_result':
+        attachToolResult(event.id, event.name, event.ok, event.content);
+        break;
+      case 'todo_updated':
+        state.todos = Array.isArray(event.items) ? event.items : [];
+        renderTodos();
+        break;
+      case 'lsp_status': {
+        const previous = state.lsp.get(event.language);
+        state.lsp.set(event.language, { state: event.state, detail: event.detail });
+        if ((!previous || previous.state !== event.state) &&
+          (event.state === 'degraded' || event.state === 'absent')) {
+          addNote('LSP ' + event.language + '：' + event.state +
+            (event.detail ? ' — ' + event.detail : ''), 'warn');
+        }
+        renderActivity();
+        break;
+      }
+      case 'process_snapshot':
+        state.processes.set(event.pid, {
+          status: event.status,
+          screen: event.screen || '',
+          exit_code: event.exit_code
+        });
+        renderActivity();
+        break;
+      case 'process_exited': {
+        const existing = state.processes.get(event.pid) || { screen: '' };
+        state.processes.set(event.pid, {
+          status: event.status,
+          screen: existing.screen || '',
+          exit_code: event.exit_code
+        });
+        if ((event.exit_code != null && event.exit_code !== 0) || event.status === 'failed') {
+          addNote('进程 ' + event.pid + ' ' + procLabel(event.status) +
+            (event.exit_code != null ? '（exit ' + event.exit_code + '）' : ''), 'warn');
+        }
+        renderActivity();
+        break;
+      }
+      case 'download_consent':
+        showConsent(event);
+        break;
+      case 'download_status':
+        addNote('LSP 下载 ' + event.server_id + '：' + event.state +
+          (event.detail ? ' — ' + event.detail : ''));
+        break;
+      case 'token_usage':
+        state.inputTokens = Number(event.input_tokens) || 0;
+        state.outputTokens = Number(event.output_tokens) || 0;
+        state.contextTokens = Number(event.context_tokens) || 0;
+        if (event.context_limit) state.contextLimit = Number(event.context_limit) || state.contextLimit;
+        updateStats();
+        updateActivityIfVisible();
+        break;
+      case 'compaction':
+        addNote('上下文已压缩，丢弃 ' + event.dropped_messages + ' 条消息', 'brand');
+        break;
+      case 'chase':
+        addNote('待办追问 ' + event.attempt + '：仍有 ' + event.pending.length + ' 项未完成', 'warn');
+        break;
+      case 'notice':
+        handleNotice(event);
+        break;
+      case 'error':
+        settleStreaming();
+        addError(event.message || '未知错误');
+        if (/already running/i.test(event.message || '')) setBusy(true);
+        break;
+      case 'turn_complete':
+        setBusy(false);
+        settleStreaming();
+        if (event.stop_reason && event.stop_reason !== 'completed' && event.stop_reason !== 'error') {
+          addNote('本轮结束：' + event.stop_reason, 'warn');
+        }
+        refreshSessions();
+        break;
+      default:
+        break;
+    }
+  }
+
+  function handleNotice(event) {
+    const message = String(event.message || '');
+    const workspacePrefix = message.startsWith('workspace: ')
+      ? 'workspace: '
+      : (message.startsWith('workspace changed to ') ? 'workspace changed to ' : '');
+    if (workspacePrefix) {
+      const path = message.slice(workspacePrefix.length).trim();
+      if (path && path !== state.cwd) {
+        state.cwd = path;
+        clearViewer();
+        updateSessionUI();
+        scheduleTreeReload(0);
+        updateActivityIfVisible();
+        toast('工作目录已切换');
+      }
+      return;
+    }
+    const modelPrefix = message.startsWith('model: ')
+      ? 'model: '
+      : (message.startsWith('model changed to ') ? 'model changed to ' : '');
+    if (modelPrefix) {
+      const model = message.slice(modelPrefix.length).trim();
+      if (model) {
+        state.agentModel = model;
+        updateModelChips();
+        updateActivityIfVisible();
+        toast('模型已切换为 ' + model);
+      }
+      return;
+    }
+    addNote((event.level === 'warning' ? '警告：' : '') + message,
+      event.level === 'warning' ? 'warn' : '');
+  }
+
+  /* ---------------- composer ---------------- */
+  function resizeInput() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 170) + 'px';
+  }
+
+  function sendCommand(command) {
+    if (!isConnected()) {
+      toast('尚未连接', 'error');
+      return false;
+    }
+    try {
+      state.ws.send(JSON.stringify(command));
+      return true;
+    } catch (error) {
+      toast('发送失败：' + (error.message || error), 'error');
+      return false;
+    }
+  }
+
+  function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    if (text === '/help') {
+      inputEl.value = '';
+      resizeInput();
+      addNote('命令：/help · /model <名称> · /cwd <目录> · /cancel。Enter 发送，Shift+Enter 换行。', 'brand');
+      return;
+    }
+    if (text === '/model' || text.startsWith('/model ')) {
+      if (!isConnected()) {
+        toast('尚未连接', 'error');
+        return;
+      }
+      const model = text.slice(6).trim();
+      if (!model) {
+        addNote('当前 agent 模型：' + (state.agentModel || '—'), 'brand');
+        inputEl.value = '';
+        resizeInput();
+        return;
+      }
+      if (sendCommand({ type: 'set_agent_model', model })) {
+        inputEl.value = '';
+        resizeInput();
+      }
+      return;
+    }
+    if (text === '/cwd' || text.startsWith('/cwd ')) {
+      if (!isConnected()) {
+        toast('尚未连接', 'error');
+        return;
+      }
+      const path = text.slice(4).trim();
+      if (!path) {
+        addNote('当前工作目录：' + (state.cwd || '—'), 'brand');
+        inputEl.value = '';
+        resizeInput();
+        return;
+      }
+      if (sendCommand({ type: 'set_cwd', path })) {
+        inputEl.value = '';
+        resizeInput();
+      }
+      return;
+    }
+    if (text === '/cancel') {
+      if (sendCommand({ type: 'cancel' })) {
+        inputEl.value = '';
+        resizeInput();
+        toast('正在停止当前回合…');
+      }
+      return;
+    }
+    if (state.busy) {
+      toast('当前回合仍在运行，可点击“停止”取消。');
+      return;
+    }
+    if (!isConnected()) {
+      toast('尚未连接，无法发送。', 'error');
+      return;
+    }
+    if (sendCommand({ type: 'user_message', text })) {
+      inputEl.value = '';
+      resizeInput();
+      setBusy(true);
+      inputEl.focus();
+    }
+  }
+
+  /* ---------------- event binding / boot ---------------- */
+  function readToken() {
+    let urlToken = null;
+    try {
+      const params = new URLSearchParams(location.search);
+      urlToken = params.get('token');
+      if (urlToken) {
+        params.delete('token');
+        const query = params.toString();
+        history.replaceState(null, '', location.pathname + (query ? '?' + query : '') + location.hash);
+      }
+    } catch (_) {}
+    state.token = ((urlToken || storeGet('rh_token', '')) || '').trim();
+    if (urlToken && state.token) storeSet('rh_token', state.token);
+  }
+
+  function bindEvents() {
+    $('themeBtn').addEventListener('click', toggleTheme);
+    $('settingsBtn').addEventListener('click', () => openSettings('model'));
+    $('newBtn').addEventListener('click', () => {
+      closeDrawers();
+      connect(null);
+    });
+    $('leftToggle').addEventListener('click', toggleLeftDrawer);
+    $('leftClose').addEventListener('click', closeLeftDrawer);
+    $('rightClose').addEventListener('click', closeRightDrawer);
+    $('leftCollapse').addEventListener('click', () => setLeftCollapsed(true));
+    $('rightCollapse').addEventListener('click', () => setRightCollapsed(true));
+    $('edgeLeft').addEventListener('click', () => setLeftCollapsed(false));
+    $('edgeRight').addEventListener('click', () => setRightCollapsed(false));
+    $('scrim').addEventListener('click', closeDrawers);
+    $('rightToggle').addEventListener('click', () => {
+      if (!state.activeFile && state.inspectorTab !== 'activity') setInspectorTab('activity');
+      toggleRightPanel();
+    });
+    $('activityBtn').addEventListener('click', () => {
+      setInspectorTab('activity');
+      openRightPanel();
+    });
+    $('sessionChip').addEventListener('click', () => {
+      switchSideTab('sessions');
+      if (isLeftDrawer()) openLeftDrawer();
+      else setLeftCollapsed(false);
+    });
+    $('wsPath').addEventListener('click', () => openSettings('cwd'));
+    $('modelChip').addEventListener('click', () => openSettings('model'));
+    $('compactChip').addEventListener('click', () => openSettings('compact'));
+    $('treeRefresh').addEventListener('click', loadTree);
+    $('refreshSessions').addEventListener('click', refreshSessions);
+    $('reconnectBtn').addEventListener('click', () => {
+      connect(state.sessionId || state.resumeId || null);
+    });
+    $('settingsForm').addEventListener('submit', saveSettings);
+    $('denyBtn').addEventListener('click', () => decideConsent(false));
+    $('allowBtn').addEventListener('click', () => decideConsent(true));
+    $('fileRefresh').addEventListener('click', () => {
+      if (state.activeFile) openFile(state.activeFile, { keepTab: true });
+    });
+    $('copyFileBtn').addEventListener('click', copyCurrentFile);
+    $('todoHead').addEventListener('click', toggleTodo);
+    $('sendBtn').addEventListener('click', () => {
+      if (state.busy) sendCommand({ type: 'cancel' });
+      else sendMessage();
+    });
+    document.querySelectorAll('[data-close]').forEach((button) => {
+      button.addEventListener('click', () => closeModal(button.dataset.close.replace('#', '')));
+    });
+    document.querySelectorAll('.stab').forEach((button) => {
+      button.addEventListener('click', () => switchSideTab(button.dataset.tab));
+    });
+    document.querySelectorAll('.itab').forEach((button) => {
+      button.addEventListener('click', () => setInspectorTab(button.dataset.itab));
+    });
+    $('settingsModal').addEventListener('click', (event) => {
+      if (event.target === $('settingsModal')) closeModal('settingsModal');
+    });
+    inputEl.addEventListener('input', resizeInput);
+    inputEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        sendMessage();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!$('consentModal').hidden) {
+        decideConsent(false);
+        return;
+      }
+      if (!$('settingsModal').hidden) {
+        closeModal('settingsModal');
+        return;
+      }
+      if (document.body.classList.contains('left-open') || document.body.classList.contains('right-open')) {
+        closeDrawers();
+      }
+    });
+    if (mqLeft.addEventListener) mqLeft.addEventListener('change', handleViewportChange);
+    if (mqRight.addEventListener) mqRight.addEventListener('change', handleViewportChange);
+    window.addEventListener('resize', () => { syncEdges(); updateInputHint(); });
+  }
+
+  function init() {
+    readToken();
+    initLayout();
+    applyTheme(themeIsLight(), false);
+    updateInputHint();
+    switchSideTab(state.sideTab, false);
+    bindEvents();
+    bindResizer($('rzLeft'), 'left');
+    bindResizer($('rzRight'), 'right');
+    syncInspectorHeader();
+    updateSessionUI();
+    updateStats();
+    updateModelChips();
+    renderTodos();
+    renderActivity();
+    updateComposer();
+    resizeInput();
+    showEmptyState();
+    refreshConfig();
+    refreshSessions();
+    connect(null);
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

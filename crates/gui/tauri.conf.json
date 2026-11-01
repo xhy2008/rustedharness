@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RustedHarness",
+  "version": "0.1.0",
+  "identifier": "dev.rustedharness.desktop",
+  "build": {
+    "frontendDist": "../web/assets"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
