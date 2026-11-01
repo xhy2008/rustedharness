@@ -419,6 +419,14 @@ impl Agent {
 
     pub async fn shutdown(&self) {
         self.cancel();
+        // A session that never received a prompt leaves no artifact behind:
+        // plain launch-and-quit must not litter the sessions dir.
+        {
+            let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            if session.messages() == 0 {
+                let _ = std::fs::remove_file(session.path());
+            }
+        }
         let ctx = self.ctx.read().unwrap().clone();
         ctx.lsp.shutdown_all().await;
         ctx.mcp.shutdown_all().await;

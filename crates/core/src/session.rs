@@ -161,6 +161,12 @@ impl SessionWriter {
         &self.id
     }
 
+    /// Number of `Message` records written in this transcript. Used to detect
+    /// abandoned empty sessions (started but never prompted).
+    pub fn messages(&self) -> usize {
+        self.messages
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -280,12 +286,31 @@ impl SessionWriter {
             })
             .collect();
         files.sort_by_key(|a| std::cmp::Reverse(a.0));
-        for (_, path) in files.into_iter().skip(max) {
-            if path != self.path {
-                let _ = std::fs::remove_file(path);
+        let mut kept = 1usize; // the transcript being written right now
+        for (_, path) in files {
+            if path == self.path {
+                continue;
             }
+            // Sessions with no messages (every launch used to leave one behind)
+            // are garbage regardless of the save quota — sweep them always.
+            if kept < max && file_has_messages(&path) {
+                kept += 1;
+                continue;
+            }
+            let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Cheap probe: does this transcript contain at least one message record?
+/// The serde tag is the first key of every line, so a substring scan is exact.
+fn file_has_messages(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    BufReader::new(file)
+        .lines()
+        .any(|line| line.map(|l| l.contains(r#""kind":"message""#)).unwrap_or(false))
 }
 
 pub struct SessionStore {
@@ -581,6 +606,22 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(SessionStore::new(&cfg).list().len(), 2);
+    }
+
+    #[test]
+    fn pruning_sweeps_empty_sessions_regardless_of_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut real = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+        real.user("kept").unwrap();
+        let real_path = real.path().to_path_buf();
+        let empty = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+        let empty_path = empty.path().to_path_buf();
+        drop(real);
+        drop(empty);
+        let _ = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+        assert!(real_path.exists());
+        assert!(!empty_path.exists());
     }
 
     #[test]
