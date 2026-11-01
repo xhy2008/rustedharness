@@ -12,15 +12,15 @@ use crate::entries::EntryKind;
 use crate::theme::*;
 
 pub fn draw(app: &mut App, frame: &mut Frame) {
-    // Reserve a 2-column right gutter. crossterm can report one more column
-    // than conhost actually lets you write without latching a pending auto-wrap
-    // (and on some consoles the true last *usable* column is even further in),
-    // so any row reaching the far right shifts the rows after it — the status
-    // bar's trailing ellipsis landing on a phantom second line. A 2-column
-    // margin keeps full-width rows off the wrap trigger on every width.
+    // Reserve a 6-column right gutter. crossterm's reported width overstates
+    // what conhost on this machine actually lets you write before latching a
+    // pending auto-wrap (empirically ~4 columns too wide), and any row reaching
+    // that limit shifts the rows after it — the status bar's trailing ellipsis
+    // landing on a phantom second line. 6 keeps full-width rows clear of the
+    // wrap trigger at every width.
     let area = {
         let mut a = frame.area();
-        a.width = a.width.saturating_sub(2);
+        a.width = a.width.saturating_sub(6);
         a
     };
     let rows = vec![
