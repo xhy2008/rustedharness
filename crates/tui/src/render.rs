@@ -27,10 +27,21 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     app.mouse_area = body;
     draw_editor(app, frame, editor);
     draw_footer(app, frame, footer);
+    // Inset overlays/transcript fills by one column: writing the last terminal
+    // column triggers conhost's pending auto-wrap, which desynchronizes
+    // subsequent incremental redraws (the "typing shifts rows" glitch that a
+    // manual resize temporarily fixes).
     if app.consent.is_some() {
-        draw_consent(app, frame, body);
+        draw_consent(app, frame, shrink(body));
     }
-    draw_overlay(app, frame, body);
+    draw_overlay(app, frame, shrink(body));
+}
+
+fn shrink(area: Rect) -> Rect {
+    Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    }
 }
 
 fn transcript_signature(app: &App) -> u64 {
@@ -292,14 +303,14 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
 
     // Rule across the top, like Pi's editor border.
     let rule = Line::from(vec![Span::styled(
-        "─".repeat(area.width as usize),
+        "─".repeat(area.width.saturating_sub(1) as usize),
         Style::default().fg(if app.busy { ACCENT } else { BORDER_DIM }),
     )]);
     frame.render_widget(Paragraph::new(rule), rows[0]);
 
     // Single-line viewport around the cursor; the caret is drawn (no hardware
     // cursor) to avoid conhost block blink. No leading prompt glyph.
-    let avail = rows[1].width as usize;
+    let avail = rows[1].width.saturating_sub(1) as usize;
     let avail = avail.max(1);
     let cursor = app.cursor.min(app.input.len());
     let mut pre: Vec<char> = Vec::new();
@@ -401,7 +412,13 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(Span::styled(reason.clone(), Style::default().fg(DIM)));
         }
     }
-    frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), area.width)), area);
+    frame.render_widget(
+        Paragraph::new(truncate_line(
+            Line::from(spans),
+            area.width.saturating_sub(1),
+        )),
+        area,
+    );
 }
 
 /// Trim a line's spans to a single row of at most `width` display columns, so a
