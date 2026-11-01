@@ -12,14 +12,15 @@ use crate::entries::EntryKind;
 use crate::theme::*;
 
 pub fn draw(app: &mut App, frame: &mut Frame) {
-    // Work one column narrower than the terminal. crossterm's reported width
-    // can exceed conhost's usable columns by one, and any row that reaches the
-    // physical last column latches a pending auto-wrap that shifts following
-    // rows (the "status bar ellipsis lands on the next line" glitch). The extra
-    // gutter column makes a full-width row impossible regardless.
+    // Reserve a 2-column right gutter. crossterm can report one more column
+    // than conhost actually lets you write without latching a pending auto-wrap
+    // (and on some consoles the true last *usable* column is even further in),
+    // so any row reaching the far right shifts the rows after it — the status
+    // bar's trailing ellipsis landing on a phantom second line. A 2-column
+    // margin keeps full-width rows off the wrap trigger on every width.
     let area = {
         let mut a = frame.area();
-        a.width = a.width.saturating_sub(1);
+        a.width = a.width.saturating_sub(2);
         a
     };
     let rows = vec![
