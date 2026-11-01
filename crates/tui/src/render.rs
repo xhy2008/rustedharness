@@ -15,7 +15,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let rows = vec![
         Constraint::Min(3),
-        Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Length(1),
     ];
     let chunks = Layout::new(Direction::Vertical, rows).split(area);
@@ -286,7 +286,7 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
 fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     let rows = Layout::new(
         Direction::Vertical,
-        [Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)],
+        [Constraint::Length(1), Constraint::Min(1)],
     )
     .split(area);
 
@@ -297,9 +297,9 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     )]);
     frame.render_widget(Paragraph::new(rule), rows[0]);
 
-    // Single-line viewport around the cursor, so typing never wraps oddly;
-    // the caret is drawn (no hardware cursor) to avoid conhost block blink.
-    let avail = rows[1].width.saturating_sub(2) as usize;
+    // Single-line viewport around the cursor; the caret is drawn (no hardware
+    // cursor) to avoid conhost block blink. No leading prompt glyph.
+    let avail = rows[1].width as usize;
     let avail = avail.max(1);
     let cursor = app.cursor.min(app.input.len());
     let mut pre: Vec<char> = Vec::new();
@@ -323,15 +323,13 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
         post_w += cw;
     }
 
-    let prompt_style = Style::default().fg(if app.busy { YELLOW } else { ACCENT });
     let text_style = Style::default().fg(TEXT);
     let mut spans = vec![
-        Span::styled("❯ ", prompt_style),
         Span::styled(pre.into_iter().collect::<String>(), text_style),
         Span::styled(
             "▏",
             Style::default()
-                .fg(ACCENT)
+                .fg(if app.busy { YELLOW } else { ACCENT })
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -339,27 +337,6 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(post, text_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), rows[1]);
-
-    let status = if app.busy {
-        Line::from(vec![
-            Span::styled(
-                format!("{} working", crate::app::spinner(app.tick)),
-                Style::default().fg(YELLOW),
-            ),
-            Span::styled(
-                format!("   esc cancel · {} queued", app.queue.len()),
-                Style::default().fg(DIM),
-            ),
-        ])
-    } else {
-        let hint = if matches!(app.overlay, Overlay::None) {
-            "enter send · / commands · drag to copy · ctrl+o tools · ctrl+t thinking"
-        } else {
-            "up/down select · enter confirm · esc close · type to filter"
-        };
-        Line::from(Span::styled(hint, Style::default().fg(DIM)))
-    };
-    frame.render_widget(Paragraph::new(status), rows[2]);
 }
 
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
@@ -381,22 +358,39 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         GREEN
     };
     let sep = || Span::styled("  ·  ", Style::default().fg(DIM));
-    let mut spans = vec![
-        Span::styled(shorten(&app.cwd, 36), Style::default().fg(MUTED)),
-        sep(),
-        Span::styled(app.agent_model.clone(), Style::default().fg(BLUE)),
-        sep(),
-        Span::styled(ctx_str, Style::default().fg(ctx_color)),
-        sep(),
-        Span::styled(
-            format!(
-                "in {} · out {}",
-                crate::app::human_count(app.input_tokens),
-                crate::app::human_count(app.output_tokens)
-            ),
-            Style::default().fg(DIM),
+    let mut spans = Vec::new();
+    if app.busy {
+        spans.push(Span::styled(
+            format!("{} working", crate::app::spinner(app.tick)),
+            Style::default().fg(YELLOW),
+        ));
+        if !app.queue.is_empty() {
+            spans.push(Span::styled(
+                format!(" (+{})", app.queue.len()),
+                Style::default().fg(DIM),
+            ));
+        }
+        spans.push(sep());
+    }
+    spans.push(Span::styled(shorten(&app.cwd, 36), Style::default().fg(MUTED)));
+    spans.push(sep());
+    spans.push(Span::styled(app.agent_model.clone(), Style::default().fg(BLUE)));
+    spans.push(sep());
+    spans.push(Span::styled(
+        format!("compact {}", app.compact_model),
+        Style::default().fg(BLUE),
+    ));
+    spans.push(sep());
+    spans.push(Span::styled(ctx_str, Style::default().fg(ctx_color)));
+    spans.push(sep());
+    spans.push(Span::styled(
+        format!(
+            "in {} · out {}",
+            crate::app::human_count(app.input_tokens),
+            crate::app::human_count(app.output_tokens)
         ),
-    ];
+        Style::default().fg(DIM),
+    ));
     if let Some(cost) = app.cost_usd {
         spans.push(sep());
         spans.push(Span::styled(format_cost(cost), Style::default().fg(ACCENT)));
@@ -485,10 +479,19 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
         Overlay::Slash { items, sel } => {
             draw_picker_items(frame, body, "commands", items, *sel, "")
         }
-        Overlay::Model { items, sel, filter } => {
+        Overlay::Model {
+            items,
+            sel,
+            filter,
+            target,
+        } => {
             let shown: Vec<PickerItem> =
                 model_filtered(items, filter).into_iter().cloned().collect();
-            draw_picker_items(frame, body, "models", &shown, *sel, filter);
+            let title = match target {
+                crate::app::ModelTarget::Agent => "models",
+                crate::app::ModelTarget::Compact => "compact models",
+            };
+            draw_picker_items(frame, body, title, &shown, *sel, filter);
         }
         Overlay::Session { items, sel, filter } => {
             let shown: Vec<PickerItem> =
@@ -540,38 +543,38 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             );
             frame.render_widget(paragraph, area);
         }
-        Overlay::Settings => {
-            let lines = vec![
-                Line::from(Span::styled(
-                    "settings",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(""),
-                Line::from(format!(
-                    "  agent model    {}   (/model)",
-                    app.agent_model
-                )),
-                Line::from(format!(
-                    "  compact model  {}   (from config, read-only)",
-                    app.compact_model
-                )),
-                Line::from(format!(
-                    "  workspace      {}   (/cwd <dir>)",
-                    app.cwd
-                )),
-                Line::from(format!(
-                    "  context        {}/{}   ·   session {}…",
-                    app.context_tokens,
-                    app.context_limit,
-                    app.session_id.chars().take(8).collect::<String>()
-                )),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  esc to close",
-                    Style::default().fg(DIM),
-                )),
+        Overlay::Settings { sel } => {
+            let ctx_pct = if app.context_limit > 0 {
+                (app.context_tokens as f64 * 100.0 / app.context_limit as f64) as usize
+            } else {
+                0
+            };
+            let rows = [
+                PickerItem {
+                    label: format!("agent model  ·  {}", app.agent_model),
+                    detail: "select to switch the working model".to_string(),
+                    value: String::new(),
+                },
+                PickerItem {
+                    label: format!("compact model  ·  {}", app.compact_model),
+                    detail: "select to switch the summary model".to_string(),
+                    value: String::new(),
+                },
+                PickerItem {
+                    label: format!("workspace  ·  {}", app.cwd),
+                    detail: "Enter shows the /cwd hint".to_string(),
+                    value: String::new(),
+                },
+                PickerItem {
+                    label: format!(
+                        "session  ·  {}…  ctx {ctx_pct}%",
+                        app.session_id.chars().take(8).collect::<String>()
+                    ),
+                    detail: "Enter prints full session stats".to_string(),
+                    value: String::new(),
+                },
             ];
-            draw_info_block(frame, body, lines);
+            draw_picker_items(frame, body, "settings", &rows, *sel, "");
         }
         Overlay::Hotkeys => {
             let lines = vec![

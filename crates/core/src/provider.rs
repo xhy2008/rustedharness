@@ -547,12 +547,18 @@ impl Backend for Provider {
 
         for degraded in candidates {
             let body = self.body(&request, degraded);
-            let stream = match self
-                .client
-                .chat()
-                .create_stream_byot::<Value, WireChunk>(body)
-                .await
-            {
+            // Guard the request itself with cancellation: `create_stream_byot`
+            // awaits the response headers, which is where a slow or rate-limited
+            // provider stalls — without this the cancel token cannot interrupt
+            // until the first chunk arrives.
+            let chat = self.client.chat();
+            let request_future = chat.create_stream_byot::<Value, WireChunk>(body);
+            let created = tokio::select! {
+                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+                result = request_future => result,
+            };
+            drop(chat);
+            let stream = match created {
                 Ok(stream) => stream,
                 Err(err) => {
                     let text = err.to_string();

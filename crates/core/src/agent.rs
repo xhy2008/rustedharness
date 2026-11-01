@@ -353,6 +353,19 @@ impl Agent {
         Ok(())
     }
 
+    /// Switch the compaction model. Persisted like `set_agent_model` so the
+    /// choice survives a session resume.
+    pub fn set_compact_model(&self, model: &str) -> Result<()> {
+        let spec = self.config.resolve_model(model)?;
+        let reference = spec.reference();
+        *self.compact_model.write().unwrap() = reference.clone();
+        let agent = self.agent_model.read().unwrap().clone();
+        self.session.lock().unwrap().models(&agent, &reference)?;
+        let mut ctx = self.ctx.write().unwrap();
+        ctx.compact_model = reference;
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.cancel_token.lock().unwrap().cancel();
         // Interrupt cascade: all live process groups die with the turn.

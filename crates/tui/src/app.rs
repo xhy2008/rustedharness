@@ -64,6 +64,7 @@ pub enum Overlay {
         items: Vec<PickerItem>,
         sel: usize,
         filter: String,
+        target: ModelTarget,
     },
     Session {
         items: Vec<PickerItem>,
@@ -81,12 +82,29 @@ pub enum Overlay {
         scroll: usize,
         truncated: bool,
     },
-    Settings,
+    Settings {
+        sel: usize,
+    },
     Hotkeys,
     Todos,
     Processes,
     Lsp,
 }
+
+/// Which model slot the picker edits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ModelTarget {
+    Agent,
+    Compact,
+}
+
+/// Selectable rows in the settings overlay.
+const SETTINGS_ROWS: &[&str] = &[
+    "agent model",
+    "compact model",
+    "workspace",
+    "session",
+];
 
 pub struct ConsentCard {
     pub id: String,
@@ -150,6 +168,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/hotkeys", "keyboard shortcut reference"),
     ("/model", "open the model picker"),
     ("/model <name>", "switch the agent model directly"),
+    ("/compact-model", "switch the compaction model"),
     ("/settings", "model, compact model, workspace, session"),
     ("/cwd <dir>", "move the workspace root"),
     ("/new", "start a fresh session"),
@@ -164,7 +183,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/install <id>", "install a language server"),
     ("/procs", "background processes"),
     ("/copy", "copy the last assistant reply"),
-    ("/cancel", "cancel the running turn"),
     ("/quit", "exit"),
 ];
 
@@ -562,11 +580,7 @@ impl App {
                 // and let useful keys fall through to normal handling.
                 if matches!(
                     self.overlay,
-                    Overlay::Hotkeys
-                        | Overlay::Todos
-                        | Overlay::Processes
-                        | Overlay::Lsp
-                        | Overlay::Settings
+                    Overlay::Hotkeys | Overlay::Todos | Overlay::Processes | Overlay::Lsp
                 ) {
                     self.overlay = Overlay::None;
                     if matches!(key.code, KeyCode::Esc) {
@@ -635,6 +649,7 @@ impl App {
             Overlay::Model { items, filter, .. } => model_filtered(items, filter).len(),
             Overlay::Session { items, filter, .. } => session_filtered(items, filter).len(),
             Overlay::FileBrowser { entries, .. } => entries.len(),
+            Overlay::Settings { .. } => SETTINGS_ROWS.len(),
             _ => 0,
         };
         if len == 0 {
@@ -644,7 +659,8 @@ impl App {
             Overlay::Slash { sel, .. }
             | Overlay::Model { sel, .. }
             | Overlay::Session { sel, .. }
-            | Overlay::FileBrowser { sel, .. } => sel,
+            | Overlay::FileBrowser { sel, .. }
+            | Overlay::Settings { sel } => sel,
             _ => return,
         };
         *sel = if down {
@@ -709,7 +725,7 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('l') => {
-                    self.open_model_picker();
+                    self.open_model_picker(ModelTarget::Agent);
                     return Ok(());
                 }
                 KeyCode::Char('r') => {
@@ -1059,10 +1075,15 @@ impl App {
                     }
                 }
             }
-            Overlay::Model { items, sel, filter } => {
+            Overlay::Model {
+                items,
+                sel,
+                filter,
+                target,
+            } => {
                 if let Some(item) = model_filtered(&items, &filter).get(sel) {
                     let model = item.value.clone();
-                    self.set_model(&model);
+                    self.set_model(&model, target);
                 }
             }
             Overlay::Session { items, sel, filter } => {
@@ -1101,7 +1122,36 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path);
             }
-            Overlay::Settings => self.open_model_picker(),
+            Overlay::Settings { sel } => match sel {
+                0 => self.open_model_picker(ModelTarget::Agent),
+                1 => self.open_model_picker(ModelTarget::Compact),
+                2 => self.notice(format!(
+                    "workspace is {} — change it with /cwd <dir>",
+                    self.cwd
+                )),
+                _ => {
+                    let cost = self
+                        .cost_usd
+                        .map(|c| format!("{c:.4}"))
+                        .unwrap_or_else(|| "n/a".into());
+                    self.push(
+                        EntryKind::Notice,
+                        "",
+                        format!(
+                            "session {}\n  cwd {}\n  model {} · compact {}\n  ctx {}/{} · in {} · out {} · cost {}",
+                            self.session_id,
+                            self.cwd,
+                            self.agent_model,
+                            self.compact_model,
+                            self.context_tokens,
+                            self.context_limit,
+                            self.input_tokens,
+                            self.output_tokens,
+                            cost
+                        ),
+                    );
+                }
+            },
             other => self.overlay = other,
         }
         Ok(())
@@ -1124,9 +1174,11 @@ impl App {
                 self.push(EntryKind::Notice, "commands", list.join("\n"));
             }
             "/hotkeys" => self.overlay = Overlay::Hotkeys,
-            "/model" if arg.is_empty() => self.open_model_picker(),
-            "/model" => self.set_model(&arg),
-            "/settings" => self.overlay = Overlay::Settings,
+            "/model" if arg.is_empty() => self.open_model_picker(ModelTarget::Agent),
+            "/model" => self.set_model(&arg, ModelTarget::Agent),
+            "/compact-model" if arg.is_empty() => self.open_model_picker(ModelTarget::Compact),
+            "/compact-model" => self.set_model(&arg, ModelTarget::Compact),
+            "/settings" => self.overlay = Overlay::Settings { sel: 0 },
             "/cwd" if arg.is_empty() => self.notice(format!("cwd: {}", self.cwd)),
             "/cwd" => match self.agent.set_cwd(Path::new(&arg)).await {
                 Ok(()) => {
@@ -1197,7 +1249,6 @@ impl App {
                 self.notice(format!("installing {arg}…"));
             }
             "/copy" => self.copy_last_assistant(),
-            "/cancel" => self.agent.cancel(),
             "/quit" | "/exit" => self.quit = true,
             other => self.push(
                 EntryKind::Error,
@@ -1208,17 +1259,30 @@ impl App {
         Ok(())
     }
 
-    fn set_model(&mut self, model: &str) {
-        match self.agent.set_agent_model(model) {
+    fn set_model(&mut self, model: &str, target: ModelTarget) {
+        let result = match target {
+            ModelTarget::Agent => self.agent.set_agent_model(model),
+            ModelTarget::Compact => self.agent.set_compact_model(model),
+        };
+        match result {
             Ok(()) => {
                 self.agent_model = self.agent.agent_model();
-                self.notice(format!("model: {}", self.agent_model));
+                self.compact_model = self.agent.compact_model();
+                let label = match target {
+                    ModelTarget::Agent => "model",
+                    ModelTarget::Compact => "compact model",
+                };
+                let value = match target {
+                    ModelTarget::Agent => self.agent_model.clone(),
+                    ModelTarget::Compact => self.compact_model.clone(),
+                };
+                self.notice(format!("{label}: {value}"));
             }
             Err(err) => self.push(EntryKind::Error, "", err.to_string()),
         }
     }
 
-    fn open_model_picker(&mut self) {
+    fn open_model_picker(&mut self, target: ModelTarget) {
         let items: Vec<PickerItem> = self
             .config
             .model_catalog()
@@ -1232,14 +1296,16 @@ impl App {
         if items.is_empty() {
             self.notice("no models configured — check the [providers] section in config");
         } else {
-            let sel = items
-                .iter()
-                .position(|item| item.value == self.agent_model)
-                .unwrap_or(0);
+            let current = match target {
+                ModelTarget::Agent => &self.agent_model,
+                ModelTarget::Compact => &self.compact_model,
+            };
+            let sel = items.iter().position(|item| item.value == *current).unwrap_or(0);
             self.overlay = Overlay::Model {
                 items,
                 sel,
                 filter: String::new(),
+                target,
             };
         }
     }

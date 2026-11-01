@@ -411,7 +411,20 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
                     SessionRecord::Process { pid, status, .. } => {
                         loaded.last_process = Some((pid, status))
                     }
-                    SessionRecord::Models { .. } => {}
+                    SessionRecord::Models { agent, compact } => {
+                        // The header Meta holds the model chosen at creation;
+                        // every `/model` switch appends a later Models record.
+                        // Replay the latest one so resuming returns to the
+                        // model in use when the session was last closed.
+                        if let Some(meta) = &mut loaded.meta {
+                            if !agent.is_empty() {
+                                meta.agent_model = agent;
+                            }
+                            if !compact.is_empty() {
+                                meta.compact_model = compact;
+                            }
+                        }
+                    }
                     SessionRecord::Compaction {
                         summary,
                         dropped_messages,
@@ -493,6 +506,22 @@ mod tests {
         assert!(loaded.compactions.is_empty());
         assert!(!loaded.truncated_tail);
         assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn models_switch_is_replayed_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "orig-model", "orig-compact").unwrap();
+        writer.user("hello").unwrap();
+        // A mid-session `/model` switch appends a later Models record.
+        writer.models("new-model", "new-compact").unwrap();
+        let id = writer.id().to_string();
+
+        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        let meta = loaded.meta.expect("meta");
+        assert_eq!(meta.agent_model, "new-model");
+        assert_eq!(meta.compact_model, "new-compact");
     }
 
     #[test]
