@@ -14,7 +14,7 @@ use crate::theme::*;
 pub fn draw(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let rows = vec![
-        Constraint::Min(3),
+        Constraint::Min(1),
         Constraint::Length(2),
         Constraint::Length(1),
     ];
@@ -401,7 +401,42 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
             spans.push(Span::styled(reason.clone(), Style::default().fg(DIM)));
         }
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), area.width)), area);
+}
+
+/// Trim a line's spans to a single row of at most `width` display columns, so a
+/// long status bar cannot wrap onto a second row and push the editor out of
+/// place on narrow terminals.
+fn truncate_line(line: Line<'static>, width: u16) -> Line<'static> {
+    let max = width as usize;
+    if line.width() <= max {
+        return line;
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        let w = span.width();
+        if used + w <= max {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let keep = max - used;
+        let mut text = String::new();
+        let mut tw = 0;
+        for c in span.content.chars() {
+            let cw = char_width(c);
+            if tw + cw > keep.saturating_sub(1) {
+                break;
+            }
+            text.push(c);
+            tw += cw;
+        }
+        text.push('…');
+        out.push(Span::styled(text, span.style));
+        break;
+    }
+    Line::from(out)
 }
 
 fn format_cost(cost: f64) -> String {
