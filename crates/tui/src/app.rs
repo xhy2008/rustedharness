@@ -962,7 +962,7 @@ impl App {
         }
     }
 
-    fn overlay_active(&self) -> bool {
+    pub fn overlay_active(&self) -> bool {
         !matches!(self.overlay, Overlay::None)
     }
 

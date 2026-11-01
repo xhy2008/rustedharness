@@ -82,7 +82,19 @@ async fn event_loop(
     op_tx: &UnboundedSender<OpResult>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
+    let mut overlay_was_open = app.overlay_active();
     loop {
+        // When an interactive overlay (model/session picker, settings, file
+        // browser) closes, force a full repaint: incremental diffs leave stale
+        // glyphs behind in the blank transcript area on some terminals (notably
+        // the Windows console), because the overlay's cells were painted over
+        // empty rows that the next frame does not otherwise rewrite.
+        let overlay_open = app.overlay_active();
+        if overlay_was_open && !overlay_open {
+            app.lines_sig = (usize::MAX, 0);
+            terminal.clear()?;
+        }
+        overlay_was_open = overlay_open;
         terminal.draw(|frame| render::draw(app, frame))?;
         if let Some(pending) = app.pending.take() {
             let label = pending
