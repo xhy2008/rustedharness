@@ -466,7 +466,7 @@ fn shorten(path: &str, max: usize) -> String {
 
 fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
     let Some(card) = &app.consent else { return };
-    let height = 8.min(body.height.saturating_sub(1)).max(5);
+    let height = 8.min(body.height.saturating_sub(1));
     let width = (body.width.saturating_sub(8)).min(80);
     let area = Rect {
         x: body.x + (body.width.saturating_sub(width)) / 2,
@@ -551,7 +551,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             scroll,
             truncated,
         } => {
-            let height = (body.height.saturating_sub(1)).max(4);
+            let height = body.height.saturating_sub(1);
             let area = Rect {
                 height,
                 ..body
@@ -756,9 +756,10 @@ pub fn clip(text: &str, max: usize) -> String {
 }
 
 fn draw_info_block(frame: &mut Frame, body: Rect, lines: Vec<Line<'static>>) {
-    let height = (lines.len() as u16 + 2)
-        .min(body.height.saturating_sub(1))
-        .max(4);
+    // Clamp to the body height: a box taller than `body` would spill past its
+    // bottom edge into the editor and status rows (the "input printed onto the
+    // footer" bug on short terminals).
+    let height = (lines.len() as u16 + 2).min(body.height);
     let area = Rect {
         y: body.y + body.height.saturating_sub(height),
         height,
@@ -782,7 +783,7 @@ fn draw_picker_items(
     filter: &str,
 ) {
     let height = (items.len().min(12) + 3) as u16;
-    let height = height.min(body.height.saturating_sub(1)).max(4);
+    let height = height.min(body.height);
     let area = Rect {
         y: body.y + body.height.saturating_sub(height),
         height,
@@ -805,7 +806,7 @@ fn draw_picker_items(
             Style::default().fg(DIM),
         )));
     }
-    let window = (height as usize).saturating_sub(3);
+    let window = (height as usize).saturating_sub(3).max(1);
     let start = sel.saturating_sub(window / 2);
     // Reserve room for the two side borders. Clipping each row to this width is
     // what stops a long "label + detail" line from soft-wrapping and stacking a
