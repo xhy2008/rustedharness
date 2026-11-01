@@ -966,6 +966,27 @@ impl App {
         !matches!(self.overlay, Overlay::None)
     }
 
+    /// Identity of the current overlay for repaint-coalescing: `None` when no
+    /// overlay is shown, else a small (kind, size) tag. When this changes we
+    /// force a full repaint, because an overlay box of a different height or
+    /// type can leave stale border glyphs outside its new (often shorter)
+    /// area on terminals that do not erase them during an incremental redraw.
+    pub fn overlay_key(&self) -> Option<(u8, usize)> {
+        match &self.overlay {
+            Overlay::None => None,
+            Overlay::Slash { items, .. } => Some((1, items.len())),
+            Overlay::Model { items, .. } => Some((2, items.len())),
+            Overlay::Session { items, .. } => Some((3, items.len())),
+            Overlay::FileBrowser { entries, .. } => Some((4, entries.len())),
+            Overlay::FileView { lines, .. } => Some((5, lines.len())),
+            Overlay::Settings { .. } => Some((6, SETTINGS_ROWS.len())),
+            Overlay::Hotkeys => Some((7, 1)),
+            Overlay::Todos => Some((8, self.todo.len())),
+            Overlay::Processes => Some((9, self.processes.len())),
+            Overlay::Lsp => Some((10, self.lsp.len())),
+        }
+    }
+
     /// Release of a left-drag: copy the selected transcript region to the
     /// system clipboard. Plain text comes from the cached render lines with
     /// background padding trimmed.

@@ -23,6 +23,8 @@ pub const BORDER_DIM: Color = Color::Rgb(0x55, 0x57, 0x5f);
 
 pub const USER_BG: Color = Color::Rgb(0x23, 0x2c, 0x55);
 pub const TOOL_BG: Color = Color::Rgb(0x32, 0x33, 0x38);
+/// Opaque backdrop for modal overlays so the transcript never bleeds through.
+pub const BG_BASE: Color = Color::Rgb(0x14, 0x16, 0x1a);
 pub const TOOL_OK_BG: Color = Color::Rgb(0x22, 0x40, 0x36);
 pub const TOOL_ERR_BG: Color = Color::Rgb(0x46, 0x2a, 0x22);
 

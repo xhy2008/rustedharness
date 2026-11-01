@@ -770,8 +770,12 @@ fn draw_picker_items(
             Style::default().fg(DIM),
         )));
     }
-    let window = height as usize - 3;
+    let window = (height as usize).saturating_sub(3);
     let start = sel.saturating_sub(window / 2);
+    // Reserve room for the two side borders. Clipping each row to this width is
+    // what stops a long "label + detail" line from soft-wrapping and stacking a
+    // stray tail character (e.g. the "M" of "ctx 1.0M") down the column.
+    let maxw = body.width.saturating_sub(2) as usize;
     for (index, item) in items.iter().enumerate().skip(start).take(window) {
         let selected = index == sel;
         let style = if selected {
@@ -790,7 +794,12 @@ fn draw_picker_items(
                 Style::default().fg(DIM),
             ));
         }
-        lines.push(Line::from(spans));
+        let mut line = Line::from(spans);
+        // Hard-clip to the inner width; a single row must never wrap.
+        if line.width() > maxw {
+            line = clip_line(line, maxw);
+        }
+        lines.push(line);
     }
     if items.len() > window {
         lines.push(Line::from(Span::styled(
@@ -798,7 +807,33 @@ fn draw_picker_items(
             Style::default().fg(DIM),
         )));
     }
-    let paragraph =
-        Paragraph::new(lines).block(Block::bordered().border_style(Style::default().fg(BORDER)));
+    // Opaque background so nothing bleeds through from the transcript below.
+    let paragraph = Paragraph::new(lines).block(
+        Block::bordered()
+            .border_style(Style::default().fg(BORDER))
+            .style(Style::default().bg(BG_BASE)),
+    );
     frame.render_widget(paragraph, area);
+}
+
+/// Trim a line's spans so its total display width fits `max`, dropping any
+/// overflow instead of letting the Paragraph wrap it.
+fn clip_line(line: Line<'static>, max: usize) -> Line<'static> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for span in line.spans {
+        let w = span.width();
+        if used + w <= max {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let keep = max - used;
+        let trimmed: String = span.content.chars().take(keep).collect();
+        if !trimmed.is_empty() {
+            out.push(Span::styled(trimmed, span.style));
+        }
+        break;
+    }
+    Line::from(out)
 }
