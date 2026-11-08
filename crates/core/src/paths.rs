@@ -95,7 +95,6 @@ impl WorkspacePathResolver {
         }
         s
     }
-
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {

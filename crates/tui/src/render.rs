@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{model_filtered, session_filtered, App, Overlay, PickerItem};
+use crate::app::{model_filtered, session_filtered, shorten_path, App, Overlay, PickerItem};
 use crate::entries::EntryKind;
 use crate::theme::*;
 
@@ -383,7 +383,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(sep());
     }
     spans.push(Span::styled(
-        shorten(&app.cwd, 36),
+        shorten_path(&app.cwd, 36),
         Style::default().fg(MUTED),
     ));
     spans.push(sep());
@@ -450,19 +450,26 @@ fn truncate_line(line: Line<'static>, width: u16) -> Line<'static> {
             out.push(span);
             continue;
         }
-        let keep = max - used;
+        let budget = max - used;
+        // Reserve three columns for the ellipsis, but never overshoot `budget`.
+        let ellipsis = budget > 3;
+        let limit = if ellipsis { budget - 3 } else { budget };
         let mut text = String::new();
         let mut tw = 0;
         for c in span.content.chars() {
             let cw = char_width(c);
-            if tw + cw > keep.saturating_sub(3) {
+            if tw + cw > limit {
                 break;
             }
             text.push(c);
             tw += cw;
         }
-        text.push_str("...");
-        out.push(Span::styled(text, span.style));
+        if ellipsis {
+            text.push_str("...");
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, span.style));
+        }
         break;
     }
     Line::from(out)
@@ -476,21 +483,6 @@ fn format_cost(cost: f64) -> String {
     } else {
         format!("¥{cost:.2}")
     }
-}
-
-fn shorten(path: &str, max: usize) -> String {
-    if path.chars().count() <= max {
-        return path.to_string();
-    }
-    let tail: String = path
-        .chars()
-        .rev()
-        .take(max - 1)
-        .collect::<Vec<char>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("...{tail}")
 }
 
 fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
@@ -765,12 +757,27 @@ fn kv(key: &str, value: &str) -> Line<'static> {
     ])
 }
 
+/// Truncate to `max` display columns including the trailing ellipsis.
 pub fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        format!("{}...", text.chars().take(max).collect::<String>())
+    if display_width(text) <= max {
+        return text.to_string();
     }
+    let ellipsis = max > 3;
+    let limit = if ellipsis { max - 3 } else { max };
+    let mut out = String::new();
+    let mut width = 0;
+    for c in text.chars() {
+        let cw = char_width(c);
+        if width + cw > limit {
+            break;
+        }
+        out.push(c);
+        width += cw;
+    }
+    if ellipsis {
+        out.push_str("...");
+    }
+    out
 }
 
 fn draw_info_block(frame: &mut Frame, body: Rect, lines: Vec<Line<'static>>) {
@@ -883,7 +890,16 @@ fn clip_line(line: Line<'static>, max: usize) -> Line<'static> {
             continue;
         }
         let keep = max - used;
-        let trimmed: String = span.content.chars().take(keep).collect();
+        let mut trimmed = String::new();
+        let mut tw = 0;
+        for c in span.content.chars() {
+            let cw = char_width(c);
+            if tw + cw > keep {
+                break;
+            }
+            trimmed.push(c);
+            tw += cw;
+        }
         if !trimmed.is_empty() {
             out.push(Span::styled(trimmed, span.style));
         }

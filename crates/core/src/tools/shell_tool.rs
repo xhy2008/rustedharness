@@ -1,10 +1,10 @@
 use async_trait::async_trait;
+use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::Result;
-use crate::proc::base64_encode;
 use crate::tools::{parse_args, schema_of, Tool, ToolContext, ToolOutput};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -102,7 +102,8 @@ impl Tool for ShellTool {
         });
         if args.capture.as_deref() == Some("raw") {
             if let Some(raw) = ctx.proc.raw_bytes(outcome.pid) {
-                metadata["raw_base64"] = json!(base64_encode(&raw));
+                metadata["raw_base64"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(&raw));
                 body.push_str("\n[raw bytes attached in metadata.raw_base64]");
             }
         }

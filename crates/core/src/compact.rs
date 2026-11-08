@@ -12,7 +12,6 @@ Preserve file paths, commands, errors and decisions verbatim where they matter. 
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
     /// Messages sent to the compact model for summarisation (old prefix).
-    pub summarize_from: usize,
     pub keep_from: usize,
     pub dropped: usize,
     pub transcript: String,
@@ -77,7 +76,6 @@ impl Compactor {
         }
         let transcript = render_transcript(&messages[system_end..keep_from]);
         Some(CompactionPlan {
-            summarize_from: system_end,
             keep_from,
             dropped,
             transcript,

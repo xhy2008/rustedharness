@@ -297,12 +297,7 @@ impl Agent {
     /// install anything; the digest is shown to the user before a manual
     /// install proceeds.
     pub async fn lsp_checksum(&self, server: &str) -> Result<crate::lsp::ChecksumInfo> {
-        let mut lsp = self.config.lsp.clone();
-        lsp.enabled = true;
-        let hub = crate::lsp::LspHub::new(self.cwd(), &lsp, None);
-        let result = hub.checksum(server).await;
-        hub.shutdown_all().await;
-        result
+        crate::lsp::checksum_server(&self.config.lsp, &self.cwd(), server).await
     }
 
     /// Install or update a language server on the user's behalf (TUI action).
@@ -315,25 +310,11 @@ impl Agent {
         update: bool,
     ) -> Result<PathBuf> {
         let mut lsp = self.config.lsp.clone();
-        lsp.enabled = true;
         if let Some(sha) = sha256 {
-            let sha = sha.trim().to_ascii_lowercase();
-            if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(HarnessError::Config(
-                    "sha256 must be exactly 64 hexadecimal characters".to_string(),
-                ));
-            }
-            lsp.downloads.entry(server.to_string()).or_default().sha256 = Some(sha);
+            crate::lsp::pin_sha256(&mut lsp, server, &sha)?;
         }
-        let hub = crate::lsp::LspHub::new(self.cwd(), &lsp, Some(self.events.clone()));
-        hub.grant_download(server, true);
-        let result = if update {
-            hub.update(server).await
-        } else {
-            hub.install(server).await
-        };
-        hub.shutdown_all().await;
-        result
+        crate::lsp::install_server(&lsp, &self.cwd(), server, update, Some(self.events.clone()))
+            .await
     }
 
     pub fn set_agent_model(&self, model: &str) -> Result<()> {
@@ -515,7 +496,7 @@ impl Agent {
             let definitions = self.tools.read().unwrap().definitions();
             let request = ChatRequest {
                 model: self.agent_model.read().unwrap().clone(),
-                messages: messages.clone(),
+                messages,
                 tools: definitions,
                 temperature: self.config.agent.temperature.map(|value| value as f32),
                 max_tokens: Some(self.output_limit()),

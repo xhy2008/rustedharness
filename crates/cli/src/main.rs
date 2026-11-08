@@ -243,14 +243,7 @@ async fn run_headless(config: Config, cwd: PathBuf, args: RunArgs) -> Result<()>
     };
 
     let result = if let Some(prompt) = oneshot {
-        let send_agent = agent.clone();
-        let send = tokio::spawn(async move { send_agent.send(prompt).await });
-        let stop = pump(&agent, &mut rx, args.json, args.yes).await?;
-        match send.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => eprintln!("error: {err}"),
-            Err(err) => eprintln!("agent task failed: {err}"),
-        }
+        let stop = run_prompt(&agent, &mut rx, prompt, args.json, args.yes).await?;
         if stop == "error" {
             anyhow::bail!("turn failed");
         }
@@ -313,15 +306,29 @@ async fn repl(
             }
             continue;
         }
-        let send_agent = agent.clone();
-        let prompt = text.to_string();
-        let send = tokio::spawn(async move { send_agent.send(prompt).await });
-        pump(agent, rx, json, yes).await?;
-        if let Ok(Err(err)) = send.await {
-            eprintln!("error: {err}");
-        }
+        run_prompt(agent, rx, text.to_string(), json, yes).await?;
     }
     Ok(())
+}
+
+/// Send one user prompt and print events until the turn completes. The send
+/// task is joined before returning, so a failed turn is reported exactly once.
+async fn run_prompt(
+    agent: &Arc<Agent>,
+    rx: &mut mpsc::UnboundedReceiver<HarnessEvent>,
+    prompt: String,
+    json: bool,
+    yes: bool,
+) -> Result<String> {
+    let sender = agent.clone();
+    let send = tokio::spawn(async move { sender.send(prompt).await });
+    let stop = pump(agent, rx, json, yes).await?;
+    match send.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => eprintln!("error: {err}"),
+        Err(err) => eprintln!("agent task failed: {err}"),
+    }
+    Ok(stop)
 }
 
 /// Print events until the current turn completes. Returns the stop reason.
@@ -385,7 +392,10 @@ async fn pump(
             HarnessEvent::ToolCall {
                 name, arguments, ..
             } => {
-                eprintln!("\x1b[33m⚙ {name}\x1b[0m {}", compact_json(&arguments, 160));
+                eprintln!(
+                    "\x1b[33m⚙ {name}\x1b[0m {}",
+                    truncate(&arguments.to_string(), 160)
+                );
             }
             HarnessEvent::ToolOutput { .. } => {
                 // The one-shot CLI prints the final tool result only; live
@@ -503,11 +513,6 @@ async fn pump(
     }
 }
 
-fn compact_json(value: &serde_json::Value, max: usize) -> String {
-    let text = value.to_string();
-    truncate(&text, max)
-}
-
 fn truncate(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
     if text.chars().count() > max {
@@ -562,47 +567,18 @@ async fn lsp_install(
     sha256: Option<&str>,
     update: bool,
 ) -> Result<()> {
-    let mut effective = config;
-    effective.lsp.enabled = true;
+    let mut lsp = config.lsp;
     if let Some(sha) = sha256 {
-        let sha = sha.trim().to_ascii_lowercase();
-        if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-            anyhow::bail!("--sha256 must be exactly 64 hexadecimal characters");
-        }
-        effective
-            .lsp
-            .downloads
-            .entry(server.to_string())
-            .or_default()
-            .sha256 = Some(sha);
+        rustedharness_core::lsp::pin_sha256(&mut lsp, server, sha)?;
     }
-    let hub = LspHub::new(cwd, &effective.lsp, None);
-    hub.grant_download(server, true);
-    let result = if update {
-        hub.update(server).await
-    } else {
-        hub.install(server).await
-    };
-    match result {
-        Ok(path) => {
-            println!("installed {server}: {}", path.display());
-            hub.shutdown_all().await;
-            Ok(())
-        }
-        Err(err) => {
-            hub.shutdown_all().await;
-            Err(anyhow::anyhow!("{err}"))
-        }
-    }
+    let path = rustedharness_core::lsp::install_server(&lsp, &cwd, server, update, None).await?;
+    println!("installed {server}: {}", path.display());
+    Ok(())
 }
 
 async fn lsp_checksum(config: Config, cwd: PathBuf, server: &str) -> Result<()> {
-    let mut effective = config;
-    effective.lsp.enabled = true;
-    let hub = LspHub::new(cwd, &effective.lsp, None);
-    let result = hub.checksum(server).await;
-    hub.shutdown_all().await;
-    let info = result?;
+    let config_path = config.source_dir().join("config.json");
+    let info = rustedharness_core::lsp::checksum_server(&config.lsp, &cwd, server).await?;
     println!("server:  {}", info.server_id);
     println!("version: {}", info.version);
     println!("url:     {}", info.url);
@@ -619,17 +595,21 @@ async fn lsp_checksum(config: Config, cwd: PathBuf, server: &str) -> Result<()> 
     );
     let snippet = serde_json::json!({ "lsp": serde_json::Value::Object(lsp) });
     println!(
-        "\nPin it in {}:\n{}",
-        Config::config_path().display(),
+        "
+Pin it in {}:
+{}",
+        config_path.display(),
         serde_json::to_string_pretty(&snippet)?
     );
     println!(
-        "\nOr install now:\n  rustedharness lsp install {} --sha256 {}",
+        "
+Or install now:
+  rustedharness lsp install {} --sha256 {}",
         info.server_id, info.sha256
     );
     println!(
-        "\nReview the digest against the release page before trusting it; the checksum \
-         command only reports what the vendor published."
+        "
+Review the digest against the release page before trusting it; the checksum          command only reports what the vendor published."
     );
     Ok(())
 }

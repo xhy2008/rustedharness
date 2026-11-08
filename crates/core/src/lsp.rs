@@ -1660,6 +1660,57 @@ impl LspHub {
     }
 }
 
+/// Pin a SHA-256 supplied for a single install. The digest is validated and
+/// used for this call only; it is never written back to `config.json`.
+pub fn pin_sha256(config: &mut LspConfig, server: &str, sha256: &str) -> Result<()> {
+    let sha = sha256.trim().to_ascii_lowercase();
+    if !valid_sha256(&sha) {
+        return Err(HarnessError::Config(
+            "sha256 must be exactly 64 hexadecimal characters".to_string(),
+        ));
+    }
+    config
+        .downloads
+        .entry(server.to_string())
+        .or_default()
+        .sha256 = Some(sha);
+    Ok(())
+}
+
+/// One-shot install/update used by the CLI and the TUI. A management hub never
+/// stays alive: it is shut down before the result is returned.
+pub async fn install_server(
+    config: &LspConfig,
+    cwd: &Path,
+    server: &str,
+    update: bool,
+    events: Option<UnboundedSender<HarnessEvent>>,
+) -> Result<PathBuf> {
+    let hub = LspHub::new(cwd.to_path_buf(), &enabled(config), events);
+    hub.grant_download(server, true);
+    let result = if update {
+        hub.update(server).await
+    } else {
+        hub.install(server).await
+    };
+    hub.shutdown_all().await;
+    result
+}
+
+/// One-shot checksum discovery used by the CLI and the TUI.
+pub async fn checksum_server(config: &LspConfig, cwd: &Path, server: &str) -> Result<ChecksumInfo> {
+    let hub = LspHub::new(cwd.to_path_buf(), &enabled(config), None);
+    let result = hub.checksum(server).await;
+    hub.shutdown_all().await;
+    result
+}
+
+fn enabled(config: &LspConfig) -> LspConfig {
+    let mut config = config.clone();
+    config.enabled = true;
+    config
+}
+
 fn client_capabilities() -> Value {
     json!({
         "workspace": {

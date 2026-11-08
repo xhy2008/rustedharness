@@ -43,12 +43,6 @@ pub enum SessionRecord {
     Todo {
         items: Vec<TodoItem>,
     },
-    Process {
-        pid: u32,
-        command: String,
-        status: String,
-        exit_code: Option<i32>,
-    },
     Models {
         agent: String,
         compact: String,
@@ -56,10 +50,6 @@ pub enum SessionRecord {
     Compaction {
         summary: String,
         dropped_messages: usize,
-    },
-    Notice {
-        level: String,
-        message: String,
     },
 }
 
@@ -82,8 +72,6 @@ pub struct LoadedSession {
     pub messages: Vec<ChatMessage>,
     pub todos: Vec<TodoItem>,
     pub compactions: Vec<(String, usize)>,
-    pub last_process: Option<(u32, String)>,
-    pub records: usize,
     /// A final line that did not parse (typically a torn write after kill -9).
     pub truncated_tail: bool,
 }
@@ -224,21 +212,6 @@ impl SessionWriter {
         })
     }
 
-    pub fn process(
-        &mut self,
-        pid: u32,
-        command: &str,
-        status: &str,
-        exit_code: Option<i32>,
-    ) -> Result<()> {
-        self.append(&SessionRecord::Process {
-            pid,
-            command: command.to_string(),
-            status: status.to_string(),
-            exit_code,
-        })
-    }
-
     pub fn models(&mut self, agent: &str, compact: &str) -> Result<()> {
         self.append(&SessionRecord::Models {
             agent: agent.to_string(),
@@ -250,13 +223,6 @@ impl SessionWriter {
         self.append(&SessionRecord::Compaction {
             summary: summary.to_string(),
             dropped_messages: dropped,
-        })
-    }
-
-    pub fn notice(&mut self, level: &str, message: &str) -> Result<()> {
-        self.append(&SessionRecord::Notice {
-            level: level.to_string(),
-            message: message.to_string(),
         })
     }
 
@@ -398,7 +364,6 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
         }
         match serde_json::from_str::<SessionRecord>(&line) {
             Ok(record) => {
-                loaded.records += 1;
                 match record {
                     SessionRecord::Meta { meta } => loaded.meta = Some(meta),
                     SessionRecord::Message { message } => loaded.messages.push(message),
@@ -406,9 +371,6 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
                         loaded.messages.push(ChatMessage::tool(id, content));
                     }
                     SessionRecord::Todo { items } => loaded.todos = items,
-                    SessionRecord::Process { pid, status, .. } => {
-                        loaded.last_process = Some((pid, status))
-                    }
                     SessionRecord::Models { agent, compact } => {
                         // The header Meta holds the model chosen at creation;
                         // every `/model` switch appends a later Models record.
@@ -442,7 +404,6 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
                         );
                         loaded.compactions.push((summary, dropped_messages));
                     }
-                    SessionRecord::Notice { .. } => {}
                 }
             }
             Err(_) => {

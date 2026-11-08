@@ -134,18 +134,7 @@ async fn event_loop(
                 None => Agent::new(app.config.clone(), pending.cwd, tx).await?,
             };
             *harness_rx = new_rx;
-            app.agent = agent;
-            app.entries.clear();
-            app.scroll = 0;
-            app.follow = true;
-            app.busy = false;
-            app.queue.clear();
-            app.live_tool = None;
-            app.streaming = None;
-            app.reasoning_at = None;
-            app.processes.clear();
-            app.consent = None;
-            app.populate(app.agent.snapshot());
+            app.switch_agent(agent);
             app.notice(match label {
                 Some(short) => format!("resumed session {short}"),
                 None => "new session".to_string(),

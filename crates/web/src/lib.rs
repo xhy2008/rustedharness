@@ -234,18 +234,7 @@ async fn workspace_tree(
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    if let Err(status) = authorized(&state, &headers) {
-        return status.into_response();
-    }
-    let root = workspace_root(&state, &query.session);
-    let resolver = match WorkspacePathResolver::new(&root) {
-        Ok(resolver) => resolver,
-        Err(err) => return core_error(err),
-    };
-    match tree_payload(&resolver, &query.path) {
-        Ok(payload) => Json(payload).into_response(),
-        Err(err) => core_error(err),
-    }
+    workspace_payload(&state, &headers, &query, tree_payload)
 }
 
 async fn workspace_file(
@@ -253,15 +242,25 @@ async fn workspace_file(
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    if let Err(status) = authorized(&state, &headers) {
+    workspace_payload(&state, &headers, &query, file_payload)
+}
+
+/// Shared authorization, resolver setup and error mapping for the read-only
+/// workspace endpoints.
+fn workspace_payload(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &PathQuery,
+    build: fn(&WorkspacePathResolver, &str) -> std::result::Result<Value, HarnessError>,
+) -> Response {
+    if let Err(status) = authorized(state, headers) {
         return status.into_response();
     }
-    let root = workspace_root(&state, &query.session);
-    let resolver = match WorkspacePathResolver::new(&root) {
+    let resolver = match WorkspacePathResolver::new(workspace_root(state, &query.session)) {
         Ok(resolver) => resolver,
         Err(err) => return core_error(err),
     };
-    match file_payload(&resolver, &query.path) {
+    match build(&resolver, &query.path) {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => core_error(err),
     }
@@ -512,6 +511,14 @@ async fn ws_handler(
         .into_response()
 }
 
+fn client_error(message: impl std::fmt::Display) -> String {
+    json!({ "type": "error", "message": message.to_string() }).to_string()
+}
+
+fn client_notice(level: &str, message: impl std::fmt::Display) -> String {
+    json!({ "type": "notice", "level": level, "message": message.to_string() }).to_string()
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<String>) {
     let (tx, mut events) = mpsc::unbounded_channel();
     let config = state.config.clone();
@@ -524,13 +531,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
         Ok(agent) => agent,
         Err(err) => {
             let mut socket = socket;
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "message": err.to_string() })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            let _ = socket.send(Message::Text(client_error(err).into())).await;
             let _ = socket.close().await;
             return;
         }
@@ -581,10 +582,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
             let command: HarnessCommand = match serde_json::from_str(&text) {
                 Ok(command) => command,
                 Err(err) => {
-                    let _ = cmd_out.send(
-                        json!({ "type": "error", "message": format!("invalid command: {err}") })
-                            .to_string(),
-                    );
+                    let _ = cmd_out.send(client_error(format!("invalid command: {err}")));
                     continue;
                 }
             };
@@ -594,10 +592,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                         continue;
                     }
                     if cmd_agent.busy() {
-                        let _ = cmd_out.send(
-                            json!({ "type": "error", "message": "a turn is already running" })
-                                .to_string(),
-                        );
+                        let _ = cmd_out.send(client_error("a turn is already running"));
                         continue;
                     }
                     let agent = cmd_agent.clone();
@@ -609,15 +604,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                 HarnessCommand::SetAgentModel { model } => {
                     match cmd_agent.set_agent_model(&model) {
                         Ok(()) => {
-                            let _ = cmd_out.send(
-                                json!({ "type": "notice", "level": "info", "message": format!("model: {model}") })
-                                    .to_string(),
-                            );
+                            let _ = cmd_out.send(client_notice("info", format!("model: {model}")));
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(
-                                json!({ "type": "error", "message": err.to_string() }).to_string(),
-                            );
+                            let _ = cmd_out.send(client_error(err));
                         }
                     }
                 }
@@ -627,19 +617,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                             if let Ok(mut cwds) = cmd_state.cwds.lock() {
                                 cwds.insert(cmd_agent.session_id(), cmd_agent.cwd());
                             }
-                            let _ = cmd_out.send(
-                                json!({
-                                    "type": "notice",
-                                    "level": "info",
-                                    "message": format!("workspace: {}", cmd_agent.cwd().display())
-                                })
-                                .to_string(),
-                            );
+                            let _ = cmd_out.send(client_notice(
+                                "info",
+                                format!("workspace: {}", cmd_agent.cwd().display()),
+                            ));
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(
-                                json!({ "type": "error", "message": err.to_string() }).to_string(),
-                            );
+                            let _ = cmd_out.send(client_error(err));
                         }
                     }
                 }

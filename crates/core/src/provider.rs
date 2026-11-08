@@ -92,7 +92,6 @@ impl ChatMessage {
             ..Default::default()
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

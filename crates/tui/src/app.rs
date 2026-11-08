@@ -240,6 +240,34 @@ impl App {
         app
     }
 
+    /// Replace the running agent (new or resumed session) and clear every
+    /// piece of state that belongs to the previous one.
+    pub fn switch_agent(&mut self, agent: std::sync::Arc<Agent>) {
+        let snapshot = agent.snapshot();
+        self.agent = agent;
+        self.entries.clear();
+        self.todo.clear();
+        self.lsp.clear();
+        self.processes.clear();
+        self.consent = None;
+        self.queue.clear();
+        self.streaming = None;
+        self.reasoning_at = None;
+        self.live_tool = None;
+        self.scroll = 0;
+        self.follow = true;
+        self.busy = false;
+        self.input_tokens = 0;
+        self.output_tokens = 0;
+        self.cost_usd = None;
+        self.cache_hit_pct = None;
+        self.last_stop = None;
+        self.overlay = Overlay::None;
+        self.selection = None;
+        self.slash_dismissed = false;
+        self.populate(snapshot);
+    }
+
     pub fn populate(&mut self, snapshot: SessionSnapshot) {
         self.session_id = snapshot.session_id;
         self.cwd = snapshot.cwd;
@@ -1324,7 +1352,7 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            self.notice("no models configured — check the [providers] section in config");
+            self.notice("no models configured — add providers to models.json");
         } else {
             let current = match target {
                 ModelTarget::Agent => &self.agent_model,
@@ -1345,9 +1373,8 @@ impl App {
 
     fn open_session_picker(&mut self) {
         let store = rustedharness_core::session::SessionStore::new(&self.config.session);
-        let mut summaries = store.list();
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        let items: Vec<PickerItem> = summaries
+        let items: Vec<PickerItem> = store
+            .list()
             .iter()
             .map(|s| PickerItem {
                 label: s
@@ -1475,7 +1502,7 @@ fn is_skip_dir(name: &str) -> bool {
     matches!(name, "target" | "node_modules" | "dist" | "build")
 }
 
-fn shorten_path(path: &str, max: usize) -> String {
+pub(crate) fn shorten_path(path: &str, max: usize) -> String {
     if path.chars().count() <= max {
         return path.to_string();
     }

@@ -19,10 +19,6 @@ pub struct UsageTracker {
 #[derive(Debug, Default)]
 struct Inner {
     last: Option<Usage>,
-    requests: u64,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
     cost_usd: f64,
     cost_seen: bool,
 }
@@ -36,10 +32,6 @@ impl UsageTracker {
     pub fn record(&self, usage: &Usage) -> Usage {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.last = Some(*usage);
-        inner.requests += 1;
-        inner.prompt_tokens += usage.prompt_tokens;
-        inner.completion_tokens += usage.completion_tokens;
-        inner.total_tokens += effective_total(usage);
         if let Some(cost) = usage.cost_usd {
             inner.cost_usd += cost;
             inner.cost_seen = true;
@@ -72,17 +64,6 @@ impl UsageTracker {
         self.last().map(|u| effective_total(&u)).unwrap_or(0)
     }
 
-    /// Cumulative totals across all reports in this session.
-    pub fn totals(&self) -> UsageTotals {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        UsageTotals {
-            requests: inner.requests,
-            prompt_tokens: inner.prompt_tokens,
-            completion_tokens: inner.completion_tokens,
-            total_tokens: inner.total_tokens,
-        }
-    }
-
     /// Cache hit ratio of the most recent report, when the provider exposes
     /// cached prompt tokens. Percent (0-100) of prompt tokens served from
     /// cache; None means the provider reports no cache data at all.
@@ -106,14 +87,6 @@ impl UsageTracker {
     pub fn note_missing_usage(&self) -> bool {
         !self.missing_reported.swap(true, Ordering::Relaxed)
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct UsageTotals {
-    pub requests: u64,
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
 }
 
 fn effective_total(usage: &Usage) -> u64 {
@@ -153,15 +126,6 @@ mod tests {
         tracker.record(&second);
         assert_eq!(tracker.last(), Some(second));
         assert_eq!(tracker.context_tokens(), 420);
-        assert_eq!(
-            tracker.totals(),
-            UsageTotals {
-                requests: 2,
-                prompt_tokens: 520,
-                completion_tokens: 50,
-                total_tokens: 570,
-            }
-        );
     }
 
     #[test]
@@ -178,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_drops_context_but_keeps_totals() {
+    fn reset_drops_the_last_report() {
         let tracker = UsageTracker::new();
         tracker.record(&Usage {
             prompt_tokens: 10,
@@ -190,7 +154,6 @@ mod tests {
         tracker.reset_context();
         assert_eq!(tracker.context_tokens(), 0);
         assert_eq!(tracker.last(), None);
-        assert_eq!(tracker.totals().requests, 1);
     }
 
     #[test]

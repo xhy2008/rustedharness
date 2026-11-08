@@ -492,10 +492,6 @@ impl Config {
         Self::config_dir()
     }
 
-    pub fn config_path() -> PathBuf {
-        Self::config_dir().join("config.json")
-    }
-
     pub fn load() -> Result<Self> {
         Self::load_from_dir(&Self::config_dir())
     }
@@ -656,10 +652,10 @@ impl Config {
                 self.compact_model = model;
             }
         }
-        // Preserve the old `RUSTEDHARNESS_PROVIDER` behaviour: when no model
-        // was selected, use that provider's first catalogued model.
+        // A provider choice without a model selects that provider's first
+        // catalogued model instead of keeping the built-in default.
         if let Some(provider) = provider_env {
-            if self.model.trim().is_empty() || self.model == "openai/gpt-4o" {
+            if self.model.trim().is_empty() {
                 if let Some(model) = self
                     .providers
                     .get(&provider)
@@ -844,13 +840,6 @@ impl Config {
         Ok(())
     }
 
-    pub fn resolve_api_key_for(&self, reference: &str) -> String {
-        let Ok(spec) = self.resolve_model(reference) else {
-            return String::new();
-        };
-        self.resolve_api_key_for_provider(&spec.provider)
-    }
-
     pub fn resolve_api_key_for_provider(&self, provider_id: &str) -> String {
         let Some(provider) = self.providers.get(provider_id) else {
             return String::new();
@@ -886,7 +875,6 @@ impl Config {
     pub fn sessions_dir() -> PathBuf {
         Self::data_dir().join("sessions")
     }
-
 }
 
 /// Pi and JSON5-style config files allow trailing commas; strict serde_json

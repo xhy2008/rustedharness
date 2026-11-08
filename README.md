@@ -286,8 +286,9 @@ of the line and its neighbourhood, rendered in the alphabet
 }
 ```
 
-Anchor width defaults to 2 characters and can be raised to 4 in `[edit]`. Ops
-are `replace`, `insert_before`, `insert_after`, `delete`, and `replace_text`.
+Anchor width defaults to 2 characters and can be raised to 4 with
+`edit.anchorWidth`. Ops are `replace`, `insert_before`, `insert_after`,
+`delete`, and `replace_text`.
 
 If any anchor is stale, the whole batch is rejected with `E_STALE_ANCHOR`; no
 partial write occurs. Editing a line invalidates the anchors of its neighbours,
@@ -305,10 +306,10 @@ When a server is missing, the harness can offer to download one, but only when
 all of these hold:
 
 - HTTPS only, with redirects re-checked against a host whitelist;
-- an explicit SHA-256 is pinned under `[lsp.downloads.<server>]` or supplied
-  with `--sha256`;
+- an explicit SHA-256 is pinned under `lsp.downloads.<server>` in
+  `config.json`, or supplied with `--sha256`;
 - the archive is at most 256 MiB and extracts without escapes;
-- the user consents interactively, or `allow_downloads_noninteractive` /
+- the user consents interactively, or `lsp.allowDownloadsNoninteractive` /
   `--yes` is set.
 
 Checksums are never invented. If you do not know the digest, ask the harness to
@@ -383,10 +384,10 @@ native window at it, so the desktop and browser experiences stay identical.
 ## MCP
 
 MCP servers are loaded from `mcp.json` in the workspace, then the config
-directory, unless `[mcp].config_path` points elsewhere. Stdio and HTTP+SSE transports are supported. Exposed tools
-are namespaced as `mcp__server__tool`; `[mcp].deny` removes specific tools or
-whole servers. MCP tool calls are subject to the same workspace anchoring and
-timeouts as built-in tools.
+directory, unless `mcp.configPath` points elsewhere. Stdio and HTTP+SSE
+transports are supported. Exposed tools are namespaced as `mcp__server__tool`;
+`mcp.deny` removes specific tools or whole servers. MCP tool calls are subject
+to the same workspace anchoring and timeouts as built-in tools.
 
 ## Security notes
 
