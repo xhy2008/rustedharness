@@ -91,7 +91,14 @@ pub struct LoadedSession {
 pub struct SessionWriter {
     id: String,
     path: PathBuf,
-    file: File,
+    /// Opened on the first `Message` record. Until then nothing exists on
+    /// disk: a plain launch-and-quit must leave no artifact behind.
+    file: Option<File>,
+    /// Records written before the file exists (Meta first, then any Models
+    /// switches made before the first prompt). Flushed ahead of that prompt.
+    header: Vec<SessionRecord>,
+    dir: PathBuf,
+    max_saved: usize,
     cwd: String,
     agent_model: String,
     compact_model: String,
@@ -118,7 +125,6 @@ impl SessionWriter {
             &uuid::Uuid::new_v4().simple().to_string()[..6]
         );
         let path = dir.join(format!("{id}.jsonl"));
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let meta = SessionMeta {
             id: id.clone(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -127,19 +133,19 @@ impl SessionWriter {
             created_at: created_at.clone(),
             title: None,
         };
-        let mut writer = Self {
+        Ok(Self {
             id,
             path,
-            file,
+            file: None,
+            header: vec![SessionRecord::Meta { meta }],
+            dir,
+            max_saved: cfg.max_saved_sessions,
             cwd: cwd.to_string_lossy().to_string(),
             agent_model: agent_model.to_string(),
             compact_model: compact_model.to_string(),
             created_at,
             messages: 0,
-        };
-        writer.append(&SessionRecord::Meta { meta })?;
-        writer.prune(cfg.max_saved_sessions);
-        Ok(writer)
+        })
     }
 
     /// Re-open an existing transcript for appending (session resume).
@@ -148,7 +154,10 @@ impl SessionWriter {
         Ok(Self {
             id: meta.id,
             path: path.to_path_buf(),
-            file,
+            file: Some(file),
+            header: Vec::new(),
+            dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            max_saved: 0,
             cwd: meta.cwd,
             agent_model: meta.agent_model,
             compact_model: meta.compact_model,
@@ -172,14 +181,45 @@ impl SessionWriter {
     }
 
     pub fn append(&mut self, record: &SessionRecord) -> Result<()> {
-        let line = serde_json::to_string(record)?;
-        self.file.write_all(line.as_bytes())?;
-        self.file.write_all(b"\n")?;
-        // Flush per record: a crash must lose at most the record being written.
-        self.file.flush()?;
+        if self.file.is_none() {
+            if !matches!(record, SessionRecord::Message { .. }) {
+                // Nothing on disk yet; remember it for the eventual first write.
+                self.header.push(record.clone());
+                return Ok(());
+            }
+            self.open()?;
+        }
+        self.write(record)?;
         if matches!(record, SessionRecord::Message { .. }) {
             self.messages += 1;
         }
+        Ok(())
+    }
+
+    /// Create the transcript: header records first, then the caller appends the
+    /// record that triggered creation. Pruning happens once, at creation time.
+    fn open(&mut self) -> Result<()> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.file = Some(file);
+        for record in std::mem::take(&mut self.header) {
+            self.write(&record)?;
+        }
+        if self.max_saved > 0 {
+            self.prune(self.max_saved);
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, record: &SessionRecord) -> Result<()> {
+        let file = self.file.as_mut().expect("transcript already open");
+        let line = serde_json::to_string(record)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        // Flush per record: a crash must lose at most the record being written.
+        file.flush()?;
         Ok(())
     }
 
@@ -266,12 +306,7 @@ impl SessionWriter {
         if max == 0 {
             return;
         }
-        let dir = self
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
         let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
@@ -615,13 +650,71 @@ mod tests {
         let mut real = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
         real.user("kept").unwrap();
         let real_path = real.path().to_path_buf();
-        let empty = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
-        let empty_path = empty.path().to_path_buf();
         drop(real);
-        drop(empty);
-        let _ = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+
+        // Older builds left header-only transcripts on disk; a later prune must
+        // still sweep them regardless of the save quota.
+        let empty_path = dir.path().join("20200101-000000-abcdef.jsonl");
+        let meta = SessionMeta {
+            id: "20200101-000000-abcdef".to_string(),
+            cwd: dir.path().to_string_lossy().to_string(),
+            agent_model: "a".to_string(),
+            compact_model: "c".to_string(),
+            created_at: chrono::Local::now().to_rfc3339(),
+            title: None,
+        };
+        std::fs::write(
+            &empty_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionRecord::Meta { meta }).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let mut next = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+        next.user("x").unwrap();
         assert!(real_path.exists());
         assert!(!empty_path.exists());
+    }
+
+    #[test]
+    fn create_writes_nothing_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let writer = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
+        assert!(!writer.path().exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(writer.summary().bytes, 0);
+    }
+
+    #[test]
+    fn header_records_precede_the_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "orig", "c").unwrap();
+        // A `/model` switch before the first prompt stays buffered.
+        writer.models("switched", "c").unwrap();
+        assert!(!writer.path().exists());
+        writer.user("hello").unwrap();
+        assert!(writer.path().exists());
+
+        let text = std::fs::read_to_string(writer.path()).unwrap();
+        let kinds: Vec<&str> = text
+            .lines()
+            .map(|l| {
+                let idx = l.find("\"kind\":\"").expect("kind") + 8;
+                &l[idx..idx + l[idx..].find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(kinds, vec!["meta", "models", "message"]);
+
+        let meta = SessionStore::new(&cfg)
+            .load(writer.id())
+            .unwrap()
+            .meta
+            .expect("meta");
+        assert_eq!(meta.agent_model, "switched");
     }
 
     #[test]
