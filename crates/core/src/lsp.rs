@@ -471,6 +471,33 @@ fn cache_root() -> PathBuf {
     Config::data_dir().join("lsp")
 }
 
+/// Local cache for vendor-published digests, so repeat installs and
+/// `lsp checksum` do not depend on the GitHub API quota.
+fn digest_cache_path(server: &str, version: &str) -> PathBuf {
+    cache_root()
+        .join("checksums")
+        .join(server)
+        .join(format!("{version}.sha256"))
+}
+
+fn read_digest_cache(path: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let hash = lines.next()?.trim();
+    if !valid_sha256(hash) {
+        return None;
+    }
+    let source = lines.next().unwrap_or("cached").trim().to_string();
+    Some((hash.to_ascii_lowercase(), source))
+}
+
+fn write_digest_cache(path: &Path, hash: &str, source: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, format!("{hash}\n{source}\n"));
+}
+
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -565,6 +592,19 @@ fn parse_checksum_file(text: &str, asset_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Outcome of asking GitHub's release API for a published digest.
+enum DigestLookup {
+    Found {
+        sha256: String,
+        source: String,
+    },
+    /// The release answered, but publishes no digest we can use.
+    NoDigest,
+    /// The API could not be reached or refused us (rate limit, auth, network).
+    /// This is not evidence that the vendor omitted a digest.
+    Unavailable(String),
 }
 
 /// Return the `digest` metadata GitHub records for the named release asset.
@@ -942,7 +982,9 @@ impl LspHub {
             ));
         };
         validate_download_url(&target.url, &target.domains)?;
-        let (sha256, source) = self.published_digest(spec, &target.url).await?;
+        let (sha256, source) = self
+            .published_digest(spec, &target.version, &target.url)
+            .await?;
         Ok(ChecksumInfo {
             server_id: spec.id.to_string(),
             version: target.version,
@@ -952,43 +994,81 @@ impl LspHub {
         })
     }
 
-    /// Resolve the digest for an artifact, preferring GitHub's own release
-    /// metadata: the release-asset `digest`, then a checksums file attached to
-    /// the same release, then a `<url>.sha256` sidecar.
+    /// Resolve the digest for an artifact. Pins and previously discovered
+    /// digests come first; otherwise `discover_digest` searches the vendor's
+    /// published checksums.
     async fn published_digest(
+        &self,
+        spec: &ServerSpec,
+        version: &str,
+        artifact_url: &str,
+    ) -> Result<(String, String)> {
+        if let Some(pinned) = self
+            .config
+            .downloads
+            .get(spec.id)
+            .and_then(|entry| entry.sha256.clone())
+        {
+            return Ok((pinned, "pinned in lsp.downloads".to_string()));
+        }
+        let cache_path = digest_cache_path(spec.id, version);
+        if let Some(cached) = read_digest_cache(&cache_path) {
+            return Ok(cached);
+        }
+        let found = self.discover_digest(spec, artifact_url).await?;
+        write_digest_cache(&cache_path, &found.0, &found.1);
+        Ok(found)
+    }
+
+    async fn discover_digest(
         &self,
         spec: &ServerSpec,
         artifact_url: &str,
     ) -> Result<(String, String)> {
-        if let Some(found) = self.github_release_digest(artifact_url).await? {
-            return Ok(found);
+        // Token-free sources first: plain HTTPS GETs against the release
+        // artifacts, then the GitHub API (optional token, raises its quota).
+        if let Some(sha256) = sidecar_digest(artifact_url).await {
+            return Ok((sha256, "published .sha256 sidecar".to_string()));
         }
         let asset_name = artifact_url.rsplit('/').next().unwrap_or(artifact_url);
         if let Some(found) = release_checksum_file_digest(artifact_url, asset_name).await {
             return Ok(found);
         }
-        if let Some(sha256) = sidecar_digest(artifact_url).await {
-            return Ok((sha256, "published .sha256 sidecar".to_string()));
+        match self.github_release_digest(artifact_url).await? {
+            DigestLookup::Found { sha256, source } => return Ok((sha256, source)),
+            DigestLookup::NoDigest => {}
+            DigestLookup::Unavailable(reason) => {
+                return Err(HarnessError::tool(
+                    "E_LSP_CHECKSUM_LOOKUP_FAILED",
+                    format!(
+                        concat!(
+                            "could not read the GitHub release digest for `{}` ({}):\n  {}\n",
+                            "No download was attempted. Retry later, set GITHUB_TOKEN to raise ",
+                            "the API quota, or pin lsp.downloads.{}.sha256 to override."
+                        ),
+                        spec.id, reason, artifact_url, spec.id
+                    ),
+                ))
+            }
         }
         Err(HarnessError::tool(
             "E_LSP_CHECKSUM_UNAVAILABLE",
             format!(
                 concat!(
-                    "GitHub publishes no SHA-256 for `{}`:\n  {}\n",
-                    "Refusing to install an unverified binary ",
-                    "(set GITHUB_TOKEN if the API rate limit was hit). ",
-                    "Install manually: {}"
+                    "`{}` publishes no SHA-256 for:\n  {}\n",
+                    "Refusing to install an unverified binary. ",
+                    "Install it manually: {}"
                 ),
                 spec.id, artifact_url, spec.install_hint
             ),
         ))
     }
 
-    async fn github_release_digest(&self, artifact_url: &str) -> Result<Option<(String, String)>> {
+    async fn github_release_digest(&self, artifact_url: &str) -> Result<DigestLookup> {
         let parsed = url::Url::parse(artifact_url)
             .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", format!("bad URL: {e}")))?;
         if parsed.host_str() != Some("github.com") {
-            return Ok(None);
+            return Ok(DigestLookup::NoDigest);
         }
         let segments: Vec<&str> = parsed
             .path_segments()
@@ -999,7 +1079,7 @@ impl LspHub {
             || segments.get(2) != Some(&"releases")
             || segments.get(3) != Some(&"download")
         {
-            return Ok(None);
+            return Ok(DigestLookup::NoDigest);
         }
         let owner = segments[0];
         let repo = segments[1];
@@ -1025,19 +1105,28 @@ impl LspHub {
             }
         }
         let response = match request.send().await {
-            Ok(response) if response.status().is_success() => response,
-            _ => return Ok(None),
+            Ok(response) => response,
+            Err(err) => return Ok(DigestLookup::Unavailable(err.to_string())),
         };
+        let status = response.status();
+        if !status.is_success() {
+            return Ok(DigestLookup::Unavailable(format!("HTTP {status}")));
+        }
         let value: Value = match response.json().await {
             Ok(value) => value,
-            Err(_) => return Ok(None),
+            Err(err) => return Ok(DigestLookup::Unavailable(err.to_string())),
         };
         let Some(assets) = value.get("assets").and_then(Value::as_array) else {
-            return Ok(None);
+            return Ok(DigestLookup::Unavailable(
+                "release metadata has no assets".to_string(),
+            ));
         };
         let asset_name = asset.rsplit('/').next().unwrap_or(asset.as_str());
         if let Some(hash) = asset_digest(assets, asset_name) {
-            return Ok(Some((hash, "GitHub release asset digest".to_string())));
+            return Ok(DigestLookup::Found {
+                sha256: hash,
+                source: "GitHub release asset digest".to_string(),
+            });
         }
         // Some releases publish a checksums file instead of per-asset digests.
         for (name, url) in checksum_assets(assets) {
@@ -1045,10 +1134,13 @@ impl LspHub {
                 continue;
             };
             if let Some(hash) = parse_checksum_file(&text, asset_name) {
-                return Ok(Some((hash, format!("GitHub release checksums ({name})"))));
+                return Ok(DigestLookup::Found {
+                    sha256: hash,
+                    source: format!("GitHub release checksums ({name})"),
+                });
             }
         }
-        Ok(None)
+        Ok(DigestLookup::NoDigest)
     }
 
     /// Re-download a pinned server, replacing the cached binary.
@@ -1069,6 +1161,7 @@ impl LspHub {
         if cached.exists() {
             std::fs::remove_file(&cached)?;
         }
+        let _ = std::fs::remove_file(digest_cache_path(spec.id, &version));
         self.download_server(spec).await
     }
 
@@ -1156,15 +1249,10 @@ impl LspHub {
             )
         })?;
         validate_download_url(&target.url, &target.domains)?;
-        let sha = match self
-            .config
-            .downloads
-            .get(spec.id)
-            .and_then(|o| o.sha256.clone())
-        {
-            Some(pinned) => pinned,
-            None => self.published_digest(spec, &target.url).await?.0,
-        };
+        let sha = self
+            .published_digest(spec, &target.version, &target.url)
+            .await?
+            .0;
         Ok(DownloadManifest {
             version: target.version,
             url: target.url,
@@ -3099,6 +3187,38 @@ mod tests {
         assert!(!valid_sha256(&"a".repeat(65)));
         assert!(!valid_sha256(&"g".repeat(64)));
         assert!(!valid_sha256(""));
+    }
+
+    #[test]
+    fn discovered_digests_roundtrip_through_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rust-analyzer").join("2026-10-19.sha256");
+        let hash = "0123456789abcdef".repeat(4);
+        write_digest_cache(&path, &hash, "GitHub release asset digest");
+        assert_eq!(
+            read_digest_cache(&path),
+            Some((hash, "GitHub release asset digest".to_string()))
+        );
+        std::fs::write(&path, "not-a-hash\ncached\n").unwrap();
+        assert!(read_digest_cache(&path).is_none());
+    }
+
+    /// A rate-limited or unreachable API must never be described as "the
+    /// vendor publishes no digest": the two paths return different errors.
+    #[tokio::test]
+    async fn artifact_urls_outside_github_releases_answer_without_a_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = LspHub::new(dir.path().to_path_buf(), &LspConfig::default(), None);
+        for url in [
+            "https://example.com/tool.tar.gz",
+            "https://github.com/owner/repo/archive/v1.tar.gz",
+        ] {
+            assert!(matches!(
+                hub.github_release_digest(url).await.unwrap(),
+                DigestLookup::NoDigest
+            ));
+        }
+        assert!(hub.github_release_digest("not a url").await.is_err());
     }
 
     #[test]

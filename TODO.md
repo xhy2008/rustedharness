@@ -28,10 +28,16 @@
 
 ### LSP 下载
 - 安装/自动下载不再要求 `lsp.downloads.<id>.sha256` 或 `--sha256`；`download_manifest` 会自动解析校验值。
-- 校验值解析顺序：GitHub release asset `digest` → 同一 release 附带的 checksums 文件（`SHA256SUMS` / `*.sha256`，支持 GNU `hash  file`、`hash *file`、BSD `SHA256 (file) = hash`）→ `<url>.sha256` sidecar。
-- 三处都拿不到校验值时拒绝安装（`E_LSP_CHECKSUM_UNAVAILABLE`），提示可用 `GITHUB_TOKEN` 避免 API 限流，或手动安装。
+- 校验值解析顺序（**全部无需 token**）：配置显式 pin → 本地 digest 缓存 → `<artifact>.sha256` sidecar → 工件目录旁常见 checksums 文件（`SHA256SUMS`、`SHA256SUMS.txt`、`sha256sums.txt`、`checksums.txt`、`sha256.txt`）→ GitHub API（release asset `digest` 或 release 附带的 checksums 资产）。
+- 只有最后一步走 GitHub API；匿名配额 60 次/小时，`GITHUB_TOKEN` 可选、仅用于提额。成功解析的 digest 会写入 `<data>/lsp/checksums/<id>/<version>.sha256` 缓存，重复安装与后续 `lsp checksum` 完全不再请求 API；`lsp update` 会先清除该缓存再重新解析。
+- 支持 GNU `hash  file`、`hash *file`、BSD `SHA256 (file) = hash` 三种校验文件格式。
+- 两种失败严格区分，`github_release_digest` 返回 `DigestLookup` 而非 `Option`：
+  - `DigestLookup::NoDigest` → `E_LSP_CHECKSUM_UNAVAILABLE`：API 正常应答、但厂商确实没发布校验值，提示手动安装；
+  - `DigestLookup::Unavailable(reason)` → `E_LSP_CHECKSUM_LOOKUP_FAILED`：API 本身不可用（离线 / `HTTP 403` 限流 / 返回体异常），提示重试、设 `GITHUB_TOKEN` 或显式 pin。
+  - 之前两者合并成同一错误，IP 被限流时会误报"厂商未发布校验值"。
+- 所有来源都拿不到校验值时拒绝安装，不会静默安装未校验二进制。
 - `lsp checksum` 保留为只读检查命令；`lsp.downloads.<id>.sha256` 保留为可选覆盖（私有镜像），文档已说明非必需。
-- 新增单测 `checksum_files_are_parsed_in_common_formats`、`release_assets_expose_digests_and_checksum_files`。
+- 新增单测 `checksum_files_are_parsed_in_common_formats`、`release_assets_expose_digests_and_checksum_files`、`discovered_digests_roundtrip_through_the_cache`、`artifact_urls_outside_github_releases_answer_without_a_digest`。
 
 ### 429 重试设置
 - 新增 `agent.rateLimitRetries`（`Option<u32>`，`null`=无限，建议 3/5/10）与 `agent.rateLimitIntervalSecs`（秒，建议 1/3/5，默认 5，normalize 夹在 1..=300）。

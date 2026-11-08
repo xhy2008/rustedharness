@@ -135,13 +135,26 @@ keywords are not mistaken for symbols. L0 is used while a server warms up or
 when none is installed. `lsp_tool.rs` exposes both through a single `lsp` tool
 and labels L0 answers as name-based.
 
-Language servers are downloaded from their GitHub releases after consent. The
-SHA-256 is resolved automatically from the release asset `digest`, a checksums
-file attached to or published beside the release (`SHA256SUMS`, `*.sha256`), or
-a `<url>.sha256` sidecar; an unverified download is refused.
-`lsp checksum <server>` only inspects that digest, and
-`lsp.downloads.<server>.sha256` is an optional override for mirrors. Downloads validate HTTPS, the host whitelist, the archive
-cap, extraction safety, and the resolved digest.
+Language servers are downloaded from their GitHub releases after consent, and
+nothing has to be supplied by the user to verify them. `download_manifest`
+resolves the SHA-256 by trying, in order: a pinned
+`lsp.downloads.<server>.sha256`, the digest cached by a previous install
+(`lsp/checksums/<server>/<version>.sha256`), a `<url>.sha256` sidecar, well-known
+checksums files next to the artifact, then GitHub's release-asset
+`digest`/checksums assets. The first three are plain HTTPS GETs that consume no
+GitHub API quota. A resolved digest is cached, so repeat installs never call the
+GitHub API and no token is required; `GITHUB_TOKEN` only raises that API's
+anonymous quota when a first-time lookup is needed. If no source publishes a
+digest the install is refused instead of trusting an unverified binary.
+
+`github_release_digest` returns `DigestLookup`, not `Option`: `NoDigest` means
+the release answered and carries no usable digest, while `Unavailable(reason)`
+means the API itself failed (network, `HTTP 403` rate limit, bad payload).
+`discover_digest` maps the first to `E_LSP_CHECKSUM_UNAVAILABLE` and the second
+to `E_LSP_CHECKSUM_LOOKUP_FAILED`, so a rate-limited IP never accuses a vendor
+of not publishing checksums.
+`lsp checksum <server>` inspects the same value. Downloads still validate HTTPS,
+the host whitelist, the archive cap, extraction safety, and the resolved digest.
 
 ### Processes
 

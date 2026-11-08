@@ -310,20 +310,34 @@ The `lsp` tool supports `definition`, `type_definition`, `implementation`,
 restarted a bounded number of times, and shut down when idle.
 
 When a server is missing and `lsp.autoDownload` is enabled (the default), the
-harness downloads the pinned release from the server's GitHub releases page.
-Every download is verified against the digest the vendor publishes for that
-release:
+harness downloads the pinned release from the server's GitHub releases page and
+verifies it against the digest the vendor publishes. No token or manual
+checksum entry is needed. Sources are tried in this order:
 
-1. the GitHub release asset `digest` field (preferred);
-2. a checksums file attached to the same release (`SHA256SUMS`, `*.sha256`);
-3. a well-known checksums file next to the artifacts (`SHA256SUMS`,
+1. a pinned `lsp.downloads.<server>.sha256` (explicit override, e.g. a mirror);
+2. the digest cached on a previous successful install;
+3. a `<url>.sha256` sidecar next to the artifact;
+4. well-known checksums files published beside the artifacts (`SHA256SUMS`,
    `checksums.txt`, ...);
-4. a `<url>.sha256` sidecar next to the artifact.
+5. the GitHub release asset `digest` field, or a checksums asset attached to
+   the same release (`SHA256SUMS`, `*.sha256`).
 
-If the vendor publishes no digest in any of those places, the download is
-refused rather than installing an unverified binary. A digest can be pinned in
-`lsp.downloads.<server>.sha256` to override verification (for a private mirror);
-this is never required for the built-in registry.
+Steps 3 and 4 are plain HTTPS GETs against the release download directory, so
+they use no GitHub API quota and need no token at all.
+
+`GITHUB_TOKEN` is optional: only step 5 talks to the GitHub API, and a
+token just raises that endpoint's anonymous 60-requests-per-hour quota. A
+discovered digest is cached under `lsp/checksums/<server>/<version>.sha256` and
+reused, so repeat installs never look it up again; `lsp update` clears that
+cache so the fresh download is verified again.
+
+Two outcomes are reported separately, because they call for different fixes:
+
+- `E_LSP_CHECKSUM_UNAVAILABLE` - every source answered and none publishes a
+  digest, so the server must be installed manually (`installHint` says how);
+- `E_LSP_CHECKSUM_LOOKUP_FAILED` - the GitHub API could not be read (offline,
+  rate limited, blocked). Nothing was downloaded; retry later, set
+  `GITHUB_TOKEN`, or pin `lsp.downloads.<server>.sha256`.
 
 Transport rules are enforced for every download:
 
@@ -339,8 +353,8 @@ rustedharness lsp checksum rust-analyzer  # show the digest and its source
 ```
 
 `lsp checksum` is informational: installation performs the same discovery and
-verification automatically. Set `GITHUB_TOKEN` when the unauthenticated GitHub
-API rate limit is a problem.
+verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
+quota; it is never required for a normal install.
 
 Without a server, L0 provides definitions, references, and identifier lookup
 from a real tree-sitter parse indexed in SQLite. All 17 bundled grammars are
