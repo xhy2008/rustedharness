@@ -44,10 +44,10 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
 }
 
 fn transcript_signature(app: &App) -> u64 {
-    let mut hash =
-        (if app.tools_open { 1u64 } else { 0 }) ^ if app.show_thinking { 2 } else { 0 };
+    let mut hash = (if app.tools_open { 1u64 } else { 0 }) ^ if app.show_thinking { 2 } else { 0 };
     for entry in &app.entries {
-        let flags = (entry.expanded as u64) << 62 | entry.ok.map(|o| o as u64 + 1).unwrap_or(0) << 60;
+        let flags =
+            (entry.expanded as u64) << 62 | entry.ok.map(|o| o as u64 + 1).unwrap_or(0) << 60;
         let mix = ((entry.kind as u64) << 56)
             ^ ((entry.title.len() as u64) << 28)
             ^ entry.body.len() as u64;
@@ -76,12 +76,7 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 let mut prefix_done = false;
                 for raw in entry.body.lines() {
                     if !prefix_done {
-                        lines.extend(wrap_styled(
-                            format!("❯ {raw}"),
-                            body_style,
-                            "  ",
-                            width,
-                        ));
+                        lines.extend(wrap_styled(format!("❯ {raw}"), body_style, "  ", width));
                         prefix_done = true;
                     } else {
                         lines.extend(wrap_styled(raw.to_string(), body_style, "  ", width));
@@ -229,7 +224,11 @@ fn wrap_styled(text: String, style: Style, cont: &str, width: usize) -> Vec<Line
             used += cw;
             chars.next();
         }
-        let rendered = if first { chunk } else { format!("{cont}{chunk}") };
+        let rendered = if first {
+            chunk
+        } else {
+            format!("{cont}{chunk}")
+        };
         let rendered = if style.bg.is_some() {
             let pad = width.saturating_sub(display_width(&rendered));
             format!("{}{}", rendered, " ".repeat(pad))
@@ -383,9 +382,15 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         }
         spans.push(sep());
     }
-    spans.push(Span::styled(shorten(&app.cwd, 36), Style::default().fg(MUTED)));
+    spans.push(Span::styled(
+        shorten(&app.cwd, 36),
+        Style::default().fg(MUTED),
+    ));
     spans.push(sep());
-    spans.push(Span::styled(app.agent_model.clone(), Style::default().fg(BLUE)));
+    spans.push(Span::styled(
+        app.agent_model.clone(),
+        Style::default().fg(BLUE),
+    ));
     spans.push(sep());
     spans.push(Span::styled(
         format!("compact {}", app.compact_model),
@@ -553,15 +558,21 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             draw_picker_items(frame, body, title, &shown, *sel, filter);
         }
         Overlay::Session { items, sel, filter } => {
-            let shown: Vec<PickerItem> =
-                session_filtered(items, filter).into_iter().cloned().collect();
+            let shown: Vec<PickerItem> = session_filtered(items, filter)
+                .into_iter()
+                .cloned()
+                .collect();
             draw_picker_items(frame, body, "sessions", &shown, *sel, filter);
         }
         Overlay::FileBrowser { rel, entries, sel } => {
             let items: Vec<PickerItem> = entries
                 .iter()
                 .map(|(name, dir)| PickerItem {
-                    label: if *dir { format!("📁 {name}") } else { name.clone() },
+                    label: if *dir {
+                        format!("📁 {name}")
+                    } else {
+                        name.clone()
+                    },
                     detail: String::new(),
                     value: name.clone(),
                 })
@@ -576,20 +587,14 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             truncated,
         } => {
             let height = body.height.saturating_sub(1);
-            let area = Rect {
-                height,
-                ..body
-            };
+            let area = Rect { height, ..body };
             frame.render_widget(Clear, area);
             let rendered: Vec<Line> = lines
                 .iter()
                 .enumerate()
                 .map(|(index, line)| {
                     Line::from(vec![
-                        Span::styled(
-                            format!("{:>5} ", index + 1),
-                            Style::default().fg(DIM),
-                        ),
+                        Span::styled(format!("{:>5} ", index + 1), Style::default().fg(DIM)),
                         Span::styled(line.clone(), Style::default().fg(TEXT)),
                     ])
                 })
@@ -668,10 +673,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))];
             if app.todo.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  none",
-                    Style::default().fg(DIM),
-                )));
+                lines.push(Line::from(Span::styled("  none", Style::default().fg(DIM))));
             }
             for item in &app.todo {
                 let color = match item.status {
@@ -697,10 +699,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))];
             if app.processes.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  none",
-                    Style::default().fg(DIM),
-                )));
+                lines.push(Line::from(Span::styled("  none", Style::default().fg(DIM))));
             }
             for (pid, p) in &app.processes {
                 let color = if p.status == "running" { YELLOW } else { GREEN };
@@ -708,9 +707,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                     format!(
                         "  {pid} {} {}",
                         p.status,
-                        p.exit_code
-                            .map(|c| format!("exit {c}"))
-                            .unwrap_or_default()
+                        p.exit_code.map(|c| format!("exit {c}")).unwrap_or_default()
                     ),
                     Style::default().fg(color),
                 )));
@@ -733,10 +730,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))];
             if app.lsp.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  idle",
-                    Style::default().fg(DIM),
-                )));
+                lines.push(Line::from(Span::styled("  idle", Style::default().fg(DIM))));
             }
             for status in &app.lsp {
                 let color = match status.state.as_str() {

@@ -3,12 +3,12 @@
 //! Layout (top to bottom, borderless like Pi):
 //!   transcript | [overlay] | editor rule | status line | footer
 //!
-//! Feature parity with the web GUI: sessions (list/resume/new), file tree
-//! + viewer, model picker, settings, todos, LSP status, processes, download
+//! Feature parity with the web GUI: sessions (list/resume/new), file tree and
+//! viewer, model picker, settings, todos, LSP status, processes, download
 //! consent, token/context stats, clipboard copy.
 
-use std::collections::{BTreeMap, VecDeque};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -99,12 +99,7 @@ pub enum ModelTarget {
 }
 
 /// Selectable rows in the settings overlay.
-const SETTINGS_ROWS: &[&str] = &[
-    "agent model",
-    "compact model",
-    "workspace",
-    "session",
-];
+const SETTINGS_ROWS: &[&str] = &["agent model", "compact model", "workspace", "session"];
 
 pub struct ConsentCard {
     pub id: String,
@@ -393,7 +388,8 @@ impl App {
                 arguments,
             } => {
                 let args = arguments.to_string();
-                let mut entry = Entry::new(EntryKind::Tool, format!("{name} {}", brief(&args)), args);
+                let mut entry =
+                    Entry::new(EntryKind::Tool, format!("{name} {}", brief(&args)), args);
                 entry.expanded = self.tools_open;
                 self.push_entry(entry);
                 self.live_tool = Some((id, self.entries.len() - 1));
@@ -471,8 +467,14 @@ impl App {
                 screen,
                 exit_code,
             } => {
-                self.processes
-                    .insert(pid, ProcessCard { status, exit_code, screen });
+                self.processes.insert(
+                    pid,
+                    ProcessCard {
+                        status,
+                        exit_code,
+                        screen,
+                    },
+                );
             }
             HarnessEvent::ProcessExited {
                 pid,
@@ -484,8 +486,14 @@ impl App {
                     .get(&pid)
                     .map(|p| p.screen.clone())
                     .unwrap_or_default();
-                self.processes
-                    .insert(pid, ProcessCard { status, exit_code, screen });
+                self.processes.insert(
+                    pid,
+                    ProcessCard {
+                        status,
+                        exit_code,
+                        screen,
+                    },
+                );
             }
             HarnessEvent::DownloadConsent {
                 id,
@@ -617,12 +625,14 @@ impl App {
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some((anchor, _)) = self.selection {
-                            let col = mouse
-                                .column
-                                .clamp(self.mouse_area.x, self.mouse_area.right().saturating_sub(1));
-                            let row = mouse
-                                .row
-                                .clamp(self.mouse_area.y, self.mouse_area.bottom().saturating_sub(1));
+                            let col = mouse.column.clamp(
+                                self.mouse_area.x,
+                                self.mouse_area.right().saturating_sub(1),
+                            );
+                            let row = mouse.row.clamp(
+                                self.mouse_area.y,
+                                self.mouse_area.bottom().saturating_sub(1),
+                            );
                             self.selection =
                                 Some((anchor, (col - self.mouse_area.x, row - self.mouse_area.y)));
                         }
@@ -694,7 +704,11 @@ impl App {
             ) {
                 let card = self.consent.take().unwrap();
                 self.agent.grant_download_by_id(&card.id, allow);
-                self.notice(if allow { "download approved" } else { "download declined" });
+                self.notice(if allow {
+                    "download approved"
+                } else {
+                    "download declined"
+                });
             }
             return Ok(());
         }
@@ -1135,9 +1149,7 @@ impl App {
                     } else {
                         format!("{rel}/{name}")
                     };
-                    if name == ".." {
-                        self.open_file_browser(&path);
-                    } else if is_dir {
+                    if name == ".." || is_dir {
                         self.open_file_browser(&path);
                     } else {
                         self.open_file(&path);
@@ -1182,11 +1194,7 @@ impl App {
         Ok(())
     }
 
-    async fn run_command(
-        &mut self,
-        text: &str,
-        op_tx: &UnboundedSender<OpResult>,
-    ) -> Result<()> {
+    async fn run_command(&mut self, text: &str, op_tx: &UnboundedSender<OpResult>) -> Result<()> {
         let mut parts = text.splitn(2, ' ');
         let cmd = parts.next().unwrap_or("");
         let arg = parts.next().unwrap_or("").trim().to_string();
@@ -1251,10 +1259,7 @@ impl App {
                 let server = arg.clone();
                 let tx = op_tx.clone();
                 tokio::spawn(async move {
-                    let result = agent
-                        .lsp_checksum(&server)
-                        .await
-                        .map_err(|e| e.to_string());
+                    let result = agent.lsp_checksum(&server).await.map_err(|e| e.to_string());
                     let _ = tx.send(OpResult::Checksum { server, result });
                 });
                 self.notice(format!("checksumming {arg}..."));
@@ -1325,7 +1330,10 @@ impl App {
                 ModelTarget::Agent => &self.agent_model,
                 ModelTarget::Compact => &self.compact_model,
             };
-            let sel = items.iter().position(|item| item.value == *current).unwrap_or(0);
+            let sel = items
+                .iter()
+                .position(|item| item.value == *current)
+                .unwrap_or(0);
             self.overlay = Overlay::Model {
                 items,
                 sel,
@@ -1389,10 +1397,7 @@ impl App {
                 if is_dir && is_skip_dir(&name) {
                     continue;
                 }
-                items.push((
-                    if is_dir { format!("{name}/") } else { name },
-                    is_dir,
-                ));
+                items.push((if is_dir { format!("{name}/") } else { name }, is_dir));
             }
             items.sort_by(|a, b| match (a.1, b.1) {
                 (true, false) => std::cmp::Ordering::Less,
@@ -1426,7 +1431,11 @@ impl App {
                 }
                 let limit = 512 * 1024;
                 let truncated = bytes.len() > limit;
-                let slice = if truncated { &bytes[..limit] } else { &bytes[..] };
+                let slice = if truncated {
+                    &bytes[..limit]
+                } else {
+                    &bytes[..]
+                };
                 let text = String::from_utf8_lossy(slice).to_string();
                 let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
                 self.overlay = Overlay::FileView {

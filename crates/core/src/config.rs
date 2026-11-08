@@ -1118,7 +1118,8 @@ pub fn strip_trailing_commas(raw: &str) -> String {
 }
 
 /// Expand `~` in paths supplied through `--config` or environment variables.
-pub fn expand_tilde(path: &Path) -> PathBuf {    let text = path.to_string_lossy();
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
     if text == "~" {
         return home_dir();
     }
@@ -1248,7 +1249,8 @@ mod tests {
     }
 
     #[test]
-    fn default_config_roundtrips() {        let mut cfg: Config =
+    fn default_config_roundtrips() {
+        let mut cfg: Config =
             serde_json::from_str(&default_config_json()).expect("template parses");
         cfg.normalize();
         assert_eq!(cfg.edit.anchor_width, 2);

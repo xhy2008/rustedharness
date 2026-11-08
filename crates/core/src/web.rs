@@ -685,7 +685,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-
     #[test]
     fn js_only_pages_are_detected_by_empty_text() {
         assert!(looks_like_html(

@@ -19,10 +19,7 @@ const MAX_RAW_BYTES: usize = 1_048_576;
 /// Nothing else in this process speaks to the pty, so respond here; without
 /// this Windows shells never emit any output.
 fn answer_terminal_queries(pending: &mut Vec<u8>, writer: &mut dyn std::io::Write, rows: u16) {
-    if pending
-        .windows(4)
-        .any(|window| window == b"\x1b[6n")
-    {
+    if pending.windows(4).any(|window| window == b"\x1b[6n") {
         let reply = format!("\x1b[{rows};1R");
         let _ = writer.write_all(reply.as_bytes());
         let _ = writer.flush();
@@ -1103,14 +1100,11 @@ mod tests {
         use crate::config::ShellConfig;
         use crate::shell::ShellSpec;
         let spec = ShellSpec::detect("default");
-        let mut config = ShellConfig::default();
-        config.timeout_ms = 20_000;
-        let registry = ProcRegistry::new(
-            spec,
-            config,
-            std::env::current_dir().unwrap(),
-            None,
-        );
+        let config = ShellConfig {
+            timeout_ms: 20_000,
+            ..Default::default()
+        };
+        let registry = ProcRegistry::new(spec, config, std::env::current_dir().unwrap(), None);
         let outcome = registry
             .run_foreground("echo rusted-conpty-probe", Some(20_000))
             .await
@@ -1151,8 +1145,10 @@ mod tests {
         use crate::config::ShellConfig;
         use crate::shell::ShellSpec;
         let spec = ShellSpec::detect("default");
-        let mut config = ShellConfig::default();
-        config.timeout_ms = 20_000;
+        let config = ShellConfig {
+            timeout_ms: 20_000,
+            ..Default::default()
+        };
         let registry = ProcRegistry::new(spec, config, std::env::current_dir().unwrap(), None);
         let outcome = registry
             .run_foreground("cmd /c exit 42", Some(20_000))
@@ -1167,7 +1163,8 @@ mod tests {
     }
 
     #[test]
-    fn carriage_return_collapses_progress_to_one_line() {        let mut emu = ScreenEmulator::new();
+    fn carriage_return_collapses_progress_to_one_line() {
+        let mut emu = ScreenEmulator::new();
         emu.feed(b"  0%|          | 0/5000");
         for i in (500..=5000).step_by(500) {
             emu.feed(format!("\r {:3}%|#####| {i}/5000", i / 50).as_bytes());

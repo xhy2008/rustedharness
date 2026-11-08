@@ -343,9 +343,10 @@ fn file_has_messages(path: &Path) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
     };
-    BufReader::new(file)
-        .lines()
-        .any(|line| line.map(|l| l.contains(r#""kind":"message""#)).unwrap_or(false))
+    BufReader::new(file).lines().any(|line| {
+        line.map(|l| l.contains(r#""kind":"message""#))
+            .unwrap_or(false)
+    })
 }
 
 pub struct SessionStore {
@@ -572,7 +573,8 @@ mod tests {
     fn models_switch_is_replayed_on_load() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
-        let mut writer = SessionWriter::create(&cfg, dir.path(), "orig-model", "orig-compact").unwrap();
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "orig-model", "orig-compact").unwrap();
         writer.user("hello").unwrap();
         // A mid-session `/model` switch appends a later Models record.
         writer.models("new-model", "new-compact").unwrap();

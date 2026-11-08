@@ -101,7 +101,6 @@ impl Tool for GrepTool {
             collect_files(&root, &scope_root, globset.as_ref())
         };
 
-
         let per_file: Vec<(String, u64, Vec<FileHits>)> = files
             .par_iter()
             .filter_map(|path| {

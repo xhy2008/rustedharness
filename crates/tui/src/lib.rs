@@ -44,8 +44,15 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
     spawn_key_reader(key_tx, stop.clone());
 
     let mut app = App::new(agent, config);
-    let result =
-        event_loop(&mut terminal, &mut app, &mut key_rx, &mut op_rx, &mut rx, &op_tx).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        &mut key_rx,
+        &mut op_rx,
+        &mut rx,
+        &op_tx,
+    )
+    .await;
 
     stop.store(true, Ordering::Relaxed);
     graceful_shutdown(&app.agent).await;

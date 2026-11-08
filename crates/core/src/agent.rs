@@ -327,10 +327,7 @@ impl Agent {
                     "sha256 must be exactly 64 hexadecimal characters".to_string(),
                 ));
             }
-            lsp.downloads
-                .entry(server.to_string())
-                .or_default()
-                .sha256 = Some(sha);
+            lsp.downloads.entry(server.to_string()).or_default().sha256 = Some(sha);
         }
         let hub = crate::lsp::LspHub::new(self.cwd(), &lsp, Some(self.events.clone()));
         hub.grant_download(server, true);
@@ -749,7 +746,7 @@ impl Agent {
                 return Err(err);
             }
             attempt += 1;
-            if attempt == 1 || attempt % 6 == 0 {
+            if attempt == 1 || attempt.is_multiple_of(6) {
                 let _ = self.events.send(HarnessEvent::Notice {
                     level: "warning".to_string(),
                     message: format!(
@@ -764,7 +761,8 @@ impl Agent {
         }
     }
 
-    fn report_usage(&self, completion: &Completion) {        let Some(usage) = completion.usage else {
+    fn report_usage(&self, completion: &Completion) {
+        let Some(usage) = completion.usage else {
             if self.usage.note_missing_usage() {
                 let _ = self.events.send(HarnessEvent::Notice {
                     level: "warning".to_string(),

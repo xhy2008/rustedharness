@@ -611,7 +611,10 @@ impl Backend for Provider {
                         cached_tokens: usage
                             .cached_tokens
                             .or_else(|| {
-                                usage.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens)
+                                usage
+                                    .prompt_tokens_details
+                                    .as_ref()
+                                    .and_then(|d| d.cached_tokens)
                             })
                             .unwrap_or(0),
                         cost_usd: usage.cost_usd,
@@ -718,7 +721,8 @@ pub fn is_quota_exhausted(message: &str) -> bool {
         || m.contains("欠费")
 }
 
-pub(crate) fn is_compat_rejection(message: &str) -> bool {    let m = message.to_ascii_lowercase();
+pub(crate) fn is_compat_rejection(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
     m.contains("max_tokens")
         || m.contains("max_completion_tokens")
         || m.contains("tool_choice")
