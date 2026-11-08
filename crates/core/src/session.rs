@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::SessionConfig;
+use crate::config::{Config, SessionConfig};
 use crate::error::{HarnessError, Result};
 use crate::provider::ChatMessage;
 use crate::tools::todo::TodoItem;
@@ -99,11 +99,6 @@ pub struct SessionWriter {
     header: Vec<SessionRecord>,
     dir: PathBuf,
     max_saved: usize,
-    cwd: String,
-    agent_model: String,
-    compact_model: String,
-    created_at: String,
-    messages: usize,
 }
 
 impl SessionWriter {
@@ -113,9 +108,7 @@ impl SessionWriter {
         agent_model: &str,
         compact_model: &str,
     ) -> Result<Self> {
-        let dir = cfg.dir.clone().unwrap_or_else(|| {
-            crate::config::Config::session_dir(&crate::config::Config::default())
-        });
+        let dir = cfg.dir.clone().unwrap_or_else(Config::sessions_dir);
         std::fs::create_dir_all(&dir)?;
         let now = chrono::Local::now();
         let created_at = now.to_rfc3339();
@@ -140,40 +133,24 @@ impl SessionWriter {
             header: vec![SessionRecord::Meta { meta }],
             dir,
             max_saved: cfg.max_saved_sessions,
-            cwd: cwd.to_string_lossy().to_string(),
-            agent_model: agent_model.to_string(),
-            compact_model: compact_model.to_string(),
-            created_at,
-            messages: 0,
         })
     }
 
     /// Re-open an existing transcript for appending (session resume).
-    pub fn resume(path: &Path, meta: SessionMeta, message_count: usize) -> Result<Self> {
+    pub fn resume(path: &Path, id: String) -> Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            id: meta.id,
+            id,
             path: path.to_path_buf(),
             file: Some(file),
             header: Vec::new(),
             dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
             max_saved: 0,
-            cwd: meta.cwd,
-            agent_model: meta.agent_model,
-            compact_model: meta.compact_model,
-            created_at: meta.created_at,
-            messages: message_count,
         })
     }
 
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    /// Number of `Message` records written in this transcript. Used to detect
-    /// abandoned empty sessions (started but never prompted).
-    pub fn messages(&self) -> usize {
-        self.messages
     }
 
     pub fn path(&self) -> &Path {
@@ -190,9 +167,6 @@ impl SessionWriter {
             self.open()?;
         }
         self.write(record)?;
-        if matches!(record, SessionRecord::Message { .. }) {
-            self.messages += 1;
-        }
         Ok(())
     }
 
@@ -266,8 +240,6 @@ impl SessionWriter {
     }
 
     pub fn models(&mut self, agent: &str, compact: &str) -> Result<()> {
-        self.agent_model = agent.to_string();
-        self.compact_model = compact.to_string();
         self.append(&SessionRecord::Models {
             agent: agent.to_string(),
             compact: compact.to_string(),
@@ -286,20 +258,6 @@ impl SessionWriter {
             level: level.to_string(),
             message: message.to_string(),
         })
-    }
-
-    pub fn summary(&self) -> SessionSummary {
-        SessionSummary {
-            id: self.id.clone(),
-            path: self.path.to_string_lossy().to_string(),
-            cwd: self.cwd.clone(),
-            agent_model: self.agent_model.clone(),
-            created_at: self.created_at.clone(),
-            updated_at: chrono::Local::now().to_rfc3339(),
-            title: None,
-            messages: self.messages,
-            bytes: std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0),
-        }
     }
 
     fn prune(&self, max: usize) {
@@ -326,9 +284,7 @@ impl SessionWriter {
             if path == self.path {
                 continue;
             }
-            // Sessions with no messages (every launch used to leave one behind)
-            // are garbage regardless of the save quota — sweep them always.
-            if kept < max && file_has_messages(&path) {
+            if kept < max {
                 kept += 1;
                 continue;
             }
@@ -337,27 +293,13 @@ impl SessionWriter {
     }
 }
 
-/// Cheap probe: does this transcript contain at least one message record?
-/// The serde tag is the first key of every line, so a substring scan is exact.
-fn file_has_messages(path: &Path) -> bool {
-    let Ok(file) = File::open(path) else {
-        return false;
-    };
-    BufReader::new(file).lines().any(|line| {
-        line.map(|l| l.contains(r#""kind":"message""#))
-            .unwrap_or(false)
-    })
-}
-
 pub struct SessionStore {
     dir: PathBuf,
 }
 
 impl SessionStore {
     pub fn new(cfg: &SessionConfig) -> Self {
-        let dir = cfg.dir.clone().unwrap_or_else(|| {
-            crate::config::Config::session_dir(&crate::config::Config::default())
-        });
+        let dir = cfg.dir.clone().unwrap_or_else(Config::sessions_dir);
         Self { dir }
     }
 
@@ -379,11 +321,6 @@ impl SessionStore {
                 continue;
             };
             let Some(meta) = loaded.meta else { continue };
-            // Sessions are created when an agent starts so they can be resumed
-            // immediately; hide ones that never received a message.
-            if loaded.messages.is_empty() {
-                continue;
-            }
             let modified = entry
                 .metadata()
                 .ok()
@@ -646,48 +583,12 @@ mod tests {
     }
 
     #[test]
-    fn pruning_sweeps_empty_sessions_regardless_of_quota() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = config(dir.path());
-        let mut real = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
-        real.user("kept").unwrap();
-        let real_path = real.path().to_path_buf();
-        drop(real);
-
-        // Older builds left header-only transcripts on disk; a later prune must
-        // still sweep them regardless of the save quota.
-        let empty_path = dir.path().join("20200101-000000-abcdef.jsonl");
-        let meta = SessionMeta {
-            id: "20200101-000000-abcdef".to_string(),
-            cwd: dir.path().to_string_lossy().to_string(),
-            agent_model: "a".to_string(),
-            compact_model: "c".to_string(),
-            created_at: chrono::Local::now().to_rfc3339(),
-            title: None,
-        };
-        std::fs::write(
-            &empty_path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&SessionRecord::Meta { meta }).unwrap()
-            ),
-        )
-        .unwrap();
-
-        let mut next = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
-        next.user("x").unwrap();
-        assert!(real_path.exists());
-        assert!(!empty_path.exists());
-    }
-
-    #[test]
     fn create_writes_nothing_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
         let writer = SessionWriter::create(&cfg, dir.path(), "a", "c").unwrap();
         assert!(!writer.path().exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-        assert_eq!(writer.summary().bytes, 0);
     }
 
     #[test]

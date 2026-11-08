@@ -1067,11 +1067,16 @@ impl Config {
         self.source.clone().unwrap_or_else(Self::config_dir)
     }
 
+    /// Default transcript directory when `[session].dir` is unset.
+    pub fn sessions_dir() -> PathBuf {
+        Self::data_dir().join("sessions")
+    }
+
     pub fn session_dir(&self) -> PathBuf {
         self.session
             .dir
             .clone()
-            .unwrap_or_else(|| Self::data_dir().join("sessions"))
+            .unwrap_or_else(Self::sessions_dir)
     }
 }
 
