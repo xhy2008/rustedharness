@@ -93,17 +93,6 @@ impl ChatMessage {
         }
     }
 
-    /// Approximate textual footprint, used by the token estimator.
-    pub fn text_len(&self) -> usize {
-        let mut n = self.content.as_deref().map(str::len).unwrap_or(0);
-        n += self.reasoning_content.as_deref().map(str::len).unwrap_or(0);
-        if let Some(calls) = &self.tool_calls {
-            for c in calls {
-                n += c.function.name.len() + c.function.arguments.len();
-            }
-        }
-        n
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -371,9 +360,8 @@ impl Provider {
     }
 }
 
-/// Routes each request to the provider that owns the selected model. This is
-/// what makes `models.agent` and `models.compact` able to live on different
-/// providers in the same session.
+/// Routes each request to the provider that owns the selected model, so the
+/// agent and compaction models can live on different providers in one session.
 #[derive(Clone)]
 pub struct Router {
     config: Config,

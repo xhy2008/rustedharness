@@ -184,24 +184,6 @@ impl ToolRegistry {
         }
     }
 
-    pub fn with_tools(tools: Vec<Arc<dyn Tool>>, deny: Vec<String>) -> Self {
-        Self {
-            tools: tools
-                .into_iter()
-                .map(|t| (t.name().to_string(), t))
-                .collect(),
-            deny,
-        }
-    }
-
-    pub fn insert(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
-    }
-
-    pub fn remove(&mut self, name: &str) {
-        self.tools.remove(name);
-    }
-
     pub fn names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }

@@ -47,8 +47,7 @@ client, code index, and process registry.
 
 `config.rs` merges `~/.rustedharness/config.json` (settings and default model)
 with `~/.rustedharness/models.json` (Pi-style providers and model lists). The
-directory can be moved with `RUSTEDHARNESS_DIR`; legacy TOML and the old
-platform config directory are read as migration fallbacks. Model references are
+directory can be moved with `RUSTEDHARNESS_DIR`. Model references are
 `provider/model` or a bare unique id, and each model carries its own context
 window and optional output cap. API keys and header values support literals,
 `$ENV`/`${ENV}` interpolation, and `!command`.
@@ -101,10 +100,10 @@ values.
 ### Compaction
 
 `compact.rs` fires when the latest provider-reported context size reaches
-`compact_threshold` of `models.context_window` (using `total_tokens`, or
+`compactThreshold` of `contextWindow` (using `total_tokens`, or
 prompt plus completion when a gateway omits the total). It keeps the system
-prompt and the last `keep_recent_turns` turns, summarises the middle with
-`models.compact`, and records the summary in a five-section form. Orphaned tool
+prompt and the last `keepRecentTurns` turns, summarises the middle with
+`compactModel`, and records the summary in a five-section form. Orphaned tool
 results are pruned with their assistant tool calls. After a successful
 compaction the context counter is reset, so stale pre-summary numbers cannot
 retrigger compaction.
@@ -114,9 +113,10 @@ retrigger compaction.
 `session.rs` writes one JSON object per message/record to
 `<data>/sessions/<id>.jsonl`, with a header record and compaction markers.
 Writes are append-only; a torn final line is ignored on load. Lookup scans the
-session directory and accepts an id or a unique prefix. Every frontend creates
-a session when an agent starts and can resume it immediately; compaction
-records are replayed so the resumed transcript matches the compacted view.
+session directory and accepts an id or a unique prefix. The transcript file is
+created lazily with the first user message, so launching and quitting leaves no
+artifact behind; compaction records are replayed so a resumed transcript
+matches the compacted view.
 
 ### Code intelligence
 

@@ -96,10 +96,6 @@ impl WorkspacePathResolver {
         s
     }
 
-    /// Store-friendly relative path used in anchors and tool output.
-    pub fn rel_string(&self, path: &Path) -> String {
-        self.display_rel(path)
-    }
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {

@@ -81,14 +81,6 @@ impl TodoStore {
             .collect()
     }
 
-    pub fn has_unfinished(&self) -> bool {
-        self.items
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|i| i.status != TodoStatus::Completed)
-    }
-
     pub fn is_empty(&self) -> bool {
         self.items.lock().unwrap().is_empty()
     }

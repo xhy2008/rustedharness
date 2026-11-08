@@ -424,8 +424,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         return status.into_response();
     }
     let store = SessionStore::new(&state.config.session);
-    let mut sessions = store.list();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let sessions = store.list();
     Json(json!({ "sessions": sessions, "dir": store.dir().to_string_lossy() })).into_response()
 }
 

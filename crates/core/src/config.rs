@@ -12,20 +12,20 @@ use crate::error::{HarnessError, Result};
 /// * `~/.rustedharness/models.json` — providers, endpoints and their models.
 ///
 /// `Config` is the merged runtime view. `providers` is normally loaded from
-/// `models.json`; keeping it on the struct also lets a single JSON/TOML file
+/// `models.json`; keeping it on the struct also lets a single JSON file
 /// describe everything, which is convenient for tests and `--config`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     /// Default model, either `provider/model` or a model id unique across all
     /// providers.
-    #[serde(default, alias = "defaultModel", alias = "default_model")]
+    #[serde(default)]
     pub model: String,
     /// Model used for compaction summaries; falls back to `model`.
-    #[serde(default, alias = "compact_model", alias = "compactionModel")]
+    #[serde(default)]
     pub compact_model: String,
     /// Fallback context window for models that do not declare one.
-    #[serde(default, alias = "context_window")]
+    #[serde(default)]
     pub context_window: u64,
     /// Fallback provider when a bare model id is ambiguous or unknown.
     #[serde(default)]
@@ -46,13 +46,10 @@ pub struct Config {
     pub session: SessionConfig,
     #[serde(default)]
     pub mcp: McpConfig,
-    /// v1.6 permission model: every tool is allowed by default. Deny entries
-    /// are the optional blacklist (empty by default).
-    #[serde(default, alias = "deny_tools")]
+    /// Every tool is allowed by default; deny entries are the optional
+    /// blacklist.
+    #[serde(default)]
     pub deny_tools: Vec<String>,
-    /// Legacy `[models]` block. Accepted so old TOML files keep working.
-    #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
-    pub models: ModelsConfig,
     /// Directory the config was loaded from (set at load time, never serialized).
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -75,7 +72,6 @@ impl Default for Config {
             session: SessionConfig::default(),
             mcp: McpConfig::default(),
             deny_tools: Vec::new(),
-            models: ModelsConfig::default(),
             source: None,
         }
     }
@@ -94,7 +90,6 @@ fn default_providers() -> BTreeMap<String, ProviderConfig> {
             base_url,
             api: "openai-completions".to_string(),
             api_key: Some("$OPENAI_API_KEY".to_string()),
-            api_key_env: None,
             headers: BTreeMap::new(),
             compat: Compat::default(),
             models: vec![
@@ -123,16 +118,12 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// API base URL, including `/v1` for OpenAI-compatible endpoints.
-    #[serde(alias = "base_url")]
     pub base_url: String,
     /// Wire protocol: `openai-completions` (default) or `openai-responses`.
     pub api: String,
     /// Literal key, `$ENV`/`${ENV}` interpolation, or `!command` output.
-    #[serde(alias = "api_key", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// Legacy/env-only key source. `apiKey` can already contain `$ENV`.
-    #[serde(alias = "api_key_env", skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
     pub compat: Compat,
@@ -148,7 +139,6 @@ impl Default for ProviderConfig {
             base_url: String::new(),
             api: "openai-completions".to_string(),
             api_key: None,
-            api_key_env: None,
             headers: BTreeMap::new(),
             compat: Compat::default(),
             models: Vec::new(),
@@ -169,9 +159,6 @@ impl ProviderConfig {
         }
         if incoming.api_key.is_some() {
             self.api_key = incoming.api_key;
-        }
-        if incoming.api_key_env.is_some() {
-            self.api_key_env = incoming.api_key_env;
         }
         self.headers.extend(incoming.headers);
         if incoming.compat != Compat::default() {
@@ -202,14 +189,9 @@ pub struct ModelConfig {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(alias = "context_window", alias = "contextWindow")]
     pub context_window: u64,
     /// Optional output cap. Falls back to `[agent].maxOutputTokens`.
-    #[serde(
-        alias = "max_tokens",
-        alias = "maxOutputTokens",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "is_false")]
     pub reasoning: bool,
@@ -241,9 +223,7 @@ pub struct ModelSpec {
     pub provider: String,
     pub id: String,
     pub name: String,
-    #[serde(alias = "context_window")]
     pub context_window: u64,
-    #[serde(alias = "max_tokens", alias = "maxOutputTokens")]
     pub max_tokens: Option<u32>,
     pub reasoning: bool,
 }
@@ -260,21 +240,15 @@ impl ModelSpec {
 #[serde(default, rename_all = "camelCase")]
 pub struct Compat {
     /// `max_tokens`, `max_completion_tokens`, or `omit` (model picks its default).
-    #[serde(alias = "max_tokens_field")]
     pub max_tokens_field: MaxTokensField,
     /// `system` or `developer` for the first message.
-    #[serde(alias = "system_role")]
     pub system_role: SystemRole,
     /// Round-trip `reasoning_content` deltas (DeepSeek-style endpoints).
-    #[serde(alias = "reasoning_content")]
     pub reasoning_content: bool,
     /// Send `tool_choice: "auto"` and fall back when rejected.
-    #[serde(alias = "tool_choice")]
     pub tool_choice: bool,
-    #[serde(alias = "parallel_tool_calls")]
     pub parallel_tool_calls: bool,
     /// Ask for `stream_options.include_usage`; disabled for older gateways.
-    #[serde(alias = "stream_usage")]
     pub stream_usage: bool,
 }
 
@@ -306,44 +280,20 @@ pub enum SystemRole {
     Developer,
 }
 
-/// Legacy model selection block retained for old TOML files.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ModelsConfig {
-    #[serde(alias = "defaultModel", alias = "default_model")]
-    pub agent: String,
-    #[serde(alias = "compactModel", alias = "compact_model")]
-    pub compact: String,
-    #[serde(alias = "context_window", alias = "contextWindow")]
-    pub context_window: u64,
-}
-
-impl ModelsConfig {
-    pub fn is_empty(&self) -> bool {
-        self.agent.is_empty() && self.compact.is_empty() && self.context_window == 0
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AgentConfig {
-    #[serde(alias = "max_turns")]
     pub max_turns: usize,
     /// Fraction of the context window that triggers compaction (0.80 default).
-    #[serde(alias = "compact_threshold")]
     pub compact_threshold: f64,
     /// Recent user/assistant turns kept verbatim across a compaction.
-    #[serde(alias = "keep_recent_turns")]
     pub keep_recent_turns: usize,
-    #[serde(alias = "auto_compact")]
     pub auto_compact: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Max todo chase injections per stall event.
-    #[serde(alias = "chase_limit")]
     pub chase_limit: u32,
     /// Output token cap when a model does not declare `maxTokens`.
-    #[serde(alias = "max_output_tokens")]
     pub max_output_tokens: u32,
 }
 
@@ -365,15 +315,11 @@ impl Default for AgentConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct EditConfig {
     /// Hashline anchor width, 2..=4 characters.
-    #[serde(alias = "anchor_width")]
     pub anchor_width: usize,
     /// Cap on edits per call; `None` means unlimited. Set to 1 to degrade to
     /// single-patch behaviour for weak models.
-    #[serde(alias = "max_ops_per_call", skip_serializing_if = "Option::is_none")]
     pub max_ops_per_call: Option<usize>,
-    #[serde(alias = "enable_replace_text")]
     pub enable_replace_text: bool,
-    #[serde(alias = "diagnostics_timeout_ms")]
     pub diagnostics_timeout_ms: u64,
 }
 
@@ -393,15 +339,10 @@ impl Default for EditConfig {
 pub struct ShellConfig {
     /// "default" | "git-bash" (Windows only).
     pub prefer: String,
-    #[serde(alias = "timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(alias = "activity_timeout_ms")]
     pub activity_timeout_ms: u64,
-    #[serde(alias = "max_output_bytes")]
     pub max_output_bytes: usize,
-    #[serde(alias = "pty_rows")]
     pub pty_rows: u16,
-    #[serde(alias = "pty_cols")]
     pub pty_cols: u16,
 }
 
@@ -422,19 +363,14 @@ impl Default for ShellConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct LspConfig {
     pub enabled: bool,
-    #[serde(alias = "auto_download")]
     pub auto_download: bool,
     /// Downloads require consent; in non-interactive mode this must stay false.
-    #[serde(alias = "allow_downloads_noninteractive")]
     pub allow_downloads_noninteractive: bool,
-    #[serde(alias = "idle_timeout_secs")]
     pub idle_timeout_secs: u64,
-    #[serde(alias = "max_restarts")]
     pub max_restarts: u32,
     /// Command overrides per language, e.g. rust = "/opt/rust-analyzer".
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub servers: BTreeMap<String, String>,
-    #[serde(alias = "request_timeout_ms")]
     pub request_timeout_ms: u64,
     /// Optional pinned download manifests, keyed by server id. The built-in
     /// registry carries URLs but deliberately ships no checksums; a download
@@ -488,7 +424,6 @@ pub struct WebConfig {
     pub host: String,
     pub port: u16,
     /// Optional bearer token protecting the REST/WS endpoints.
-    #[serde(alias = "auth_token", skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
 }
 
@@ -507,7 +442,6 @@ impl Default for WebConfig {
 pub struct SessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
-    #[serde(alias = "max_saved_sessions")]
     pub max_saved_sessions: usize,
 }
 
@@ -525,10 +459,8 @@ impl Default for SessionConfig {
 pub struct McpConfig {
     pub enabled: bool,
     /// Path to mcp.json; defaults to `<cwd>/mcp.json` then the user config dir.
-    #[serde(alias = "config_path", skip_serializing_if = "Option::is_none")]
     pub config_path: Option<PathBuf>,
     pub deny: Vec<String>,
-    #[serde(alias = "call_timeout_ms")]
     pub call_timeout_ms: u64,
 }
 
@@ -544,15 +476,12 @@ impl Default for McpConfig {
 }
 
 impl Config {
-    /// `~/.rustedharness` by default. Override with `RUSTEDHARNESS_DIR` or
-    /// `RUSTEDHARNESS_CONFIG_DIR`.
+    /// `~/.rustedharness` by default, or `RUSTEDHARNESS_DIR` when set.
     pub fn config_dir() -> PathBuf {
-        for key in ["RUSTEDHARNESS_DIR", "RUSTEDHARNESS_CONFIG_DIR"] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return expand_tilde(Path::new(value));
-                }
+        if let Ok(value) = std::env::var("RUSTEDHARNESS_DIR") {
+            let value = value.trim();
+            if !value.is_empty() {
+                return expand_tilde(Path::new(value));
             }
         }
         home_dir().join(".rustedharness")
@@ -567,34 +496,11 @@ impl Config {
         Self::config_dir().join("config.json")
     }
 
-    pub fn models_path() -> PathBuf {
-        Self::config_dir().join("models.json")
-    }
-
-    /// Old platform-specific config directory, used only as a read-only
-    /// migration fallback when no config exists in `~/.rustedharness`.
-    fn legacy_config_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("dev", "rustedharness", "rustedharness")
-            .map(|d| d.config_dir().to_path_buf())
-    }
-
     pub fn load() -> Result<Self> {
-        let dir = Self::config_dir();
-        let has_new = dir.join("config.json").is_file()
-            || dir.join("config.toml").is_file()
-            || dir.join("models.json").is_file();
-        if !has_new {
-            if let Some(legacy) = Self::legacy_config_dir() {
-                if legacy.join("config.toml").is_file() || legacy.join("config.json").is_file() {
-                    return Self::load_from_dir(&legacy);
-                }
-            }
-        }
-        Self::load_from_dir(&dir)
+        Self::load_from_dir(&Self::config_dir())
     }
 
-    /// Load a config file, a directory containing `config.json`/`models.json`,
-    /// or a legacy TOML file.
+    /// Load a `config.json`, a `models.json`, or a directory containing both.
     pub fn load_from(path: &Path) -> Result<Self> {
         let path = expand_tilde(path);
         if path.is_dir() {
@@ -610,7 +516,6 @@ impl Config {
             .and_then(|value| value.to_str())
             .unwrap_or_default();
         let mut cfg = match extension.as_str() {
-            "toml" => Self::read_toml(&path)?,
             "json" if file_name.eq_ignore_ascii_case("models.json") => {
                 let mut cfg = Config::default();
                 cfg.providers.clear();
@@ -620,16 +525,14 @@ impl Config {
             "json" => Self::read_json(&path)?,
             _ => {
                 return Err(HarnessError::Config(format!(
-                    "unsupported config file `{}`; use .json or .toml",
+                    "unsupported config file `{}`; use .json",
                     path.display()
                 )))
             }
         };
         // `--config /some/dir/config.json` should pick up the sibling
         // models.json automatically.
-        if file_name.eq_ignore_ascii_case("config.json")
-            || file_name.eq_ignore_ascii_case("config.toml")
-        {
+        if file_name.eq_ignore_ascii_case("config.json") {
             let sibling = path.with_file_name("models.json");
             if sibling.is_file() {
                 cfg.merge_models(Self::read_models(&sibling)?);
@@ -647,13 +550,10 @@ impl Config {
 
     pub fn load_from_dir(dir: &Path) -> Result<Self> {
         let settings_path = dir.join("config.json");
-        let legacy_path = dir.join("config.toml");
         let models_path = dir.join("models.json");
 
         let mut cfg = if settings_path.is_file() {
             Self::read_json(&settings_path)?
-        } else if legacy_path.is_file() {
-            Self::read_toml(&legacy_path)?
         } else {
             Config::default()
         };
@@ -661,7 +561,7 @@ impl Config {
             // When `models.json` exists it is the complete provider list. Drop
             // the built-in provider that only exists to make a bare install
             // work, unless a settings file explicitly defined providers.
-            if !settings_path.is_file() && !legacy_path.is_file() {
+            if !settings_path.is_file() {
                 cfg.providers.clear();
             }
             cfg.merge_models(Self::read_models(&models_path)?);
@@ -695,29 +595,14 @@ impl Config {
         })
     }
 
-    fn read_toml(path: &Path) -> Result<Self> {
-        let raw = Self::read_text(path)?;
-        toml::from_str::<Config>(&raw)
-            .map_err(|e| HarnessError::Config(format!("invalid config {}: {e}", path.display())))
-    }
-
-    pub fn write_default() -> Result<PathBuf> {
-        Self::write_default_in(&Self::config_dir())
-    }
-
     /// Write `config.json` and `models.json` if they do not exist. Existing
-    /// files are never overwritten, so local edits are safe. A legacy
-    /// `config.toml` in the same directory is converted in place.
+    /// files are never overwritten, so local edits are safe.
     pub fn write_default_in(dir: &Path) -> Result<PathBuf> {
         std::fs::create_dir_all(dir)?;
         let settings = dir.join("config.json");
         let models = dir.join("models.json");
         if !settings.exists() {
-            let (settings_text, models_text) = if dir.join("config.toml").is_file() {
-                Self::load_from_dir(dir)?.split_files()
-            } else {
-                (default_config_json(), default_models_json())
-            };
+            let (settings_text, models_text) = (default_config_json(), default_models_json());
             std::fs::write(&settings, settings_text)?;
             if !models.exists() {
                 std::fs::write(&models, models_text)?;
@@ -734,7 +619,6 @@ impl Config {
         if let Some(object) = value.as_object_mut() {
             object.remove("providers");
             object.remove("provider");
-            object.remove("models");
         }
         let mut settings = serde_json::to_string_pretty(&value).expect("config is serializable");
         settings.push('\n');
@@ -793,25 +677,13 @@ impl Config {
             self.providers = Config::default().providers;
         }
         if self.context_window == 0 {
-            self.context_window = if self.models.context_window > 0 {
-                self.models.context_window
-            } else {
-                128_000
-            };
+            self.context_window = 128_000;
         }
         if self.model.trim().is_empty() {
-            self.model = if self.models.agent.trim().is_empty() {
-                "openai/gpt-4o".to_string()
-            } else {
-                self.models.agent.clone()
-            };
+            self.model = "openai/gpt-4o".to_string();
         }
         if self.compact_model.trim().is_empty() {
-            self.compact_model = if self.models.compact.trim().is_empty() {
-                self.model.clone()
-            } else {
-                self.models.compact.clone()
-            };
+            self.compact_model = self.model.clone();
         }
         // A user may replace the whole provider set in a single-file config and
         // omit `model`. In that case pick the first catalogued model instead of
@@ -838,31 +710,6 @@ impl Config {
         if let Ok(spec) = self.resolve_model(&self.compact_model) {
             self.compact_model = spec.reference();
         }
-        // A legacy `[models]` block only names the selected models. Add them to
-        // the catalog so `config models`, the web UI and the migrated
-        // `models.json` can see them.
-        if !self.models.is_empty() {
-            for reference in [self.model.clone(), self.compact_model.clone()] {
-                let Ok(spec) = self.resolve_model(&reference) else {
-                    continue;
-                };
-                let Some(provider) = self.providers.get_mut(&spec.provider) else {
-                    continue;
-                };
-                if provider.models.iter().any(|model| model.id == spec.id) {
-                    continue;
-                }
-                provider.models.push(ModelConfig {
-                    id: spec.id,
-                    context_window: if self.models.context_window > 0 {
-                        self.models.context_window
-                    } else {
-                        spec.context_window
-                    },
-                    ..Default::default()
-                });
-            }
-        }
     }
 
     fn merge_models(&mut self, file: ModelsFile) {
@@ -880,11 +727,9 @@ impl Config {
         if self.providers.contains_key(&self.provider) {
             return self.provider.clone();
         }
-        for reference in [&self.model, &self.models.agent] {
-            if let Some((head, _)) = reference.split_once('/') {
-                if self.providers.contains_key(head) {
-                    return head.to_string();
-                }
+        if let Some((head, _)) = self.model.split_once('/') {
+            if self.providers.contains_key(head) {
+                return head.to_string();
             }
         }
         self.providers
@@ -892,20 +737,6 @@ impl Config {
             .next()
             .cloned()
             .unwrap_or_else(|| "openai".to_string())
-    }
-
-    pub fn active_provider(&self) -> Result<&ProviderConfig> {
-        self.provider_for_model(&self.model)
-    }
-
-    pub fn provider_for_model(&self, reference: &str) -> Result<&ProviderConfig> {
-        let spec = self.resolve_model(reference)?;
-        self.providers.get(&spec.provider).ok_or_else(|| {
-            HarnessError::Config(format!(
-                "unknown provider `{}` for model `{reference}`",
-                spec.provider
-            ))
-        })
     }
 
     /// Resolve `provider/model`, a bare unique model id, or a full model id that
@@ -1013,13 +844,6 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve the API key for the default model from `apiKey` (`$ENV`,
-    /// `${ENV}`, `!command`), `apiKeyEnv`, or the conventional
-    /// `OPENAI_API_KEY` fallback.
-    pub fn resolve_api_key(&self) -> String {
-        self.resolve_api_key_for(&self.model)
-    }
-
     pub fn resolve_api_key_for(&self, reference: &str) -> String {
         let Ok(spec) = self.resolve_model(reference) else {
             return String::new();
@@ -1035,15 +859,6 @@ impl Config {
             if !raw.trim().is_empty() {
                 return resolve_config_value(raw);
             }
-        }
-        if let Some(name) = provider.api_key_env.as_deref() {
-            let name = name.trim();
-            if !name.is_empty() {
-                return std::env::var(name).unwrap_or_default();
-            }
-        }
-        if provider_id == "openai" {
-            return std::env::var("OPENAI_API_KEY").unwrap_or_default();
         }
         String::new()
     }
@@ -1072,12 +887,6 @@ impl Config {
         Self::data_dir().join("sessions")
     }
 
-    pub fn session_dir(&self) -> PathBuf {
-        self.session
-            .dir
-            .clone()
-            .unwrap_or_else(Self::sessions_dir)
-    }
 }
 
 /// Pi and JSON5-style config files allow trailing commas; strict serde_json
@@ -1381,40 +1190,5 @@ mod tests {
         // `models.json` is authoritative: only providers declared there exist.
         assert!(cfg.providers.contains_key("ollama"));
         assert!(!cfg.providers.contains_key("openai"));
-    }
-
-    #[test]
-    fn legacy_toml_still_loads() {
-        let mut cfg: Config = toml::from_str(
-            r#"
-            provider = "ollama"
-            [providers.ollama]
-            base_url = "http://127.0.0.1:11434/v1"
-            api_key_env = "OLLAMA_API_KEY"
-            [models]
-            agent = "qwen2.5-coder:7b"
-            compact = "qwen2.5-coder:7b"
-            context_window = 32768
-            "#,
-        )
-        .expect("legacy TOML parses");
-        assert_eq!(cfg.models.agent, "qwen2.5-coder:7b");
-        assert_eq!(
-            cfg.providers["ollama"].base_url,
-            "http://127.0.0.1:11434/v1"
-        );
-        assert_eq!(
-            cfg.providers["ollama"].api_key_env.as_deref(),
-            Some("OLLAMA_API_KEY")
-        );
-        cfg.normalize();
-        assert_eq!(cfg.model, "ollama/qwen2.5-coder:7b");
-        assert_eq!(cfg.compact_model, "ollama/qwen2.5-coder:7b");
-        assert_eq!(cfg.context_window, 32_768);
-        let catalog = cfg.model_catalog();
-        assert!(catalog
-            .iter()
-            .any(|model| model.reference() == "ollama/qwen2.5-coder:7b"
-                && model.context_window == 32_768));
     }
 }

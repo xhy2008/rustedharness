@@ -638,8 +638,7 @@ fn sessions_command(config: Config, args: SessionsArgs) -> Result<()> {
     let store = SessionStore::new(&config.session);
     match args.command {
         SessionsCommand::List => {
-            let mut sessions = store.list();
-            sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let sessions = store.list();
             if sessions.is_empty() {
                 println!("no saved sessions in {}", store.dir().display());
                 return Ok(());
@@ -728,22 +727,11 @@ fn config_command(config: Config, args: ConfigArgs) -> Result<()> {
             Ok(())
         }
         ConfigCommand::Show => {
-            let redacted = config.redacted();
-            let mut settings = serde_json::to_value(&redacted)?;
-            if let Some(object) = settings.as_object_mut() {
-                object.remove("providers");
-                object.remove("provider");
-                object.remove("models");
-            }
+            let (settings, models) = config.redacted().split_files();
             println!("# {}", source_dir.join("config.json").display());
-            println!("{}", serde_json::to_string_pretty(&settings)?);
+            print!("{settings}");
             println!("# {}", source_dir.join("models.json").display());
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "providers": redacted.providers,
-                }))?
-            );
+            print!("{models}");
             Ok(())
         }
         ConfigCommand::Models => {

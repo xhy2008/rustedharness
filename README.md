@@ -64,8 +64,8 @@ SHA-256).
 ## Configuration
 
 Configuration lives in `~/.rustedharness` by default. Override the directory
-with `RUSTEDHARNESS_DIR` (or `RUSTEDHARNESS_CONFIG_DIR`). This keeps config,
-sessions, the code index and downloaded language servers together:
+with `RUSTEDHARNESS_DIR`. This keeps config, sessions, the code index and
+downloaded language servers together:
 
 | Path | Purpose |
 | --- | --- |
@@ -82,9 +82,8 @@ prints the effective configuration with credentials redacted, `config models`
 lists the resolved model catalog, and `config edit [config|models]` opens the
 file in `$VISUAL`/`$EDITOR` (or the platform default).
 
-`--config PATH` accepts a `config.json`, a `models.json`, a directory containing
-both, or a legacy `config.toml`; a legacy file in the platform config directory
-is also read as a migration fallback.
+`--config PATH` accepts a `config.json`, a `models.json`, or a directory
+containing both.
 
 ### models.json
 
@@ -142,11 +141,10 @@ prefixed with their provider.
 
 `apiKey` and header values accept a literal, `$NAME`/`${NAME}` environment
 interpolation, or `!command` output. `$$` and `$!` produce literal `$` and `!`.
-`apiKeyEnv` is still accepted for old configurations. Local endpoints may use a
-dummy key or omit it.
+Local endpoints may use a dummy key or omit it.
 
 Provider fields: `name`, `baseUrl`, `api` (`openai-completions` or
-`openai-responses`), `apiKey`, `apiKeyEnv`, `headers`, `compat`, and `models`.
+`openai-responses`), `apiKey`, `headers`, `compat`, and `models`.
 Model fields: `id`, `name`, `contextWindow` (default 128000), `maxTokens`
 (optional output cap), and `reasoning`. A model entry with an existing id
 replaces it; new entries are appended. A provider with an empty `baseUrl` is
@@ -223,11 +221,7 @@ not declare one. `agent.maxOutputTokens` is the fallback when a model has no
 `maxTokens`. Environment variables `RUSTEDHARNESS_MODEL`,
 `RUSTEDHARNESS_COMPACT_MODEL`, and `RUSTEDHARNESS_PROVIDER` override the file.
 
-The legacy `[models]` block (`agent`, `compact`, `context_window`) and legacy
-TOML `[providers.<name>]` entries are still accepted, so existing configs keep
-working while you migrate. `config init` converts a legacy `config.toml` into
-the split JSON files without touching the original. `config show` redacts inline
-keys and header values.
+`config show` redacts inline keys and header values.
 
 ## Agent behavior
 
@@ -247,7 +241,7 @@ appended to the tool result.
   by the provider; nothing is estimated or tokenized locally. If a gateway omits
   `usage`, the harness warns once and reports no invented numbers.
 - **Todos**: `todo` maintains a plan. If work remains and the model stops, the
-  harness injects a bounded chase message (at most `chase_limit` times).
+  harness injects a bounded chase message (at most `chaseLimit` times).
 - **Sessions**: append-only JSONL under `~/.rustedharness/sessions`, with
   torn-tail recovery, pruning, and unique-prefix lookup. Saved sessions can be
   resumed from the CLI, TUI, or web UI; compaction records are replayed so the
