@@ -507,7 +507,10 @@ fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
             Style::default().fg(MUTED),
         )),
         Line::from(Span::styled(
-            format!("  sha256 {}", card.sha256),
+            match &card.sha256 {
+                Some(sha256) => format!("  sha256 {sha256}"),
+                None => "  sha256 none published - installing unverified".to_string(),
+            },
             Style::default().fg(DIM),
         )),
     ];

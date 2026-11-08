@@ -64,10 +64,11 @@ impl ArchiveKind {
     }
 }
 
-/// One language server description. `download_url` may contain `{version}`
-/// and `{target}` placeholders. Downloads are verified against the digest the
-/// vendor publishes on the GitHub release; `lsp.downloads.<id>.sha256` is an
-/// optional override, not a requirement.
+/// One language server description. `repo` is the GitHub project whose newest
+/// release is downloaded and `asset` is that release's file name template
+/// (`{tag}`, `{target}`, `{os}`, `{ext}`). Downloads are verified against the
+/// digest the vendor publishes when there is one; `lsp.downloads.<id>.sha256`
+/// is an optional override, not a requirement.
 #[derive(Debug, Clone)]
 pub struct ServerSpec {
     pub language: &'static str,
@@ -76,18 +77,19 @@ pub struct ServerSpec {
     pub extensions: &'static [&'static str],
     pub command: &'static str,
     pub args: &'static [&'static str],
-    pub version: &'static str,
     pub install_hint: &'static str,
     pub runtime_deps: &'static [&'static str],
-    pub download_url: Option<&'static str>,
-    pub archive: ArchiveKind,
+    /// `<owner>/<repo>` on GitHub; `None` when the server is not downloadable.
+    pub repo: Option<&'static str>,
+    /// Release asset file name template; `None` when not downloadable.
+    pub asset: Option<&'static str>,
     pub binary: &'static str,
     pub official_domains: &'static [&'static str],
 }
 
 macro_rules! spec {
     ($language:expr, $id:expr, $display:expr, $ext:expr, $cmd:expr, $args:expr,
-     $ver:expr, $hint:expr, $deps:expr, $url:expr, $archive:expr, $bin:expr, $domains:expr) => {
+     $hint:expr, $deps:expr, $repo:expr, $asset:expr, $bin:expr, $domains:expr) => {
         ServerSpec {
             language: $language,
             id: $id,
@@ -95,11 +97,10 @@ macro_rules! spec {
             extensions: $ext,
             command: $cmd,
             args: $args,
-            version: $ver,
             install_hint: $hint,
             runtime_deps: $deps,
-            download_url: $url,
-            archive: $archive,
+            repo: $repo,
+            asset: $asset,
             binary: $bin,
             official_domains: $domains,
         }
@@ -117,13 +118,16 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["rs"],
                 "rust-analyzer",
                 &[],
-                "2026-10-19",
                 "rustup component add rust-analyzer",
                 &[],
-                Some("https://github.com/rust-lang/rust-analyzer/releases/download/{version}/rust-analyzer-{target}.gz"),
-                ArchiveKind::Gz,
+                Some("rust-lang/rust-analyzer"),
+                Some("rust-analyzer-{target}.{ext}"),
                 "rust-analyzer",
-                &["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+                &[
+                    "github.com",
+                    "objects.githubusercontent.com",
+                    "release-assets.githubusercontent.com"
+                ]
             ),
             spec!(
                 "c",
@@ -132,13 +136,16 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["c", "h"],
                 "clangd",
                 &[],
-                "23.1.0",
                 "install clangd from your system package manager",
                 &[],
-                Some("https://github.com/clangd/clangd/releases/download/{version}/clangd-linux-{version}.zip"),
-                ArchiveKind::Zip,
+                Some("clangd/clangd"),
+                Some("clangd-{os}-{tag}.zip"),
                 "clangd",
-                &["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+                &[
+                    "github.com",
+                    "objects.githubusercontent.com",
+                    "release-assets.githubusercontent.com"
+                ]
             ),
             spec!(
                 "cpp",
@@ -147,11 +154,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
                 "clangd",
                 &[],
-                "23.1.0",
                 "install clangd from your system package manager",
                 &[],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "clangd",
                 &["github.com"]
             ),
@@ -162,11 +168,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["go"],
                 "gopls",
                 &[],
-                "v0.16.2",
                 "go install golang.org/x/tools/gopls@latest",
                 &["Go toolchain"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "gopls",
                 &["go.dev"]
             ),
@@ -177,11 +182,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["ts", "tsx", "mts", "cts"],
                 "typescript-language-server",
                 &["--stdio"],
-                "4.3.3",
                 "npm i -g typescript typescript-language-server",
                 &["Node.js"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "typescript-language-server",
                 &["npmjs.com"]
             ),
@@ -192,11 +196,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["js", "jsx", "mjs", "cjs"],
                 "typescript-language-server",
                 &["--stdio"],
-                "4.3.3",
                 "npm i -g typescript typescript-language-server",
                 &["Node.js"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "typescript-language-server",
                 &["npmjs.com"]
             ),
@@ -207,11 +210,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["py", "pyi"],
                 "pyright-langserver",
                 &["--stdio"],
-                "1.1.383",
                 "npm i -g pyright",
                 &["Node.js"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "pyright-langserver",
                 &["npmjs.com"]
             ),
@@ -222,11 +224,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["java"],
                 "jdtls",
                 &[],
-                "1.39.0",
                 "download jdtls from download.eclipse.org/jdtls/milestones/",
                 &["JDK 17+"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "jdtls",
                 &["download.eclipse.org"]
             ),
@@ -237,11 +238,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["kt", "kts"],
                 "kotlin-lsp",
                 &[],
-                "2.0.0",
                 "download kotlin-lsp from github.com/Kotlin/kotlin-lsp/releases",
                 &["JDK 21+"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "kotlin-lsp",
                 &["github.com"]
             ),
@@ -252,11 +252,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["cs"],
                 "csharp-ls",
                 &[],
-                "0.16.0",
                 "dotnet tool install --global csharp-ls",
                 &[".NET SDK"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "csharp-ls",
                 &["nuget.org"]
             ),
@@ -267,11 +266,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["rb", "rake", "gemspec"],
                 "ruby-lsp",
                 &[],
-                "0.18.0",
                 "gem install ruby-lsp",
                 &["Ruby"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "ruby-lsp",
                 &["github.com"]
             ),
@@ -282,11 +280,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["php"],
                 "phpactor",
                 &["language-server"],
-                "0.25.0",
                 "download phpactor from github.com/phpactor/language-server",
                 &["PHP"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "phpactor",
                 &["github.com"]
             ),
@@ -297,11 +294,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["swift"],
                 "sourcekit-lsp",
                 &[],
-                "bundled",
                 "install the Swift toolchain from swift.org/download",
                 &["Swift toolchain"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "sourcekit-lsp",
                 &["swift.org"]
             ),
@@ -312,11 +308,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["scala", "sc"],
                 "metals",
                 &[],
-                "1.5.0",
                 "install Metals through coursier",
                 &["JDK"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "metals",
                 &["scalameta.org"]
             ),
@@ -327,13 +322,16 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["lua"],
                 "lua-language-server",
                 &[],
-                "3.19.2",
                 "download from github.com/LuaLS/lua-language-server/releases",
                 &[],
-                Some("https://github.com/LuaLS/lua-language-server/releases/download/{version}/lua-language-server-{version}-{target}.tar.gz"),
-                ArchiveKind::TarGz,
+                Some("LuaLS/lua-language-server"),
+                Some("lua-language-server-{tag}-{target}.{ext}"),
                 "lua-language-server",
-                &["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
+                &[
+                    "github.com",
+                    "objects.githubusercontent.com",
+                    "release-assets.githubusercontent.com"
+                ]
             ),
             spec!(
                 "elixir",
@@ -342,11 +340,10 @@ pub fn registry() -> &'static [ServerSpec] {
                 &["ex", "exs"],
                 "language_server.sh",
                 &[],
-                "0.26.0",
                 "download ElixirLS from github.com/elixir-lsp/elixir-ls/releases",
                 &["Elixir", "Erlang"],
                 None,
-                ArchiveKind::Raw,
+                None,
                 "language_server.sh",
                 &["github.com"]
             ),
@@ -405,6 +402,18 @@ fn target_triple() -> &'static str {
 
 /// Asset-name platform token. Most projects use Rust target triples, but
 /// LuaLS uses its own `linux-x64`-style names.
+/// Release asset naming. GitHub assets embed the tag and use a different
+/// extension per OS (`rust-analyzer-*` ships `.gz` on unix and `.zip` on
+/// Windows, `lua-language-server-*` ships `.tar.gz` on unix), so each server
+/// spells its file name out in `ServerSpec::asset`.
+fn render_asset(spec: &ServerSpec, template: &str, tag: &str) -> String {
+    template
+        .replace("{tag}", tag)
+        .replace("{target}", &asset_target(spec))
+        .replace("{os}", asset_os())
+        .replace("{ext}", asset_ext(spec))
+}
+
 fn asset_target(spec: &ServerSpec) -> String {
     if spec.id == "lua-language-server" {
         lua_asset_target().to_string()
@@ -428,6 +437,42 @@ fn lua_asset_target() -> &'static str {
         "win32-ia32"
     } else {
         target_triple()
+    }
+}
+
+/// clangd names its releases after the OS rather than a target triple.
+fn asset_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "mac"
+    } else {
+        "linux"
+    }
+}
+
+/// Extension of the current platform's release asset.
+fn asset_ext(spec: &ServerSpec) -> &'static str {
+    if cfg!(target_os = "windows") {
+        "zip"
+    } else if spec.id == "lua-language-server" {
+        "tar.gz"
+    } else {
+        "gz"
+    }
+}
+
+/// Archive format implied by an asset file name.
+fn archive_kind_for(asset: &str) -> ArchiveKind {
+    let lower = asset.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        ArchiveKind::TarGz
+    } else if lower.ends_with(".zip") {
+        ArchiveKind::Zip
+    } else if lower.ends_with(".gz") {
+        ArchiveKind::Gz
+    } else {
+        ArchiveKind::Raw
     }
 }
 
@@ -478,6 +523,38 @@ fn digest_cache_path(server: &str, version: &str) -> PathBuf {
         .join("checksums")
         .join(server)
         .join(format!("{version}.sha256"))
+}
+
+/// The version installed for a server and the path of its binary. The cache
+/// keeps exactly one version per server, so this is what `resolve_command`
+/// falls back to.
+fn installed(spec: &ServerSpec) -> Option<(String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = std::fs::read_dir(cache_root().join(spec.id))
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let binary = entry.path().join(exe_name(spec.binary));
+            let version = entry.file_name().to_string_lossy().into_owned();
+            binary.is_file().then_some((version, binary))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().next()
+}
+
+/// Drop the version directories a fresh install replaced, so the cache holds a
+/// single copy of each server.
+fn prune_other_versions(spec: &ServerSpec, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(cache_root().join(spec.id)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && entry.file_name().to_string_lossy() != keep {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 fn read_digest_cache(path: &Path) -> Option<(String, String)> {
@@ -549,6 +626,71 @@ fn http_client() -> Option<reqwest::Client> {
         }))
         .build()
         .ok()
+}
+
+/// Resolve the newest release tag of `<owner>/<repo>` from the
+/// `releases/latest` redirect. A plain HTTPS request that costs no API quota.
+async fn latest_tag(repo: &str) -> Result<String> {
+    let url = format!("https://github.com/{repo}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent(format!("rustedharness/{}", VERSION))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| HarnessError::tool("E_LSP_RELEASE", e.to_string()))?;
+    let response = client.get(&url).send().await.map_err(|e| {
+        HarnessError::tool(
+            "E_LSP_RELEASE",
+            format!("cannot reach {url}: {}", error_chain(&e)),
+        )
+    })?;
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let status = response.status();
+    let location = location.ok_or_else(|| {
+        HarnessError::tool(
+            "E_LSP_RELEASE",
+            format!(
+                "{url} answered HTTP {status} without a release tag;                  set lsp.downloads.<id>.version to pin one"
+            ),
+        )
+    })?;
+    tag_from_location(&location).ok_or_else(|| {
+        HarnessError::tool(
+            "E_LSP_RELEASE",
+            format!("{url} redirected to `{location}`, which carries no tag"),
+        )
+    })
+}
+
+/// Render an error and its causes, since `reqwest` puts the interesting part
+/// of a transport failure in `source()`.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
+/// Extract the tag from a `releases/tag/<tag>` redirect target.
+fn tag_from_location(location: &str) -> Option<String> {
+    let (_, tag) = location.rsplit_once("/tag/")?;
+    let tag = tag.split(['?', '#']).next().unwrap_or(tag);
+    if tag.is_empty() {
+        return None;
+    }
+    Some(
+        urlencoding::decode(tag)
+            .map(|tag| tag.into_owned())
+            .unwrap_or_else(|_| tag.to_string()),
+    )
 }
 
 async fn fetch_text(url: &str, limit: usize) -> Option<String> {
@@ -636,37 +778,6 @@ fn checksum_assets(assets: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Well-known checksums files published next to the release artifacts. Tried
-/// when the GitHub API is unavailable (for example when its rate limit is hit).
-async fn release_checksum_file_digest(
-    artifact_url: &str,
-    asset_name: &str,
-) -> Option<(String, String)> {
-    let base = artifact_url.rsplit_once('/')?.0;
-    for name in [
-        "SHA256SUMS",
-        "SHA256SUMS.txt",
-        "sha256sums.txt",
-        "checksums.txt",
-        "sha256.txt",
-    ] {
-        let Some(text) = fetch_text(&format!("{base}/{name}"), 1024 * 1024).await else {
-            continue;
-        };
-        if let Some(hash) = parse_checksum_file(&text, asset_name) {
-            return Some((hash, format!("release checksums ({name})")));
-        }
-    }
-    None
-}
-
-async fn sidecar_digest(artifact_url: &str) -> Option<String> {
-    let text = fetch_text(&format!("{artifact_url}.sha256"), 8 * 1024).await?;
-    text.split(|c: char| !c.is_ascii_hexdigit())
-        .find(|token| token.len() == 64)
-        .map(|token| token.to_ascii_lowercase())
-}
-
 // ---------------------------------------------------------------------------
 // Public query types
 // ---------------------------------------------------------------------------
@@ -750,6 +861,8 @@ impl LspAnswer {
 pub struct ServerStatus {
     pub language: String,
     pub server: String,
+    /// Version in the local cache, when one is installed.
+    pub version: Option<String>,
     pub state: String,
     pub detail: Option<String>,
     pub pid: Option<u32>,
@@ -780,11 +893,34 @@ struct DownloadTarget {
 struct DownloadManifest {
     version: String,
     url: String,
-    sha: String,
+    digest: ExpectedDigest,
     archive: ArchiveKind,
     binary: String,
     domains: Vec<String>,
     display: String,
+}
+
+/// Expected SHA-256 of an artifact. A release that publishes no digest is not
+/// fatal: the download proceeds unverified and reports why.
+enum ExpectedDigest {
+    Verified { sha256: String, source: String },
+    Unverified(String),
+}
+
+impl ExpectedDigest {
+    fn sha256(&self) -> Option<&str> {
+        match self {
+            ExpectedDigest::Verified { sha256, .. } => Some(sha256),
+            ExpectedDigest::Unverified(_) => None,
+        }
+    }
+
+    fn warning(&self) -> Option<&str> {
+        match self {
+            ExpectedDigest::Verified { .. } => None,
+            ExpectedDigest::Unverified(reason) => Some(reason),
+        }
+    }
 }
 
 /// A checksum obtained for a registry entry without installing it. The
@@ -794,7 +930,8 @@ pub struct ChecksumInfo {
     pub server_id: String,
     pub version: String,
     pub url: String,
-    pub sha256: String,
+    /// `None` when the release publishes no digest, so installs go unverified.
+    pub sha256: Option<String>,
     pub source: String,
 }
 
@@ -828,6 +965,18 @@ impl LspHub {
             pending_consent: Mutex::new(HashMap::new()),
             index,
         });
+        if config.enabled {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let weak = Arc::downgrade(&hub);
+                handle.spawn(async move {
+                    // Let the session start before touching the network.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if let Some(hub) = weak.upgrade() {
+                        hub.check_updates().await;
+                    }
+                });
+            }
+        }
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&hub);
             let idle = config.idle_timeout_secs.max(30);
@@ -890,6 +1039,34 @@ impl LspHub {
         entry.restarts
     }
 
+    /// Compare every installed server with the newest published release and
+    /// report the ones that moved on. Runs once after startup and never
+    /// downloads anything on its own.
+    async fn check_updates(&self) {
+        for spec in registry() {
+            let Some((current, _)) = installed(spec) else {
+                continue;
+            };
+            let Some(repo) = spec.repo else {
+                continue;
+            };
+            let Ok(latest) = latest_tag(repo).await else {
+                continue;
+            };
+            if latest == current {
+                continue;
+            }
+            self.emit(HarnessEvent::DownloadStatus {
+                server_id: spec.id.to_string(),
+                state: "update_available".to_string(),
+                detail: Some(format!(
+                    "{current} -> {latest}; run `rustedharness lsp update {}`",
+                    spec.id
+                )),
+            });
+        }
+    }
+
     pub fn statuses(&self) -> Vec<ServerStatus> {
         let states = self.states.lock().unwrap();
         registry()
@@ -899,6 +1076,7 @@ impl LspHub {
                 ServerStatus {
                     language: spec.language.to_string(),
                     server: spec.id.to_string(),
+                    version: installed(spec).map(|(version, _)| version),
                     state: entry.map(|e| e.state.clone()).unwrap_or_else(|| {
                         if self.resolve_command(spec).is_some() {
                             "available".to_string()
@@ -947,8 +1125,7 @@ impl LspHub {
     }
 
     /// Install a language server into the cache without starting it. Used by
-    /// `rustedharness lsp install`; the caller is responsible for consent and
-    /// the published SHA-256 is still enforced.
+    /// `rustedharness lsp install`; the caller is responsible for consent.
     pub async fn install(&self, server_id: &str) -> Result<PathBuf> {
         let spec = spec_for_id(server_id).ok_or_else(|| {
             HarnessError::tool(
@@ -962,9 +1139,8 @@ impl LspHub {
         self.download_server(spec).await
     }
 
-    /// Discover the vendor-published SHA-256 for a registry server without
-    /// installing it. Installation performs the same discovery automatically;
-    /// this entry point only lets a user inspect the digest or pin it.
+    /// Report the SHA-256 an install would verify for a registry server, if
+    /// the release publishes one. This only inspects the digest.
     pub async fn checksum(&self, server_id: &str) -> Result<ChecksumInfo> {
         let spec = spec_for_id(server_id).ok_or_else(|| {
             HarnessError::tool(
@@ -972,7 +1148,7 @@ impl LspHub {
                 format!("unknown language server `{server_id}`"),
             )
         })?;
-        let Some(target) = self.download_target(spec) else {
+        let Some(target) = self.download_target(spec).await? else {
             return Err(HarnessError::tool(
                 "E_LSP_NO_DOWNLOAD",
                 format!(
@@ -982,86 +1158,68 @@ impl LspHub {
             ));
         };
         validate_download_url(&target.url, &target.domains)?;
-        let (sha256, source) = self
+        let digest = self
             .published_digest(spec, &target.version, &target.url)
-            .await?;
+            .await;
         Ok(ChecksumInfo {
             server_id: spec.id.to_string(),
             version: target.version,
             url: target.url,
-            sha256,
-            source,
+            source: match &digest {
+                ExpectedDigest::Verified { source, .. } => source.clone(),
+                ExpectedDigest::Unverified(reason) => reason.clone(),
+            },
+            sha256: digest.sha256().map(str::to_string),
         })
     }
 
-    /// Resolve the digest for an artifact. Pins and previously discovered
-    /// digests come first; otherwise `discover_digest` searches the vendor's
-    /// published checksums.
+    /// Resolve the expected digest for an artifact: an explicit pin, then the
+    /// value cached by an earlier lookup, then the vendor's release metadata.
+    /// A digest that cannot be found is reported, never enforced.
     async fn published_digest(
         &self,
         spec: &ServerSpec,
         version: &str,
         artifact_url: &str,
-    ) -> Result<(String, String)> {
+    ) -> ExpectedDigest {
         if let Some(pinned) = self
             .config
             .downloads
             .get(spec.id)
             .and_then(|entry| entry.sha256.clone())
         {
-            return Ok((pinned, "pinned in lsp.downloads".to_string()));
+            return if valid_sha256(&pinned) {
+                ExpectedDigest::Verified {
+                    sha256: pinned.to_ascii_lowercase(),
+                    source: "pinned in lsp.downloads".to_string(),
+                }
+            } else {
+                ExpectedDigest::Unverified(format!(
+                    "lsp.downloads.{}.sha256 is not a 64-character hex digest",
+                    spec.id
+                ))
+            };
         }
         let cache_path = digest_cache_path(spec.id, version);
-        if let Some(cached) = read_digest_cache(&cache_path) {
-            return Ok(cached);
+        if let Some((sha256, source)) = read_digest_cache(&cache_path) {
+            return ExpectedDigest::Verified { sha256, source };
         }
-        let found = self.discover_digest(spec, artifact_url).await?;
-        write_digest_cache(&cache_path, &found.0, &found.1);
-        Ok(found)
-    }
-
-    async fn discover_digest(
-        &self,
-        spec: &ServerSpec,
-        artifact_url: &str,
-    ) -> Result<(String, String)> {
-        // Token-free sources first: plain HTTPS GETs against the release
-        // artifacts, then the GitHub API (optional token, raises its quota).
-        if let Some(sha256) = sidecar_digest(artifact_url).await {
-            return Ok((sha256, "published .sha256 sidecar".to_string()));
-        }
-        let asset_name = artifact_url.rsplit('/').next().unwrap_or(artifact_url);
-        if let Some(found) = release_checksum_file_digest(artifact_url, asset_name).await {
-            return Ok(found);
-        }
-        match self.github_release_digest(artifact_url).await? {
-            DigestLookup::Found { sha256, source } => return Ok((sha256, source)),
-            DigestLookup::NoDigest => {}
-            DigestLookup::Unavailable(reason) => {
-                return Err(HarnessError::tool(
-                    "E_LSP_CHECKSUM_LOOKUP_FAILED",
-                    format!(
-                        concat!(
-                            "could not read the GitHub release digest for `{}` ({}):\n  {}\n",
-                            "No download was attempted. Retry later, set GITHUB_TOKEN to raise ",
-                            "the API quota, or pin lsp.downloads.{}.sha256 to override."
-                        ),
-                        spec.id, reason, artifact_url, spec.id
-                    ),
-                ))
+        // The release API is the only source of a published digest: it records
+        // `sha256:` for each asset and lists the checksums files attached to
+        // the release.
+        match self.github_release_digest(artifact_url).await {
+            Ok(DigestLookup::Found { sha256, source }) => {
+                write_digest_cache(&cache_path, &sha256, &source);
+                ExpectedDigest::Verified { sha256, source }
             }
+            Ok(DigestLookup::NoDigest) => {
+                ExpectedDigest::Unverified(format!("release {version} publishes no SHA-256"))
+            }
+            Ok(DigestLookup::Unavailable(reason)) => {
+                ExpectedDigest::Unverified(format!("could not read the release digest ({reason})"))
+            }
+            Err(err) => ExpectedDigest::Unverified(err.to_string()),
         }
-        Err(HarnessError::tool(
-            "E_LSP_CHECKSUM_UNAVAILABLE",
-            format!(
-                concat!(
-                    "`{}` publishes no SHA-256 for:\n  {}\n",
-                    "Refusing to install an unverified binary. ",
-                    "Install it manually: {}"
-                ),
-                spec.id, artifact_url, spec.install_hint
-            ),
-        ))
     }
 
     async fn github_release_digest(&self, artifact_url: &str) -> Result<DigestLookup> {
@@ -1143,7 +1301,8 @@ impl LspHub {
         Ok(DigestLookup::NoDigest)
     }
 
-    /// Re-download a pinned server, replacing the cached binary.
+    /// Re-download a server, replacing the installed copy with the newest
+    /// release.
     pub async fn update(&self, server_id: &str) -> Result<PathBuf> {
         let spec = spec_for_id(server_id).ok_or_else(|| {
             HarnessError::tool(
@@ -1151,25 +1310,10 @@ impl LspHub {
                 format!("unknown language server `{server_id}`"),
             )
         })?;
-        let version = self
-            .config
-            .downloads
-            .get(spec.id)
-            .and_then(|d| d.version.clone())
-            .unwrap_or_else(|| spec.version.to_string());
-        let cached = self.cached_binary(spec, &version);
-        if cached.exists() {
-            std::fs::remove_file(&cached)?;
-        }
-        let _ = std::fs::remove_file(digest_cache_path(spec.id, &version));
+        // Drop cached digests so the fresh artifact is verified against the
+        // release metadata as it is now, not as it was for the old version.
+        self.clear_digest_cache(spec);
         self.download_server(spec).await
-    }
-
-    fn cached_binary(&self, spec: &ServerSpec, version: &str) -> PathBuf {
-        cache_root()
-            .join(spec.id)
-            .join(version)
-            .join(exe_name(spec.binary))
     }
 
     /// Resolution chain: explicit config override -> PATH -> local cache.
@@ -1189,31 +1333,38 @@ impl LspHub {
         if let Some(p) = find_in_path(spec.command) {
             return Some(p);
         }
-        let version = self
-            .config
-            .downloads
-            .get(spec.id)
-            .and_then(|d| d.version.clone())
-            .unwrap_or_else(|| spec.version.to_string());
-        let cached = self.cached_binary(spec, &version);
-        cached.is_file().then_some(cached)
+        installed(spec).map(|(_, path)| path)
     }
 
-    fn download_target(&self, spec: &ServerSpec) -> Option<DownloadTarget> {
+    /// Decide what to download. The newest release is used unless
+    /// `lsp.downloads.<id>.version` pins a tag or `.url` replaces the URL.
+    async fn download_target(&self, spec: &ServerSpec) -> Result<Option<DownloadTarget>> {
         let over: Option<&LspDownload> = self.config.downloads.get(spec.id);
-        let version = over
-            .and_then(|o| o.version.clone())
-            .unwrap_or_else(|| spec.version.to_string());
-        let url = over.and_then(|o| o.url.clone()).or_else(|| {
-            spec.download_url.map(|u| {
-                u.replace("{version}", &version)
-                    .replace("{target}", &asset_target(spec))
-            })
-        })?;
+        let url_override = over.and_then(|o| o.url.clone());
+        if url_override.is_none() && spec.asset.is_none() {
+            return Ok(None);
+        }
+        let version = match over.and_then(|o| o.version.clone()) {
+            Some(tag) => tag,
+            None => match spec.repo {
+                Some(repo) => latest_tag(repo).await?,
+                None => "custom".to_string(),
+            },
+        };
+        let url = match url_override {
+            Some(url) => url,
+            None => match (spec.repo, spec.asset) {
+                (Some(repo), Some(template)) => {
+                    let asset = render_asset(spec, template, &version);
+                    format!("https://github.com/{repo}/releases/download/{version}/{asset}")
+                }
+                _ => return Ok(None),
+            },
+        };
         let archive = over
             .and_then(|o| o.archive.as_deref())
             .map(ArchiveKind::parse)
-            .unwrap_or(spec.archive);
+            .unwrap_or_else(|| archive_kind_for(&url));
         let binary = over
             .and_then(|o| o.binary.clone())
             .unwrap_or_else(|| exe_name(spec.binary));
@@ -1225,21 +1376,18 @@ impl LspHub {
         if let Some(over) = over {
             domains.extend(over.domains.iter().cloned());
         }
-        Some(DownloadTarget {
+        Ok(Some(DownloadTarget {
             version,
             url,
             archive,
             binary,
             domains,
             display: spec.display.to_string(),
-        })
+        }))
     }
 
-    /// Build the download manifest. The digest normally comes from the
-    /// vendor's GitHub release metadata; a pinned `lsp.downloads.<id>.sha256`
-    /// only overrides it.
     async fn download_manifest(&self, spec: &ServerSpec) -> Result<DownloadManifest> {
-        let target = self.download_target(spec).ok_or_else(|| {
+        let target = self.download_target(spec).await?.ok_or_else(|| {
             HarnessError::tool(
                 "E_LSP_NO_DOWNLOAD",
                 format!(
@@ -1249,14 +1397,13 @@ impl LspHub {
             )
         })?;
         validate_download_url(&target.url, &target.domains)?;
-        let sha = self
+        let digest = self
             .published_digest(spec, &target.version, &target.url)
-            .await?
-            .0;
+            .await;
         Ok(DownloadManifest {
             version: target.version,
             url: target.url,
-            sha,
+            digest,
             archive: target.archive,
             binary: target.binary,
             domains: target.domains,
@@ -1367,21 +1514,29 @@ impl LspHub {
     /// discovered from the vendor's GitHub release metadata (optionally
     /// overridden by a pin); HTTPS, an allow-listed host and (in interactive
     /// mode) explicit consent are still required.
+    fn clear_digest_cache(&self, spec: &ServerSpec) {
+        let _ = std::fs::remove_dir_all(cache_root().join("checksums").join(spec.id));
+    }
+
     async fn download_server(&self, spec: &ServerSpec) -> Result<PathBuf> {
         let DownloadManifest {
             version,
             url,
-            sha,
+            digest,
             archive,
             binary,
             domains,
             display,
         } = self.download_manifest(spec).await?;
-        if !valid_sha256(&sha) {
-            return Err(HarnessError::tool(
-                "E_LSP_CHECKSUM_INVALID",
-                "sha256 must be 64 hex characters",
-            ));
+        let expected = digest.sha256().map(str::to_ascii_lowercase);
+        if let Some(warning) = digest.warning() {
+            self.emit(HarnessEvent::DownloadStatus {
+                server_id: spec.id.to_string(),
+                state: "unverified".to_string(),
+                detail: Some(format!(
+                    "installing without checksum verification: {warning}"
+                )),
+            });
         }
 
         let consented = *self.consent.lock().unwrap().get(spec.id).unwrap_or(&false);
@@ -1404,7 +1559,7 @@ impl LspHub {
                         display_name: display.clone(),
                         version: version.clone(),
                         url: url.clone(),
-                        sha256: sha.clone(),
+                        sha256: expected.clone(),
                         runtime_hint: (!spec.runtime_deps.is_empty())
                             .then(|| spec.runtime_deps.join(", ")),
                     });
@@ -1431,8 +1586,13 @@ impl LspHub {
             detail: Some(format!("{display} {version}")),
         });
 
+        // No total timeout: a 256 MiB artifact may legitimately take minutes.
+        // A dead connection is caught by the connect and per-read timeouts
+        // instead of hanging the install forever.
         let client = reqwest::Client::builder()
             .user_agent(format!("rustedharness/{}", VERSION))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() > 8 {
                     attempt.error("too many redirects")
@@ -1444,10 +1604,12 @@ impl LspHub {
             }))
             .build()
             .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", e.to_string()))?;
-        let response =
-            client.get(&url).send().await.map_err(|e| {
-                HarnessError::tool("E_LSP_DOWNLOAD", format!("request failed: {e}"))
-            })?;
+        let response = client.get(&url).send().await.map_err(|e| {
+            HarnessError::tool(
+                "E_LSP_DOWNLOAD",
+                format!("request failed: {}", error_chain(&e)),
+            )
+        })?;
         if !response.status().is_success() {
             return Err(HarnessError::tool(
                 "E_LSP_DOWNLOAD",
@@ -1466,36 +1628,44 @@ impl LspHub {
                 ));
             }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", format!("read failed: {e}")))?;
+        let bytes = response.bytes().await.map_err(|e| {
+            HarnessError::tool(
+                "E_LSP_DOWNLOAD",
+                format!("read failed: {}", error_chain(&e)),
+            )
+        })?;
         if bytes.len() > 256 * 1024 * 1024 {
             return Err(HarnessError::tool(
                 "E_LSP_DOWNLOAD",
                 "download exceeds 256 MiB",
             ));
         }
-        let digest = hex::encode(Sha256::digest(&bytes));
-        if !digest.eq_ignore_ascii_case(&sha) {
-            self.emit(HarnessEvent::DownloadStatus {
-                server_id: spec.id.to_string(),
-                state: "checksum_failed".to_string(),
-                detail: Some(format!("expected {sha}, got {digest}")),
-            });
-            return Err(HarnessError::tool(
-                "E_LSP_CHECKSUM_MISMATCH",
-                format!(
-                    "SHA-256 mismatch for {}: expected {sha}, got {digest}",
-                    spec.id
-                ),
-            ));
+        if let Some(expected) = expected.as_deref() {
+            let actual = hex::encode(Sha256::digest(&bytes));
+            if !actual.eq_ignore_ascii_case(expected) {
+                self.emit(HarnessEvent::DownloadStatus {
+                    server_id: spec.id.to_string(),
+                    state: "checksum_failed".to_string(),
+                    detail: Some(format!("expected {expected}, got {actual}")),
+                });
+                // A published digest that does not match is a hard failure:
+                // the artifact is not the one the vendor signed off on.
+                self.clear_digest_cache(spec);
+                return Err(HarnessError::tool(
+                    "E_LSP_CHECKSUM_MISMATCH",
+                    format!(
+                        "SHA-256 mismatch for {}: expected {expected}, got {actual}",
+                        spec.id
+                    ),
+                ));
+            }
         }
 
         let target = cache_root().join(spec.id).join(&version);
         std::fs::create_dir_all(&target)?;
         let binary_path = extract_archive(&bytes, archive, &target, &binary)?;
         make_executable(&binary_path)?;
+        prune_other_versions(spec, &version);
         self.emit(HarnessEvent::DownloadStatus {
             server_id: spec.id.to_string(),
             state: "installed".to_string(),
@@ -3297,19 +3467,20 @@ not a checksum",
     }
 
     #[test]
-    fn registry_download_templates_resolve_to_whitelisted_https_urls() {
+    fn registry_assets_resolve_to_whitelisted_https_urls() {
         for spec in registry() {
-            let Some(template) = spec.download_url else {
+            let Some(template) = spec.asset else {
+                assert!(spec.repo.is_none(), "{} has a repo but no asset", spec.id);
                 continue;
             };
-            let url = template
-                .replace("{version}", spec.version)
-                .replace("{target}", &asset_target(spec));
+            let repo = spec.repo.expect("an asset implies a repo");
+            let asset = render_asset(spec, template, "1.2.3");
             assert!(
-                !url.contains('{'),
-                "{} left a placeholder in {url}",
+                !asset.contains('{'),
+                "{} left a placeholder in {asset}",
                 spec.id
             );
+            let url = format!("https://github.com/{repo}/releases/download/1.2.3/{asset}");
             let domains: Vec<String> = spec
                 .official_domains
                 .iter()
@@ -3326,17 +3497,84 @@ not a checksum",
     #[test]
     fn lua_assets_use_release_platform_names() {
         let lua = spec_for_id("lua-language-server").expect("lua spec");
-        let target = asset_target(lua);
-        assert_eq!(target, lua_asset_target());
-        let url = lua
-            .download_url
-            .expect("lua download")
-            .replace("{version}", lua.version)
-            .replace("{target}", &target);
-        assert!(url.ends_with(&format!(
-            "lua-language-server-{}-{target}.tar.gz",
-            lua.version
-        )));
+        let asset = render_asset(lua, lua.asset.expect("lua asset"), "3.19.2");
+        assert_eq!(asset_target(lua), lua_asset_target());
+        assert_eq!(
+            asset,
+            format!(
+                "lua-language-server-3.19.2-{}.{}",
+                lua_asset_target(),
+                asset_ext(lua)
+            )
+        );
+        let expected = if cfg!(target_os = "windows") {
+            ArchiveKind::Zip
+        } else {
+            ArchiveKind::TarGz
+        };
+        assert_eq!(archive_kind_for(&asset), expected);
+    }
+
+    /// A pinned tag resolves the download without any network access, which is
+    /// what keeps installs working on a blocked or rate-limited network.
+    #[tokio::test]
+    async fn a_pinned_tag_builds_the_download_without_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = LspConfig::default();
+        config.downloads.insert(
+            "rust-analyzer".to_string(),
+            crate::config::LspDownload {
+                version: Some("2026-11-02".to_string()),
+                ..Default::default()
+            },
+        );
+        let hub = LspHub::new(dir.path().to_path_buf(), &config, None);
+        let spec = spec_for_id("rust-analyzer").expect("spec");
+        let target = hub.download_target(spec).await.unwrap().expect("target");
+        assert_eq!(target.version, "2026-11-02");
+        assert_eq!(
+            target.url,
+            format!(
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-02/rust-analyzer-{}.{}",
+                target_triple(),
+                asset_ext(spec)
+            )
+        );
+        let expected = if cfg!(target_os = "windows") {
+            ArchiveKind::Zip
+        } else {
+            ArchiveKind::Gz
+        };
+        assert_eq!(target.archive, expected);
+    }
+
+    #[test]
+    fn archive_kind_follows_the_asset_name() {
+        assert_eq!(archive_kind_for("a.tar.gz"), ArchiveKind::TarGz);
+        assert_eq!(archive_kind_for("a.tgz"), ArchiveKind::TarGz);
+        assert_eq!(archive_kind_for("a.zip"), ArchiveKind::Zip);
+        assert_eq!(archive_kind_for("a.gz"), ArchiveKind::Gz);
+        assert_eq!(archive_kind_for("rust-analyzer"), ArchiveKind::Raw);
+    }
+
+    #[test]
+    fn latest_release_redirects_yield_the_tag() {
+        assert_eq!(
+            tag_from_location("https://github.com/LuaLS/lua-language-server/releases/tag/3.19.2"),
+            Some("3.19.2".to_string())
+        );
+        assert_eq!(
+            tag_from_location("https://github.com/o/r/releases/tag/v1.0.0?x=1"),
+            Some("v1.0.0".to_string())
+        );
+        assert_eq!(
+            tag_from_location("https://github.com/o/r/releases/latest"),
+            None
+        );
+        assert_eq!(
+            tag_from_location("https://github.com/o/r/releases/tag/"),
+            None
+        );
     }
 
     #[test]

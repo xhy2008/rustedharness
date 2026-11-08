@@ -101,23 +101,23 @@ struct LspArgs {
 enum LspCommand {
     /// Show the built-in server registry and availability.
     List,
-    /// Download a server from its GitHub release and verify the published digest.
+    /// Install the newest release of a server (verified when the release
+    /// publishes a digest).
     Install {
         /// Server id, e.g. rust-analyzer.
         server: String,
-        /// Optional SHA-256 override for this download (the release digest is
-        /// verified automatically when omitted).
+        /// Require this SHA-256 instead of the published digest.
         #[arg(long, value_name = "HEX")]
         sha256: Option<String>,
     },
-    /// Re-download a server, replacing the cached copy.
+    /// Re-install a server from its newest release.
     Update {
         server: String,
-        /// Optional SHA-256 override for this download.
+        /// Require this SHA-256 instead of the published digest.
         #[arg(long, value_name = "HEX")]
         sha256: Option<String>,
     },
-    /// Show the SHA-256 that installation will verify.
+    /// Show the SHA-256 an install would verify, if the release publishes one.
     Checksum {
         /// Server id, e.g. rust-analyzer.
         server: String,
@@ -454,6 +454,7 @@ async fn pump(
                     agent.grant_download(&server_id, true);
                     continue;
                 }
+                let sha256 = sha256.as_deref().unwrap_or("none published");
                 eprintln!(
                     "\n{display_name} {version} is not installed.\n  {url}\n  sha256: {sha256}"
                 );
@@ -530,23 +531,22 @@ async fn lsp_command(config: Config, cwd: PathBuf, args: LspArgs) -> Result<()> 
             let statuses = hub.statuses();
             println!(
                 "{:<14} {:<20} {:<12} {:<10} INSTALL",
-                "LANGUAGE", "SERVER", "VERSION", "STATE"
+                "LANGUAGE", "SERVER", "INSTALLED", "STATE"
             );
             for status in statuses {
-                let spec = rustedharness_core::lsp::spec_for_language(&status.language);
                 println!(
                     "{:<14} {:<20} {:<12} {:<10} {}",
                     status.language,
                     status.server,
-                    spec.map(|s| s.version).unwrap_or("-"),
+                    status.version.as_deref().unwrap_or("-"),
                     status.state,
                     status.install_hint
                 );
             }
             println!(
                 concat!(
-                    "{} servers in the built-in registry. Downloads use the GitHub release ",
-                    "and verify its published SHA-256 automatically; ",
+                    "{} servers in the built-in registry. Downloads take the newest GitHub ",
+                    "release and verify its published SHA-256 when the vendor provides one; ",
                     "`lsp checksum <id>` only inspects the digest."
                 ),
                 registry().len()
@@ -586,16 +586,29 @@ async fn lsp_checksum(config: Config, cwd: PathBuf, server: &str) -> Result<()> 
     println!("server:  {}", info.server_id);
     println!("version: {}", info.version);
     println!("url:     {}", info.url);
-    println!("sha256:  {}", info.sha256);
-    println!("source:  {}", info.source);
-    let snippet = serde_json::json!({
-        "lsp": { "downloads": { info.server_id.clone(): { "sha256": info.sha256 } } }
-    });
-    println!(
-        "\nInstall verifies this digest automatically; pin it in {} only to override:",
-        config_path.display()
-    );
-    println!("{}", serde_json::to_string_pretty(&snippet)?);
+    match &info.sha256 {
+        Some(sha256) => {
+            println!("sha256:  {sha256}");
+            println!("source:  {}", info.source);
+            let snippet = serde_json::json!({
+                "lsp": { "downloads": { info.server_id.clone(): { "sha256": sha256 } } }
+            });
+            println!(
+                "\nInstall verifies this digest automatically; pin it in {} only to override:",
+                config_path.display()
+            );
+            println!("{}", serde_json::to_string_pretty(&snippet)?);
+        }
+        None => {
+            println!("sha256:  none published");
+            println!("source:  {}", info.source);
+            println!(
+                "\nThe install would proceed without verification. Pin a digest in {} \
+                 (\"sha256\") to require one.",
+                config_path.display()
+            );
+        }
+    }
     println!(
         "\nInstall now: rustedharness lsp install {}",
         info.server_id

@@ -203,7 +203,10 @@ enabled. Rejected knobs are retried one at a time.
     "allowDownloadsNoninteractive": false,
     "idleTimeoutSecs": 600,
     "maxRestarts": 3,
-    "requestTimeoutMs": 5000
+    "requestTimeoutMs": 5000,
+    "downloads": {
+      "rust-analyzer": { "version": "2026-11-02", "sha256": "<64 hex chars>" }
+    }
   },
   "mcp": {
     "enabled": true,
@@ -216,6 +219,11 @@ enabled. Rejected knobs are retried one at a time.
   }
 }
 ```
+
+`lsp.downloads.<server>` is optional and only overrides the default flow:
+`version` pins a tag instead of taking the newest release, `url` replaces the
+whole URL (a mirror), `sha256` requires a specific digest, `binary` and
+`archive` describe an unusual layout.
 
 `model` and `compactModel` may point at different providers; the backend routes
 each request independently. `contextWindow` is the fallback for models that do
@@ -310,49 +318,56 @@ The `lsp` tool supports `definition`, `type_definition`, `implementation`,
 restarted a bounded number of times, and shut down when idle.
 
 When a server is missing and `lsp.autoDownload` is enabled (the default), the
-harness downloads the pinned release from the server's GitHub releases page and
-verifies it against the digest the vendor publishes. No token or manual
-checksum entry is needed. Sources are tried in this order:
+harness installs the newest release. The version is resolved from the
+`github.com/<owner>/<repo>/releases/latest` redirect - a plain HTTPS request
+that costs no API quota - and the artifact is fetched with a direct `GET` of
+`.../releases/download/<tag>/<asset>`. Nothing is pinned in the registry, so a
+release every week never leaves a stale URL behind.
+
+The expected SHA-256 is then looked up, in order:
 
 1. a pinned `lsp.downloads.<server>.sha256` (explicit override, e.g. a mirror);
-2. the digest cached on a previous successful install;
-3. a `<url>.sha256` sidecar next to the artifact;
-4. well-known checksums files published beside the artifacts (`SHA256SUMS`,
-   `checksums.txt`, ...);
-5. the GitHub release asset `digest` field, or a checksums asset attached to
-   the same release (`SHA256SUMS`, `*.sha256`).
+2. the digest cached by a previous install;
+3. the GitHub release API: the asset's `digest` field, or a checksums file the
+   vendor attached to that release (`SHA256SUMS`, `*.sha256`).
 
-Steps 3 and 4 are plain HTTPS GETs against the release download directory, so
-they use no GitHub API quota and need no token at all.
+Only step 3 calls the API; a resolved digest is cached under
+`lsp/checksums/<server>/<version>.sha256`, so repeat installs read the cache and
+never call the API again. `GITHUB_TOKEN` is optional and only raises the API's
+anonymous 60-requests-per-hour quota.
 
-`GITHUB_TOKEN` is optional: only step 5 talks to the GitHub API, and a
-token just raises that endpoint's anonymous 60-requests-per-hour quota. A
-discovered digest is cached under `lsp/checksums/<server>/<version>.sha256` and
-reused, so repeat installs never look it up again; `lsp update` clears that
-cache so the fresh download is verified again.
+Verification is best effort, and the outcome is stated:
 
-Two outcomes are reported separately, because they call for different fixes:
+- a published digest that matches means the binary is verified;
+- no digest at all (the vendor published none, the API is rate limited, or the
+  network is blocked) is reported as a warning and the install proceeds;
+- a published digest that does **not** match is a hard failure
+  (`E_LSP_CHECKSUM_MISMATCH`) and nothing is written to the cache.
 
-- `E_LSP_CHECKSUM_UNAVAILABLE` - every source answered and none publishes a
-  digest, so the server must be installed manually (`installHint` says how);
-- `E_LSP_CHECKSUM_LOOKUP_FAILED` - the GitHub API could not be read (offline,
-  rate limited, blocked). Nothing was downloaded; retry later, set
-  `GITHUB_TOKEN`, or pin `lsp.downloads.<server>.sha256`.
+`lsp checksum <server>` prints what an install would verify, or says that the
+release publishes none, so a digest can be pinned before installing.
+
+Shortly after startup the harness asks each *installed* server's release page
+for its newest tag and emits `update_available` when it differs from the cached
+copy; nothing is downloaded automatically. `lsp update <server>` installs the
+newest release and keeps a single version per server in the cache.
 
 Transport rules are enforced for every download:
 
 - HTTPS only, with redirects re-checked against a host whitelist;
 - the archive is at most 256 MiB and extracts without escapes;
+- connecting times out after 15s and a stalled transfer after 60s;
 - the user consents interactively, or `lsp.allowDownloadsNoninteractive` /
   `--yes` is set.
 
 ```sh
-rustedharness lsp install rust-analyzer   # download + cache
-rustedharness lsp update rust-analyzer    # re-download the pinned release
+rustedharness lsp list                    # registry + installed versions
+rustedharness lsp install rust-analyzer   # newest release, cached locally
+rustedharness lsp update rust-analyzer    # re-install the newest release
 rustedharness lsp checksum rust-analyzer  # show the digest and its source
 ```
 
-`lsp checksum` is informational: installation performs the same discovery and
+`lsp checksum` is informational: installation performs the same lookup and
 verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
 quota; it is never required for a normal install.
 

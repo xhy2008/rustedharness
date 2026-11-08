@@ -390,17 +390,18 @@ pub struct LspConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LspDownload {
-    /// Pinned release version/tag.
+    /// Release tag to install. Unset means the newest release, which is what
+    /// the built-in registry uses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// HTTPS archive/binary URL.
+    /// HTTPS archive/binary URL, replacing the release asset (a mirror).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Optional pinned SHA-256 (lowercase hex). Leave unset to verify against
-    /// the digest published on the GitHub release.
+    /// Require this SHA-256 (lowercase hex). Unset uses the digest the release
+    /// publishes, and installs unverified when it publishes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// gz | zip | tar.gz | raw
+    /// gz | zip | tar.gz | raw, inferred from the asset name when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<String>,
     /// Binary path inside the archive (relative).

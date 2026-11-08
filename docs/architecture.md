@@ -135,26 +135,38 @@ keywords are not mistaken for symbols. L0 is used while a server warms up or
 when none is installed. `lsp_tool.rs` exposes both through a single `lsp` tool
 and labels L0 answers as name-based.
 
-Language servers are downloaded from their GitHub releases after consent, and
-nothing has to be supplied by the user to verify them. `download_manifest`
-resolves the SHA-256 by trying, in order: a pinned
-`lsp.downloads.<server>.sha256`, the digest cached by a previous install
-(`lsp/checksums/<server>/<version>.sha256`), a `<url>.sha256` sidecar, well-known
-checksums files next to the artifact, then GitHub's release-asset
-`digest`/checksums assets. The first three are plain HTTPS GETs that consume no
-GitHub API quota. A resolved digest is cached, so repeat installs never call the
-GitHub API and no token is required; `GITHUB_TOKEN` only raises that API's
-anonymous quota when a first-time lookup is needed. If no source publishes a
-digest the install is refused instead of trusting an unverified binary.
+Language servers are installed from their GitHub releases after consent. The
+registry stores no version: `ServerSpec::repo` names the project and
+`ServerSpec::asset` is the file name template, so `latest_tag` reads the tag out
+of the `releases/latest` redirect (a plain HTTPS request, no API quota) and
+`download_target` builds `.../releases/download/<tag>/<asset>`. The asset
+template carries `{tag}`, `{target}`, `{os}` and `{ext}`, because GitHub assets
+embed the tag and change extension per OS; the archive format is inferred from
+the resolved file name. A pinned `lsp.downloads.<server>.version` skips the
+redirect, and `.url` replaces the URL entirely, which is what keeps installs
+working when github.com is unreachable.
+
+`download_manifest` then asks `published_digest` for the expected SHA-256: an
+explicit pin, the digest cached by a previous install
+(`lsp/checksums/<server>/<version>.sha256`), then the GitHub release API's
+per-asset `digest` field or a checksums file attached to that release. A
+resolved digest is cached, so repeat installs never call the API; `GITHUB_TOKEN`
+only raises its anonymous quota for a first-time lookup.
 
 `github_release_digest` returns `DigestLookup`, not `Option`: `NoDigest` means
 the release answered and carries no usable digest, while `Unavailable(reason)`
 means the API itself failed (network, `HTTP 403` rate limit, bad payload).
-`discover_digest` maps the first to `E_LSP_CHECKSUM_UNAVAILABLE` and the second
-to `E_LSP_CHECKSUM_LOOKUP_FAILED`, so a rate-limited IP never accuses a vendor
-of not publishing checksums.
-`lsp checksum <server>` inspects the same value. Downloads still validate HTTPS,
-the host whitelist, the archive cap, extraction safety, and the resolved digest.
+`published_digest` turns either into `ExpectedDigest::Unverified(reason)`, which
+is reported as an `unverified` download status and does not stop the install: a
+missing digest is a warning, while a digest that is published and does not match
+is `E_LSP_CHECKSUM_MISMATCH` and drops the cached value. Downloads still
+validate HTTPS, the host whitelist and the archive cap, and extraction is
+checked for escapes.
+
+`LspHub::new` schedules `check_updates`, which compares each installed version
+with `latest_tag` and emits `update_available` when they differ. Installs write
+`lsp/<server>/<tag>/` and `prune_other_versions` deletes the directory they
+replaced, so `installed` always describes a single copy.
 
 ### Processes
 

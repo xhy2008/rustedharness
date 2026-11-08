@@ -68,7 +68,9 @@ pub enum HarnessEvent {
         display_name: String,
         version: String,
         url: String,
-        sha256: String,
+        /// `None` when the release publishes no digest and the download would
+        /// therefore be installed unverified.
+        sha256: Option<String>,
         runtime_hint: Option<String>,
     },
     DownloadStatus {

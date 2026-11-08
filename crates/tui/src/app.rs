@@ -106,7 +106,9 @@ pub struct ConsentCard {
     pub display_name: String,
     pub version: String,
     pub url: String,
-    pub sha256: String,
+    /// `None` when the release publishes no digest: the download is offered
+    /// anyway and installed unverified.
+    pub sha256: Option<String>,
     pub runtime_hint: Option<String>,
 }
 
@@ -346,7 +348,10 @@ impl App {
             OpResult::Checksum { server, result } => match result {
                 Ok(info) => self.notice(format!(
                     "{server} {} | {} | sha256 {} ({})",
-                    info.version, info.url, info.sha256, info.source
+                    info.version,
+                    info.url,
+                    info.sha256.as_deref().unwrap_or("none published"),
+                    info.source
                 )),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} checksum: {err}")),
             },
@@ -482,6 +487,7 @@ impl App {
                     self.lsp.push(ServerStatus {
                         language,
                         server: spec.id.to_string(),
+                        version: None,
                         state,
                         detail,
                         pid: None,
