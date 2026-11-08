@@ -38,6 +38,10 @@ protocol.
 5. Optionally chase incomplete todos, then persist every message as a JSONL
    session record.
 
+Rate-limited (429) requests retry at `agent.rateLimitIntervalSecs` up to
+`agent.rateLimitRetries` times, with `null` meaning retry until cancellation;
+quota exhaustion is terminal.
+
 The loop holds no borrows across `.await`: shared state is behind `Arc` and
 snapshotted or cloned at await boundaries. Each tool call receives a
 `ToolContext` with the workspace resolver, config, provider, LSP hub, web
@@ -131,11 +135,13 @@ keywords are not mistaken for symbols. L0 is used while a server warms up or
 when none is installed. `lsp_tool.rs` exposes both through a single `lsp` tool
 and labels L0 answers as name-based.
 
-Language servers are downloaded only after consent and only with an explicitly
-pinned SHA-256. `lsp checksum <server>` discovers the official digest from the
-GitHub release asset metadata (or a `<url>.sha256` sidecar) and prints it for
-pinning; the download itself still validates HTTPS, the host whitelist, the
-archive cap, extraction safety, and the pinned digest.
+Language servers are downloaded from their GitHub releases after consent. The
+SHA-256 is resolved automatically from the release asset `digest`, a checksums
+file attached to or published beside the release (`SHA256SUMS`, `*.sha256`), or
+a `<url>.sha256` sidecar; an unverified download is refused.
+`lsp checksum <server>` only inspects that digest, and
+`lsp.downloads.<server>.sha256` is an optional override for mirrors. Downloads validate HTTPS, the host whitelist, the archive
+cap, extraction safety, and the resolved digest.
 
 ### Processes
 

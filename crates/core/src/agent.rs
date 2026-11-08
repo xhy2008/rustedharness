@@ -681,7 +681,8 @@ impl Agent {
         }
     }
 
-    /// Ask the backend, retrying rate-limit failures forever at a 5s cadence.
+    /// Ask the backend, retrying rate-limit failures at the configured cadence
+    /// and limit (`agent.rateLimitRetries` / `agent.rateLimitIntervalSecs`).
     /// Quota/credit exhaustion is terminal: no amount of waiting refills it,
     /// so the error surfaces immediately with an explicit notice.
     async fn stream_with_retry(
@@ -691,6 +692,9 @@ impl Agent {
         token: CancellationToken,
         turn: usize,
     ) -> Result<Completion> {
+        let max_retries = self.config.agent.rate_limit_retries;
+        let interval =
+            std::time::Duration::from_secs(self.config.agent.rate_limit_interval_secs.max(1));
         let mut attempt = 0u32;
         loop {
             let result = self
@@ -715,17 +719,30 @@ impl Agent {
                 return Err(err);
             }
             attempt += 1;
-            if attempt == 1 || attempt.is_multiple_of(6) {
+            if let Some(max) = max_retries {
+                if attempt > max {
+                    let _ = self.events.send(HarnessEvent::Notice {
+                        level: "error".to_string(),
+                        message: format!(
+                            "rate limited (429) during turn {turn}; retry limit ({max}) reached"
+                        ),
+                    });
+                    return Err(err);
+                }
+            }
+            if attempt == 1 || attempt.is_multiple_of(5) {
+                let limit = max_retries.map(|max| format!("/{max}")).unwrap_or_default();
                 let _ = self.events.send(HarnessEvent::Notice {
                     level: "warning".to_string(),
                     message: format!(
-                        "rate limited (429) during turn {turn}; retrying in 5s (attempt {attempt})"
+                        "rate limited (429) during turn {turn}; retrying in {}s (attempt {attempt}{limit})",
+                        interval.as_secs()
                     ),
                 });
             }
             tokio::select! {
                 _ = token.cancelled() => return Err(err),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(interval) => {}
             }
         }
     }
@@ -916,6 +933,23 @@ mod tests {
         config
     }
 
+    struct RateLimited;
+
+    #[async_trait]
+    impl Backend for RateLimited {
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _sink: Option<UnboundedSender<StreamEvent>>,
+            _cancel: CancellationToken,
+        ) -> Result<Completion> {
+            Err(HarnessError::tool(
+                "E_RATE_LIMITED",
+                "429 Too Many Requests",
+            ))
+        }
+    }
+
     struct ShellFake {
         calls: std::sync::atomic::AtomicUsize,
         tool: &'static str,
@@ -1008,6 +1042,37 @@ mod tests {
             HarnessEvent::ToolResult { id, ok: true, content, .. }
                 if id == "sh1" && content.contains("stream-b")
         )));
+        agent.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retries_stop_at_the_configured_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.agent.rate_limit_retries = Some(0);
+        config.agent.rate_limit_interval_secs = 1;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let agent =
+            Agent::with_backend(config, dir.path().to_path_buf(), tx, Arc::new(RateLimited))
+                .await
+                .unwrap();
+        let result = agent.send("hello").await;
+        assert!(
+            result.is_err(),
+            "expected the retry limit to surface an error"
+        );
+        let mut notices = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let HarnessEvent::Notice { message, .. } = event {
+                notices.push(message);
+            }
+        }
+        assert!(
+            notices
+                .iter()
+                .any(|m| m.contains("retry limit (0) reached")),
+            "missing retry-limit notice: {notices:?}"
+        );
         agent.shutdown().await;
     }
 

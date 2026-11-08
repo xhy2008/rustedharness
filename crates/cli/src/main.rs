@@ -101,21 +101,23 @@ struct LspArgs {
 enum LspCommand {
     /// Show the built-in server registry and availability.
     List,
-    /// Download and verify a server into the cache (requires a pinned SHA-256).
+    /// Download a server from its GitHub release and verify the published digest.
     Install {
         /// Server id, e.g. rust-analyzer.
         server: String,
-        /// Pin this SHA-256 for the download instead of editing the config.
+        /// Optional SHA-256 override for this download (the release digest is
+        /// verified automatically when omitted).
         #[arg(long, value_name = "HEX")]
         sha256: Option<String>,
     },
     /// Re-download a server, replacing the cached copy.
     Update {
         server: String,
+        /// Optional SHA-256 override for this download.
         #[arg(long, value_name = "HEX")]
         sha256: Option<String>,
     },
-    /// Show the official published SHA-256 for a server artifact.
+    /// Show the SHA-256 that installation will verify.
     Checksum {
         /// Server id, e.g. rust-analyzer.
         server: String,
@@ -542,9 +544,11 @@ async fn lsp_command(config: Config, cwd: PathBuf, args: LspArgs) -> Result<()> 
                 );
             }
             println!(
-                "\n{} servers in the built-in registry. Downloads require [lsp.downloads.<id>] \
-                 with a pinned sha256; run `rustedharness lsp checksum <id>` to fetch the \
-                 official release digest.",
+                concat!(
+                    "{} servers in the built-in registry. Downloads use the GitHub release ",
+                    "and verify its published SHA-256 automatically; ",
+                    "`lsp checksum <id>` only inspects the digest."
+                ),
                 registry().len()
             );
             hub.shutdown_all().await;
@@ -584,32 +588,17 @@ async fn lsp_checksum(config: Config, cwd: PathBuf, server: &str) -> Result<()> 
     println!("url:     {}", info.url);
     println!("sha256:  {}", info.sha256);
     println!("source:  {}", info.source);
-    let mut download = serde_json::Map::new();
-    download.insert("sha256".to_string(), serde_json::json!(info.sha256));
-    let mut downloads = serde_json::Map::new();
-    downloads.insert(info.server_id.clone(), serde_json::Value::Object(download));
-    let mut lsp = serde_json::Map::new();
-    lsp.insert(
-        "downloads".to_string(),
-        serde_json::Value::Object(downloads),
-    );
-    let snippet = serde_json::json!({ "lsp": serde_json::Value::Object(lsp) });
+    let snippet = serde_json::json!({
+        "lsp": { "downloads": { info.server_id.clone(): { "sha256": info.sha256 } } }
+    });
     println!(
-        "
-Pin it in {}:
-{}",
-        config_path.display(),
-        serde_json::to_string_pretty(&snippet)?
+        "\nInstall verifies this digest automatically; pin it in {} only to override:",
+        config_path.display()
     );
+    println!("{}", serde_json::to_string_pretty(&snippet)?);
     println!(
-        "
-Or install now:
-  rustedharness lsp install {} --sha256 {}",
-        info.server_id, info.sha256
-    );
-    println!(
-        "
-Review the digest against the release page before trusting it; the checksum          command only reports what the vendor published."
+        "\nInstall now: rustedharness lsp install {}",
+        info.server_id
     );
     Ok(())
 }

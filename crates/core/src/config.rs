@@ -295,6 +295,11 @@ pub struct AgentConfig {
     pub chase_limit: u32,
     /// Output token cap when a model does not declare `maxTokens`.
     pub max_output_tokens: u32,
+    /// Maximum retries after a 429/rate-limit response; `null` retries until
+    /// cancelled. Suggested values: 3, 5, 10.
+    pub rate_limit_retries: Option<u32>,
+    /// Seconds between 429 retries. Suggested values: 1, 3, 5.
+    pub rate_limit_interval_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -307,6 +312,8 @@ impl Default for AgentConfig {
             temperature: Some(0.2),
             chase_limit: 3,
             max_output_tokens: 8_192,
+            rate_limit_retries: None,
+            rate_limit_interval_secs: 5,
         }
     }
 }
@@ -372,10 +379,10 @@ pub struct LspConfig {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub servers: BTreeMap<String, String>,
     pub request_timeout_ms: u64,
-    /// Optional pinned download manifests, keyed by server id. The built-in
-    /// registry carries URLs but deliberately ships no checksums; a download
-    /// only proceeds when a SHA-256 is supplied here (or via `lsp install`).
-    /// `lsp checksum <id>` reads the official release digest to paste here.
+    /// Optional download overrides, keyed by server id. URLs default to the
+    /// registry's GitHub release; the digest is discovered from the release
+    /// metadata automatically. Entries here only pin a version/URL or override
+    /// the digest for a private mirror.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub downloads: BTreeMap<String, LspDownload>,
 }
@@ -389,7 +396,8 @@ pub struct LspDownload {
     /// HTTPS archive/binary URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Required SHA-256 of the downloaded file, lowercase hex.
+    /// Optional pinned SHA-256 (lowercase hex). Leave unset to verify against
+    /// the digest published on the GitHub release.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// gz | zip | tar.gz | raw
@@ -669,6 +677,7 @@ impl Config {
 
     fn normalize(&mut self) {
         self.edit.anchor_width = self.edit.anchor_width.clamp(2, 4);
+        self.agent.rate_limit_interval_secs = self.agent.rate_limit_interval_secs.clamp(1, 300);
         if self.providers.is_empty() {
             self.providers = Config::default().providers;
         }
@@ -1140,6 +1149,23 @@ mod tests {
         assert_eq!(resolve_config_value("$$literal"), "$literal");
         assert_eq!(resolve_config_value("$!literal"), "!literal");
         std::env::remove_var("RUSTEDHARNESS_TEST_KEY");
+    }
+
+    #[test]
+    fn rate_limit_settings_parse_and_normalize() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"agent":{"rateLimitRetries":10,"rateLimitIntervalSecs":3}}"#)
+                .unwrap();
+        assert_eq!(cfg.agent.rate_limit_retries, Some(10));
+        assert_eq!(cfg.agent.rate_limit_interval_secs, 3);
+
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"agent":{"rateLimitRetries":null,"rateLimitIntervalSecs":0}}"#,
+        )
+        .unwrap();
+        cfg.normalize();
+        assert_eq!(cfg.agent.rate_limit_retries, None);
+        assert_eq!(cfg.agent.rate_limit_interval_secs, 1);
     }
 
     #[test]

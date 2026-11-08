@@ -175,7 +175,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/view <path>", "open a file read-only"),
     ("/todo", "show the todo list"),
     ("/lsp", "language server status"),
-    ("/checksum <id>", "show a language server download digest"),
+    (
+        "/checksum <id>",
+        "inspect the verified language server digest",
+    ),
     ("/install <id>", "install a language server"),
     ("/procs", "background processes"),
     ("/copy", "copy the last assistant reply"),
@@ -342,8 +345,8 @@ impl App {
         match result {
             OpResult::Checksum { server, result } => match result {
                 Ok(info) => self.notice(format!(
-                    "{server} {} | {} | sha256 {}",
-                    info.version, info.url, info.sha256
+                    "{server} {} | {} | sha256 {} ({})",
+                    info.version, info.url, info.sha256, info.source
                 )),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} checksum: {err}")),
             },

@@ -180,7 +180,9 @@ enabled. Rejected knobs are retried one at a time.
     "autoCompact": true,
     "temperature": 0.2,
     "chaseLimit": 3,
-    "maxOutputTokens": 8192
+    "maxOutputTokens": 8192,
+    "rateLimitRetries": null,
+    "rateLimitIntervalSecs": 5
   },
   "edit": {
     "anchorWidth": 2,
@@ -233,6 +235,11 @@ appended to the tool result.
 - **Model routing**: `model` drives the loop; `compactModel` is used only for
   summaries. Each request is routed to the provider that owns its model, so the
   two roles can live on different providers.
+- **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
+  retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
+  for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).
+  Set `rateLimitRetries` to `null` to retry until the turn is cancelled.
+  Quota/credit exhaustion is terminal and never retried.
 - **Compaction**: when the provider-reported context size reaches 80% of the
   active model's `contextWindow`, the transcript is replaced by a five-section
   summary (goal, done, constraints, pending, pitfalls). The most recent turns
@@ -302,35 +309,38 @@ The `lsp` tool supports `definition`, `type_definition`, `implementation`,
 `call_hierarchy`, `rename`, and `diagnostics`. Servers are spawned lazily,
 restarted a bounded number of times, and shut down when idle.
 
-When a server is missing, the harness can offer to download one, but only when
-all of these hold:
+When a server is missing and `lsp.autoDownload` is enabled (the default), the
+harness downloads the pinned release from the server's GitHub releases page.
+Every download is verified against the digest the vendor publishes for that
+release:
+
+1. the GitHub release asset `digest` field (preferred);
+2. a checksums file attached to the same release (`SHA256SUMS`, `*.sha256`);
+3. a well-known checksums file next to the artifacts (`SHA256SUMS`,
+   `checksums.txt`, ...);
+4. a `<url>.sha256` sidecar next to the artifact.
+
+If the vendor publishes no digest in any of those places, the download is
+refused rather than installing an unverified binary. A digest can be pinned in
+`lsp.downloads.<server>.sha256` to override verification (for a private mirror);
+this is never required for the built-in registry.
+
+Transport rules are enforced for every download:
 
 - HTTPS only, with redirects re-checked against a host whitelist;
-- an explicit SHA-256 is pinned under `lsp.downloads.<server>` in
-  `config.json`, or supplied with `--sha256`;
 - the archive is at most 256 MiB and extracts without escapes;
 - the user consents interactively, or `lsp.allowDownloadsNoninteractive` /
   `--yes` is set.
 
-Checksums are never invented. If you do not know the digest, ask the harness to
-read the official release metadata:
-
 ```sh
-rustedharness lsp checksum rust-analyzer
+rustedharness lsp install rust-analyzer   # download + cache
+rustedharness lsp update rust-analyzer    # re-download the pinned release
+rustedharness lsp checksum rust-analyzer  # show the digest and its source
 ```
 
-This queries the GitHub release asset `digest` (falling back to a published
-`.sha256` sidecar), then prints the hash, a ready-to-paste
-`[lsp.downloads.<server>]` snippet, and an install command. Pin it in config,
-or install directly:
-
-```sh
-rustedharness lsp install rust-analyzer --sha256 <digest>
-rustedharness lsp update rust-analyzer --sha256 <digest>
-```
-
-`lsp list` shows the registry and availability. The checksum lookup only reads
-metadata; installation still requires the explicit pin.
+`lsp checksum` is informational: installation performs the same discovery and
+verification automatically. Set `GITHUB_TOKEN` when the unauthenticated GitHub
+API rate limit is a problem.
 
 Without a server, L0 provides definitions, references, and identifier lookup
 from a real tree-sitter parse indexed in SQLite. All 17 bundled grammars are

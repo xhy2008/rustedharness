@@ -24,6 +24,21 @@
 - 手写 base64 换成已存在的 `base64` crate。
 - README / docs/architecture.md 同步移除迁移说明，配置键统一 camelCase。
 
+## 已完成：LSP 自动下载校验 + 429 重试设置（2026-11-08）
+
+### LSP 下载
+- 安装/自动下载不再要求 `lsp.downloads.<id>.sha256` 或 `--sha256`；`download_manifest` 会自动解析校验值。
+- 校验值解析顺序：GitHub release asset `digest` → 同一 release 附带的 checksums 文件（`SHA256SUMS` / `*.sha256`，支持 GNU `hash  file`、`hash *file`、BSD `SHA256 (file) = hash`）→ `<url>.sha256` sidecar。
+- 三处都拿不到校验值时拒绝安装（`E_LSP_CHECKSUM_UNAVAILABLE`），提示可用 `GITHUB_TOKEN` 避免 API 限流，或手动安装。
+- `lsp checksum` 保留为只读检查命令；`lsp.downloads.<id>.sha256` 保留为可选覆盖（私有镜像），文档已说明非必需。
+- 新增单测 `checksum_files_are_parsed_in_common_formats`、`release_assets_expose_digests_and_checksum_files`。
+
+### 429 重试设置
+- 新增 `agent.rateLimitRetries`（`Option<u32>`，`null`=无限，建议 3/5/10）与 `agent.rateLimitIntervalSecs`（秒，建议 1/3/5，默认 5，normalize 夹在 1..=300）。
+- `stream_with_retry` 按设置重试；达到上限发 error Notice 并返回错误；通知中显示 `attempt n/max`。
+- 新增单测 `rate_limit_settings_parse_and_normalize`、`rate_limit_retries_stop_at_the_configured_limit`。
+- README / docs/architecture.md 已同步配置样例与行为说明。
+
 ## 上一轮改动的已知坑（勿回退）
 
 - 不再需要在 `shutdown` 里删除空会话（文件根本不会创建）；若重新引入持锁 `.await`，注意 web crate 的 `on_upgrade` future 要求 Send。
@@ -34,12 +49,12 @@
 ```bash
 taskkill /F /IM rustedharness.exe   # 旧进程会锁二进制导致“拒绝访问 os error 5”
 cargo build -p rustedharness-cli    # gui 依赖由 web 编译错误间接覆盖
-cargo test --workspace              # 当前基线：10 套件全绿，core 138 项
+cargo test --workspace              # 当前基线：10 套件全绿，core 142 项
 git -C E:/rustedharness add -A && \
 git -C E:/rustedharness -c user.name="xhy37000616" -c user.email="xhy37000616@163.com" commit -m "..."
 ```
 禁止修改 git 全局/本地配置，只用 -c 参数。提交历史最近几条：
-`5044382` 会话惰性创建 → `89f2ac5` fmt/clippy → `6671783` 删空会话补偿 → `e475b3a` 删配置兼容层 → 本次规范扫描。
+`5044382` 会话惰性创建 → `89f2ac5` fmt/clippy → `6671783` 删空会话补偿 → `e475b3a` 删配置兼容层 → `f4e56ed` 规范扫描 → 本次 LSP/429。
 
 ## 关键背景（勿踩）
 

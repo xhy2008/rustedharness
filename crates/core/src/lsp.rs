@@ -65,8 +65,9 @@ impl ArchiveKind {
 }
 
 /// One language server description. `download_url` may contain `{version}`
-/// and `{target}` placeholders. A URL alone is never enough to download: a
-/// SHA-256 must be supplied through `[lsp.downloads.<id>]`.
+/// and `{target}` placeholders. Downloads are verified against the digest the
+/// vendor publishes on the GitHub release; `lsp.downloads.<id>.sha256` is an
+/// optional override, not a requirement.
 #[derive(Debug, Clone)]
 pub struct ServerSpec {
     pub language: &'static str,
@@ -506,8 +507,8 @@ fn validate_download_url(url: &str, domains: &[String]) -> Result<url::Url> {
     Ok(parsed)
 }
 
-async fn sidecar_digest(artifact_url: &str) -> Option<String> {
-    let client = reqwest::Client::builder()
+fn http_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
         .user_agent(format!("rustedharness/{}", VERSION))
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -520,19 +521,107 @@ async fn sidecar_digest(artifact_url: &str) -> Option<String> {
             }
         }))
         .build()
-        .ok()?;
-    let response = client
-        .get(format!("{artifact_url}.sha256"))
-        .send()
-        .await
-        .ok()?;
+        .ok()
+}
+
+async fn fetch_text(url: &str, limit: usize) -> Option<String> {
+    let client = http_client()?;
+    let response = client.get(url).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
     let text = response.text().await.ok()?;
-    if text.len() > 8 * 1024 {
-        return None;
+    (text.len() <= limit).then_some(text)
+}
+
+/// Parse a published checksums file (`<hash>  <name>`, `*<name>`, or the BSD
+/// `SHA256 (name) = <hash>` form) and return the entry for `asset_name`.
+fn parse_checksum_file(text: &str, asset_name: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((label, value)) = line.split_once('=') {
+            if label.contains(&format!("({asset_name})")) {
+                let hash = value.trim();
+                if valid_sha256(hash) {
+                    return Some(hash.to_ascii_lowercase());
+                }
+            }
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let hash = parts.next().unwrap_or("");
+        if !valid_sha256(hash) {
+            continue;
+        }
+        let matches_asset = parts.any(|name| {
+            let name = name.trim_start_matches('*');
+            name == asset_name || name.rsplit('/').next() == Some(asset_name)
+        });
+        if matches_asset {
+            return Some(hash.to_ascii_lowercase());
+        }
     }
+    None
+}
+
+/// Return the `digest` metadata GitHub records for the named release asset.
+fn asset_digest(assets: &[Value], asset_name: &str) -> Option<String> {
+    assets.iter().find_map(|entry| {
+        if entry.get("name").and_then(Value::as_str) != Some(asset_name) {
+            return None;
+        }
+        let digest = entry.get("digest").and_then(Value::as_str)?;
+        let hash = digest.strip_prefix("sha256:")?;
+        valid_sha256(hash).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// Release assets that are likely to hold checksums for the other artifacts.
+fn checksum_assets(assets: &[Value]) -> Vec<(String, String)> {
+    assets
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(Value::as_str)?;
+            let lower = name.to_ascii_lowercase();
+            if !(lower.contains("sha256") || lower.contains("checksum")) || lower.ends_with(".sig")
+            {
+                return None;
+            }
+            let url = entry.get("browser_download_url").and_then(Value::as_str)?;
+            Some((name.to_string(), url.to_string()))
+        })
+        .collect()
+}
+
+/// Well-known checksums files published next to the release artifacts. Tried
+/// when the GitHub API is unavailable (for example when its rate limit is hit).
+async fn release_checksum_file_digest(
+    artifact_url: &str,
+    asset_name: &str,
+) -> Option<(String, String)> {
+    let base = artifact_url.rsplit_once('/')?.0;
+    for name in [
+        "SHA256SUMS",
+        "SHA256SUMS.txt",
+        "sha256sums.txt",
+        "checksums.txt",
+        "sha256.txt",
+    ] {
+        let Some(text) = fetch_text(&format!("{base}/{name}"), 1024 * 1024).await else {
+            continue;
+        };
+        if let Some(hash) = parse_checksum_file(&text, asset_name) {
+            return Some((hash, format!("release checksums ({name})")));
+        }
+    }
+    None
+}
+
+async fn sidecar_digest(artifact_url: &str) -> Option<String> {
+    let text = fetch_text(&format!("{artifact_url}.sha256"), 8 * 1024).await?;
     text.split(|c: char| !c.is_ascii_hexdigit())
         .find(|token| token.len() == 64)
         .map(|token| token.to_ascii_lowercase())
@@ -819,7 +908,7 @@ impl LspHub {
 
     /// Install a language server into the cache without starting it. Used by
     /// `rustedharness lsp install`; the caller is responsible for consent and
-    /// the pinned SHA-256 manifest is still enforced.
+    /// the published SHA-256 is still enforced.
     pub async fn install(&self, server_id: &str) -> Result<PathBuf> {
         let spec = spec_for_id(server_id).ok_or_else(|| {
             HarnessError::tool(
@@ -833,14 +922,9 @@ impl LspHub {
         self.download_server(spec).await
     }
 
-    /// Discover a published SHA-256 for a registry server without installing
-    /// it. Preference order:
-    /// 1. GitHub's release-asset `digest` metadata (official, out-of-band);
-    /// 2. a `<url>.sha256` sidecar published next to the artifact.
-    ///
-    /// The returned `source` tells the user which channel was used. The value
-    /// is not trusted for installation until it is pinned in the config or
-    /// passed back through `lsp install --sha256`.
+    /// Discover the vendor-published SHA-256 for a registry server without
+    /// installing it. Installation performs the same discovery automatically;
+    /// this entry point only lets a user inspect the digest or pin it.
     pub async fn checksum(&self, server_id: &str) -> Result<ChecksumInfo> {
         let spec = spec_for_id(server_id).ok_or_else(|| {
             HarnessError::tool(
@@ -858,30 +942,44 @@ impl LspHub {
             ));
         };
         validate_download_url(&target.url, &target.domains)?;
+        let (sha256, source) = self.published_digest(spec, &target.url).await?;
+        Ok(ChecksumInfo {
+            server_id: spec.id.to_string(),
+            version: target.version,
+            url: target.url,
+            sha256,
+            source,
+        })
+    }
 
-        if let Some((sha256, source)) = self.github_release_digest(&target.url).await? {
-            return Ok(ChecksumInfo {
-                server_id: spec.id.to_string(),
-                version: target.version,
-                url: target.url,
-                sha256,
-                source,
-            });
+    /// Resolve the digest for an artifact, preferring GitHub's own release
+    /// metadata: the release-asset `digest`, then a checksums file attached to
+    /// the same release, then a `<url>.sha256` sidecar.
+    async fn published_digest(
+        &self,
+        spec: &ServerSpec,
+        artifact_url: &str,
+    ) -> Result<(String, String)> {
+        if let Some(found) = self.github_release_digest(artifact_url).await? {
+            return Ok(found);
         }
-        if let Some(sha256) = sidecar_digest(&target.url).await {
-            return Ok(ChecksumInfo {
-                server_id: spec.id.to_string(),
-                version: target.version,
-                url: target.url,
-                sha256,
-                source: "published .sha256 sidecar".to_string(),
-            });
+        let asset_name = artifact_url.rsplit('/').next().unwrap_or(artifact_url);
+        if let Some(found) = release_checksum_file_digest(artifact_url, asset_name).await {
+            return Ok(found);
+        }
+        if let Some(sha256) = sidecar_digest(artifact_url).await {
+            return Ok((sha256, "published .sha256 sidecar".to_string()));
         }
         Err(HarnessError::tool(
             "E_LSP_CHECKSUM_UNAVAILABLE",
             format!(
-                "no published SHA-256 found for `{}`. Download\n  {}\nand run `sha256sum <file>` (or `shasum -a 256`), then pin the result with:\n  rustedharness lsp install {} --sha256 <64 hex chars>",
-                spec.id, target.url, spec.id
+                concat!(
+                    "GitHub publishes no SHA-256 for `{}`:\n  {}\n",
+                    "Refusing to install an unverified binary ",
+                    "(set GITHUB_TOKEN if the API rate limit was hit). ",
+                    "Install manually: {}"
+                ),
+                spec.id, artifact_url, spec.install_hint
             ),
         ))
     }
@@ -937,20 +1035,17 @@ impl LspHub {
         let Some(assets) = value.get("assets").and_then(Value::as_array) else {
             return Ok(None);
         };
-        for entry in assets {
-            if entry.get("name").and_then(Value::as_str) != Some(asset.as_str()) {
-                continue;
-            }
-            let Some(digest) = entry.get("digest").and_then(Value::as_str) else {
+        let asset_name = asset.rsplit('/').next().unwrap_or(asset.as_str());
+        if let Some(hash) = asset_digest(assets, asset_name) {
+            return Ok(Some((hash, "GitHub release asset digest".to_string())));
+        }
+        // Some releases publish a checksums file instead of per-asset digests.
+        for (name, url) in checksum_assets(assets) {
+            let Some(text) = fetch_text(&url, 1024 * 1024).await else {
                 continue;
             };
-            if let Some(hash) = digest.strip_prefix("sha256:") {
-                if valid_sha256(hash) {
-                    return Ok(Some((
-                        hash.to_ascii_lowercase(),
-                        "GitHub release asset digest".to_string(),
-                    )));
-                }
+            if let Some(hash) = parse_checksum_file(&text, asset_name) {
+                return Ok(Some((hash, format!("GitHub release checksums ({name})"))));
             }
         }
         Ok(None)
@@ -1047,14 +1142,30 @@ impl LspHub {
         })
     }
 
-    fn download_manifest(&self, spec: &ServerSpec) -> Option<DownloadManifest> {
-        let target = self.download_target(spec)?;
-        let sha = self
+    /// Build the download manifest. The digest normally comes from the
+    /// vendor's GitHub release metadata; a pinned `lsp.downloads.<id>.sha256`
+    /// only overrides it.
+    async fn download_manifest(&self, spec: &ServerSpec) -> Result<DownloadManifest> {
+        let target = self.download_target(spec).ok_or_else(|| {
+            HarnessError::tool(
+                "E_LSP_NO_DOWNLOAD",
+                format!(
+                    "`{}` has no built-in download URL; install it manually: {}",
+                    spec.id, spec.install_hint
+                ),
+            )
+        })?;
+        validate_download_url(&target.url, &target.domains)?;
+        let sha = match self
             .config
             .downloads
             .get(spec.id)
-            .and_then(|o| o.sha256.clone())?;
-        Some(DownloadManifest {
+            .and_then(|o| o.sha256.clone())
+        {
+            Some(pinned) => pinned,
+            None => self.published_digest(spec, &target.url).await?.0,
+        };
+        Ok(DownloadManifest {
             version: target.version,
             url: target.url,
             sha,
@@ -1164,11 +1275,12 @@ impl LspHub {
         Ok(client)
     }
 
-    /// Fetch a verified archive and extract it into the cache. Refuses to
-    /// download unless HTTPS, an allow-listed host, a pinned SHA-256 and (in
-    /// interactive mode) an explicit consent are all present.
+    /// Fetch a verified archive and extract it into the cache. The SHA-256 is
+    /// discovered from the vendor's GitHub release metadata (optionally
+    /// overridden by a pin); HTTPS, an allow-listed host and (in interactive
+    /// mode) explicit consent are still required.
     async fn download_server(&self, spec: &ServerSpec) -> Result<PathBuf> {
-        let Some(DownloadManifest {
+        let DownloadManifest {
             version,
             url,
             sha,
@@ -1176,23 +1288,13 @@ impl LspHub {
             binary,
             domains,
             display,
-        }) = self.download_manifest(spec)
-        else {
-            return Err(HarnessError::tool(
-                "E_LSP_CHECKSUM_REQUIRED",
-                format!(
-                    "no pinned SHA-256 for `{}`. Run\n  rustedharness lsp checksum {}\nto read the official release digest, then pin it with\n  [lsp.downloads.{}]\n  sha256 = \"...\"\nor install directly with `rustedharness lsp install {} --sha256 <digest>`. Manual install: {}",
-                    spec.id, spec.id, spec.id, spec.id, spec.install_hint
-                ),
-            ));
-        };
+        } = self.download_manifest(spec).await?;
         if !valid_sha256(&sha) {
             return Err(HarnessError::tool(
                 "E_LSP_CHECKSUM_INVALID",
                 "sha256 must be 64 hex characters",
             ));
         }
-        validate_download_url(&url, &domains)?;
 
         let consented = *self.consent.lock().unwrap().get(spec.id).unwrap_or(&false);
         if !consented {
@@ -2997,6 +3099,64 @@ mod tests {
         assert!(!valid_sha256(&"a".repeat(65)));
         assert!(!valid_sha256(&"g".repeat(64)));
         assert!(!valid_sha256(""));
+    }
+
+    #[test]
+    fn release_assets_expose_digests_and_checksum_files() {
+        let hash = "0123456789abcdef".repeat(4);
+        let assets = vec![
+            json!({ "name": "server.zip", "digest": format!("sha256:{hash}"),
+                    "browser_download_url": "https://github.com/o/r/releases/download/t/server.zip" }),
+            json!({ "name": "SHA256SUMS",
+                    "browser_download_url": "https://github.com/o/r/releases/download/t/SHA256SUMS" }),
+            json!({ "name": "server.zip.sig",
+                    "browser_download_url": "https://github.com/o/r/releases/download/t/server.zip.sig" }),
+        ];
+        assert_eq!(
+            asset_digest(&assets, "server.zip").as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(asset_digest(&assets, "other.zip").is_none());
+        let checksums = checksum_assets(&assets);
+        assert_eq!(checksums.len(), 1);
+        assert_eq!(checksums[0].0, "SHA256SUMS");
+    }
+
+    #[test]
+    fn checksum_files_are_parsed_in_common_formats() {
+        let hash = "0123456789abcdef".repeat(4);
+        let gnu = format!(
+            "{hash}  lua-language-server-3.19.2-linux-x64.tar.gz
+{hash}  other.zip
+"
+        );
+        assert_eq!(
+            parse_checksum_file(&gnu, "lua-language-server-3.19.2-linux-x64.tar.gz").as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(parse_checksum_file(&gnu, "missing.zip").is_none());
+        let star = format!(
+            "{hash} *rust-analyzer-linux.gz
+"
+        );
+        assert_eq!(
+            parse_checksum_file(&star, "rust-analyzer-linux.gz").as_deref(),
+            Some(hash.as_str())
+        );
+        let bsd = format!(
+            "SHA256 (clangd-linux-23.1.0.zip) = {hash}
+"
+        );
+        assert_eq!(
+            parse_checksum_file(&bsd, "clangd-linux-23.1.0.zip").as_deref(),
+            Some(hash.as_str())
+        );
+        assert!(parse_checksum_file(
+            "# comment
+not a checksum",
+            "x"
+        )
+        .is_none());
     }
 
     #[test]
