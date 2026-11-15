@@ -282,7 +282,7 @@ fn clicking_a_row_folds_the_entry_that_owns_it() {
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect::<String>()
-                    .starts_with("● [bash]")
+                    .starts_with("+ [bash]")
             })
             .expect("bash row");
         (row, owners[row])
@@ -530,5 +530,40 @@ fn scrolling_does_not_force_a_full_repaint() {
             !app.needs_repaint,
             "scrolling must not ask for a full-screen clear"
         );
+    }
+}
+
+/// East-Asian-Ambiguous characters are drawn *two cells wide* by Windows
+/// consoles with a CJK font, while unicode-width counts them as one. Our
+/// layout then places the rest of the row a column too far left, the tail
+/// spills into cells the frame buffer thinks are blank, and those cells are
+/// never repainted again — the orphaned-character bug. Only ASCII, box drawing
+/// and real wide characters are safe in the UI.
+#[test]
+fn transcript_uses_only_single_width_glyphs() {
+    fn width_safe(c: char) -> bool {
+        match c as u32 {
+            // Box drawing is Ambiguous by Unicode, but every Windows console
+            // renders it single width (the editor frame depends on it).
+            0x2500..=0x257F => true,
+            // Geometric shapes, arrows, general punctuation and the ambiguous
+            // Latin-1 symbols are the ones that blow up.
+            0x25A0..=0x25FF | 0x2190..=0x21FF | 0x2000..=0x206F => false,
+            0x00B7 | 0x00D7 => false,
+            _ => true,
+        }
+    }
+
+    let mut app = demo_app();
+    dump(&mut app, 100, 40);
+    for line in app.lines_cache.borrow().iter() {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for c in text.chars() {
+            assert!(
+                width_safe(c),
+                "ambiguous-width glyph {c:?} (U+{:04X}) in {text:?}",
+                c as u32
+            );
+        }
     }
 }

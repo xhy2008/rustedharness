@@ -141,7 +141,17 @@ fn sanitize(text: &str) -> Cow<'_, str> {
         match c {
             '\n' => out.push('\n'),
             '\t' => out.push_str("    "),
+            // Control characters, plus the invisible formatting characters a
+            // model or a terminal log likes to smuggle in: zero-width joiners
+            // and spaces, bidi overrides (which can reorder a whole row) and
+            // variation selectors (which turn one cell into two).
             c if c.is_control() => {}
+            '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{00ad}' => {}
             c => out.push(c),
         }
     }
@@ -436,7 +446,7 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
         EntryKind::User => {
             let band = |c: Color| style(c).bg(USER_BG);
             let frags = vec![Span::styled(body.to_string(), band(TEXT))];
-            let lines = flow(frags, ("› ", band(ACCENT)), ("  ", band(TEXT)), width);
+            let lines = flow(frags, ("> ", band(ACCENT)), ("  ", band(TEXT)), width);
             lines.into_iter().map(|l| fill(l, width, USER_BG)).collect()
         }
         EntryKind::Assistant => prose_lines(&body, width),
@@ -448,14 +458,14 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
                 for raw in body.lines() {
                     lines.extend(flow(
                         vec![Span::styled(raw.to_string(), style(DIM))],
-                        ("· ", style(FAINT)),
+                        ("* ", style(FAINT)),
                         ("  ", style(FAINT)),
                         width,
                     ));
                 }
             } else {
                 lines.push(Line::from(vec![
-                    Span::styled("· ", style(FAINT)),
+                    Span::styled("* ", style(FAINT)),
                     Span::styled(title.to_string(), style(MUTED)),
                 ]));
                 for raw in body.lines() {
@@ -475,7 +485,7 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
             for raw in body.lines() {
                 lines.extend(flow(
                     vec![Span::styled(raw.to_string(), base)],
-                    ("× ", base),
+                    ("! ", base),
                     ("  ", base),
                     width,
                 ));
@@ -511,9 +521,9 @@ fn tool_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let (glyph, color) = match entry.ok {
-        Some(true) => ("●", GREEN),
-        Some(false) => ("×", RED),
-        None => ("○", YELLOW),
+        Some(true) => ("+", GREEN),
+        Some(false) => ("!", RED),
+        None => ("~", YELLOW),
     };
     let mut spans = vec![
         Span::styled(format!("{glyph} "), style(color)),
@@ -698,7 +708,7 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let text_style = style(TEXT);
-    let mut spans = vec![Span::styled("› ", prompt_style)];
+    let mut spans = vec![Span::styled("> ", prompt_style)];
     if app.input.is_empty() {
         // No caret before the placeholder: two glyphs in a row read as a
         // divider rather than a cursor.
@@ -725,7 +735,9 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
 // ---------------------------------------------------------------------------
 
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let width = area.width.saturating_sub(1) as usize;
+    // One extra column of slack: the status line carries `¥`, which a CJK
+    // console may draw two cells wide.
+    let width = area.width.saturating_sub(2) as usize;
     frame.render_widget(Paragraph::new(footer_line(app, width)), area);
 }
 
@@ -1291,7 +1303,7 @@ fn draw_picker(
         };
         let mut spans = vec![
             Span::styled(
-                if selected { "› " } else { "  " },
+                if selected { "> " } else { "  " },
                 if selected {
                     style(ACCENT).bg(SELECTED_BG)
                 } else {

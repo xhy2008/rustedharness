@@ -166,7 +166,7 @@ pub struct App {
 
 /// Animated dots, all three frames the same width so the status line never
 /// jitters. Braille and dingbat spinners are not in every terminal font.
-const SPINNER: [&str; 3] = ["·  ", "·· ", "···"];
+const SPINNER: [&str; 3] = [".  ", ".. ", "..."];
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this command list"),
