@@ -105,6 +105,7 @@ enum LspCommand {
     /// publishes a digest).
     Install {
         /// Server id, e.g. rust-analyzer.
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
         server: String,
         /// Require this SHA-256 instead of the published digest.
         #[arg(long, value_name = "HEX")]
@@ -112,6 +113,7 @@ enum LspCommand {
     },
     /// Re-install a server from its newest release.
     Update {
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
         server: String,
         /// Require this SHA-256 instead of the published digest.
         #[arg(long, value_name = "HEX")]
@@ -120,8 +122,17 @@ enum LspCommand {
     /// Show the SHA-256 an install would verify, if the release publishes one.
     Checksum {
         /// Server id, e.g. rust-analyzer.
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
         server: String,
     },
+}
+
+/// Registry ids, so clap validates the argument and lists what exists.
+fn lsp_server_ids() -> Vec<&'static str> {
+    rustedharness_core::lsp::registry()
+        .iter()
+        .map(|spec| spec.id)
+        .collect()
 }
 
 #[derive(clap::Args)]

@@ -69,6 +69,9 @@ pub enum Overlay {
     Slash {
         items: Vec<PickerItem>,
         sel: usize,
+        /// Text the chosen value completes. Empty while completing a command
+        /// name; `/lsp install ` while completing a server id.
+        prefix: String,
     },
     Model {
         items: Vec<PickerItem>,
@@ -217,6 +220,44 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/copy", "copy the last assistant reply"),
     ("/quit", "exit"),
 ];
+
+/// Command matches for the typed prefix, e.g. `"/ls"` -> `/lsp ...`.
+fn filtered_commands(text: &str) -> Vec<PickerItem> {
+    if text.contains(' ') {
+        return Vec::new();
+    }
+    let query = text.trim_start_matches('/').to_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|(cmd, _)| {
+            let name = cmd.trim_start_matches('/').split(' ').next().unwrap_or("");
+            name.starts_with(&query)
+        })
+        .map(|(cmd, help)| PickerItem {
+            label: cmd.to_string(),
+            detail: help.to_string(),
+            value: cmd.to_string(),
+        })
+        .collect()
+}
+
+/// Where a server id belongs, plus the part typed so far: `"/lsp install ru"`
+/// -> `("/lsp install ", "ru")`. `None` while the text is not a `/lsp` verb
+/// that takes an id.
+fn lsp_id_query(text: &str) -> Option<(&'static str, &str)> {
+    let rest = text.strip_prefix("/lsp ")?;
+    let (verb, partial) = match rest.split_once(' ') {
+        Some((verb, partial)) => (verb, partial),
+        None => (rest, ""),
+    };
+    let prefix = match verb {
+        "install" => "/lsp install ",
+        "update" => "/lsp update ",
+        "checksum" => "/lsp checksum ",
+        _ => return None,
+    };
+    Some((prefix, partial))
+}
 
 impl App {
     pub fn new(agent: std::sync::Arc<Agent>, config: Config) -> Self {
@@ -1262,7 +1303,7 @@ impl App {
         }
     }
 
-    fn refresh_slash(&mut self) {
+    pub(crate) fn refresh_slash(&mut self) {
         if let Overlay::Slash { .. } = self.overlay {
             self.overlay = Overlay::None;
         }
@@ -1270,31 +1311,64 @@ impl App {
             return;
         }
         let text: String = self.input.iter().collect();
-        if text.starts_with('/') && !text.contains(' ') {
-            let query = text[1..].to_lowercase();
-            let items: Vec<PickerItem> = COMMANDS
-                .iter()
-                .filter(|(cmd, _)| {
-                    let name = cmd.trim_start_matches('/').split(' ').next().unwrap_or("");
-                    name.starts_with(&query)
-                })
-                .map(|(cmd, help)| PickerItem {
-                    label: cmd.to_string(),
-                    detail: help.to_string(),
-                    value: cmd.to_string(),
-                })
-                .collect();
-            if !items.is_empty() {
-                self.overlay = Overlay::Slash { items, sel: 0 };
-            }
+        if !text.starts_with('/') {
+            return;
         }
+        // `/lsp install <id>` completes server ids; every other prefix
+        // completes command names.
+        let (items, prefix) = match lsp_id_query(&text) {
+            Some((prefix, partial)) => (self.lsp_server_items(partial), prefix.to_string()),
+            None => (filtered_commands(&text), String::new()),
+        };
+        if !items.is_empty() {
+            self.overlay = Overlay::Slash {
+                items,
+                sel: 0,
+                prefix,
+            };
+        }
+    }
+
+    /// Registry servers a `/lsp` verb accepts, with what is installed and
+    /// whether the release can be downloaded at all.
+    fn lsp_server_items(&self, partial: &str) -> Vec<PickerItem> {
+        let needle = partial.to_ascii_lowercase();
+        rustedharness_core::lsp::registry()
+            .iter()
+            .filter(|spec| spec.id.to_ascii_lowercase().starts_with(&needle))
+            .map(|spec| {
+                let installed = self
+                    .lsp
+                    .iter()
+                    .find(|status| status.server == spec.id)
+                    .and_then(|status| status.version.clone());
+                let state = match installed {
+                    Some(version) => format!("installed {version}"),
+                    None if spec.asset.is_some() => "downloads from GitHub".to_string(),
+                    None => "install manually".to_string(),
+                };
+                PickerItem {
+                    label: spec.id.to_string(),
+                    detail: format!("{} | {state}", spec.display),
+                    value: spec.id.to_string(),
+                }
+            })
+            .collect()
     }
 
     async fn overlay_confirm(&mut self, op_tx: &UnboundedSender<OpResult>) -> Result<()> {
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         match overlay {
-            Overlay::Slash { items, sel } => {
+            Overlay::Slash { items, sel, prefix } => {
                 if let Some(item) = items.get(sel) {
+                    if !prefix.is_empty() {
+                        // A server id was chosen: finish the line and keep the
+                        // menu closed until the next keystroke.
+                        self.input = format!("{prefix}{}", item.value).chars().collect();
+                        self.cursor = self.input.len();
+                        self.slash_dismissed = true;
+                        return Ok(());
+                    }
                     let cmd = item.value.clone();
                     if let Some(cut) = cmd.find('<') {
                         self.input = cmd[..cut].trim_end().chars().collect();
@@ -1924,6 +1998,85 @@ mod tests {
         ] {
             assert!(COMMANDS.iter().any(|(command, _)| *command == sub), "{sub}");
         }
+    }
+
+    #[test]
+    fn lsp_id_query_splits_verb_and_partial() {
+        assert_eq!(
+            lsp_id_query("/lsp install ru"),
+            Some(("/lsp install ", "ru"))
+        );
+        assert_eq!(lsp_id_query("/lsp update "), Some(("/lsp update ", "")));
+        assert_eq!(
+            lsp_id_query("/lsp checksum lua"),
+            Some(("/lsp checksum ", "lua"))
+        );
+        assert_eq!(lsp_id_query("/lsp install"), Some(("/lsp install ", "")));
+        for text in ["/lsp", "/lsp bogus x", "/model ru", "/install ru"] {
+            assert_eq!(lsp_id_query(text), None, "{text}");
+        }
+    }
+
+    /// Typing after the verb offers server ids instead of command names.
+    #[test]
+    fn server_ids_complete_after_the_verb() {
+        let mut app = crate::preview::demo_app();
+        app.input = "/lsp install rust".chars().collect();
+        app.cursor = app.input.len();
+        app.refresh_slash();
+        let Overlay::Slash { items, prefix, .. } = &app.overlay else {
+            panic!("expected the completion menu");
+        };
+        assert_eq!(prefix, "/lsp install ");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "rust-analyzer");
+    }
+
+    #[test]
+    fn the_verb_alone_lists_every_server() {
+        let mut app = crate::preview::demo_app();
+        app.input = "/lsp checksum".chars().collect();
+        app.cursor = app.input.len();
+        app.refresh_slash();
+        let Overlay::Slash { items, prefix, .. } = &app.overlay else {
+            panic!("expected the completion menu");
+        };
+        assert_eq!(prefix, "/lsp checksum ");
+        assert_eq!(items.len(), rustedharness_core::lsp::registry().len());
+    }
+
+    #[test]
+    fn confirming_an_id_fills_the_command_line() {
+        let mut app = crate::preview::demo_app();
+        app.input = "/lsp install lua".chars().collect();
+        app.cursor = app.input.len();
+        app.refresh_slash();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(app.overlay_confirm(&tx))
+            .unwrap();
+        assert_eq!(
+            app.input.iter().collect::<String>(),
+            "/lsp install lua-language-server"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(
+            app.slash_dismissed,
+            "the menu stays closed until the next key"
+        );
+    }
+
+    #[test]
+    fn ids_do_not_leak_into_other_commands() {
+        let mut app = crate::preview::demo_app();
+        app.input = "/model ru".chars().collect();
+        app.cursor = app.input.len();
+        app.refresh_slash();
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "no id completion for /model"
+        );
     }
 
     #[test]

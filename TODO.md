@@ -1,5 +1,28 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：lsp 服务器 id 的自动补全（2026-11-15 第十九轮）
+
+要求：给 lsp 的 id 加自动补全。
+
+**TUI**：斜杠补全原来只补命令名（输入里有空格就不补）。现在分两级：
+- 命令名：`/` 开头、无空格时按首 token 过滤，行为不变；
+- 服务器 id：`/lsp install|update|checksum` 之后补 `lsp::registry()` 的 id。
+  - `lsp_id_query()` 把 `/lsp install ru` 拆成 `("/lsp install ", "ru")`；
+    只写 `/lsp install`（还没敲空格）也直接给全量列表；
+  - 列表项显示 `display | installed <ver>` / `downloads from GitHub` / `install manually`，
+    已装版本来自 `self.lsp` 里的 `ServerStatus`；
+  - `Overlay::Slash` 新增 `prefix` 字段区分两级：选中 id 后把整行补成
+    `/lsp install rust-analyzer` 并关闭菜单（`slash_dismissed`），下一次按键再重新过滤；
+  - 面板标题按级别显示 `commands` / `servers`。
+- 新增测试：`lsp_id_query_splits_verb_and_partial`、`server_ids_complete_after_the_verb`、
+  `the_verb_alone_lists_every_server`、`confirming_an_id_fills_the_command_line`、
+  `ids_do_not_leak_into_other_commands`，以及预览 `preview_lsp_id_completion`
+  （`--ignored`，写 `target/ui-preview-lsp-ids.json`，实机渲染确认 16 个 id 分页与对齐）。
+- `demo_app()` 改为 `pub(crate)`，`App::refresh_slash()` 改为 `pub(crate)` 供预览/测试驱动。
+
+**CLI**：`lsp install|update|checksum` 的 `<SERVER>` 用
+`PossibleValuesParser::new(lsp_server_ids())`，拼错直接列出全部合法 id，`--help` 里也带上。
+
 ## 已完成：TUI 的 LSP 命令全部收进 /lsp 子命令（2026-11-15 第十八轮）
 
 要求：把 `/install` 并进 `/lsp install`，其他 LSP 相关命令也合并成 `lsp` 子命令。

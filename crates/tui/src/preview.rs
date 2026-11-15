@@ -32,7 +32,7 @@ impl Backend for Stub {
     }
 }
 
-fn demo_app() -> App {
+pub(crate) fn demo_app() -> App {
     let config = Config {
         model: "anthropic/claude-sonnet-4.5".into(),
         compact_model: "anthropic/claude-haiku-4.5".into(),
@@ -222,6 +222,7 @@ fn preview() {
 fn preview_picker() {
     let mut app = demo_app();
     app.overlay = Overlay::Slash {
+        prefix: String::new(),
         items: vec![
             PickerItem {
                 label: "/help".into(),
@@ -410,6 +411,18 @@ fn preview_lsp_panel() {
     ];
     app.overlay = Overlay::Lsp;
     parent_dump(&mut app, "ui-preview-lsp.json", 100, 20);
+}
+
+/// Completing a server id after `/lsp install`: the menu switches from command
+/// names to registry ids and says what each one needs.
+#[test]
+#[ignore = "writes target/ui-preview-lsp-ids.json; run on demand"]
+fn preview_lsp_id_completion() {
+    let mut app = demo_app();
+    app.input = "/lsp install ".chars().collect();
+    app.cursor = app.input.len();
+    app.refresh_slash();
+    parent_dump(&mut app, "ui-preview-lsp-ids.json", 100, 24);
 }
 
 #[test]
@@ -946,11 +959,13 @@ fn narrowing_a_picker_filter_keeps_the_overlay_identity() {
         value: label.into(),
     };
     app.overlay = Overlay::Slash {
+        prefix: String::new(),
         items: vec![item("/help"), item("/model"), item("/sessions")],
         sel: 0,
     };
     let wide = app.overlay_key();
     app.overlay = Overlay::Slash {
+        prefix: String::new(),
         items: vec![item("/model")],
         sel: 0,
     };

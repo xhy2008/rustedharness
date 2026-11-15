@@ -383,6 +383,11 @@ is a top-level slash command:
 | `/lsp update <id>` | re-install from the newest release |
 | `/lsp checksum <id>` | digest an install would verify |
 
+Typing a space after `install`, `update` or `checksum` completes server ids
+from the registry and marks each one installed, downloadable, or manual. On the
+CLI every subcommand validates the id against the same registry, so a typo
+prints the valid list.
+
 `lsp checksum` is informational: installation performs the same lookup and
 verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
 quota; it is never required for a normal install.

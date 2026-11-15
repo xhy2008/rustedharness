@@ -933,7 +933,14 @@ fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
 fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
     match &app.overlay {
         Overlay::None => {}
-        Overlay::Slash { items, sel } => draw_picker(frame, body, "commands", items, *sel, ""),
+        Overlay::Slash { items, sel, prefix } => {
+            let title = if prefix.is_empty() {
+                "commands"
+            } else {
+                "servers"
+            };
+            draw_picker(frame, body, title, items, *sel, "")
+        }
         Overlay::Model {
             items,
             sel,
