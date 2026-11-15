@@ -409,7 +409,11 @@ fn selection_is_linear_not_rectangular() {
     let text = app.selection_text().expect("selection text");
     let lines: Vec<&str> = text.lines().collect();
 
-    assert_eq!(lines.len(), bottom - top + 1, "one output line per screen row");
+    assert_eq!(
+        lines.len(),
+        bottom - top + 1,
+        "one output line per screen row"
+    );
     assert_eq!(
         lines[0],
         crate::app::slice_columns(&rows[top], 6, usize::MAX).trim_end(),
@@ -488,5 +492,43 @@ fn tool_output_cannot_desync_the_screen() {
             "control character reached a span: {text:?}"
         );
         assert!(line.width() <= limit, "row wider than the area: {text:?}");
+    }
+}
+
+/// Scrolling must stay an ordinary diff. Forcing a full repaint per wheel step
+/// makes the screen flash, because the erase is flushed before the new frame.
+#[test]
+fn scrolling_does_not_force_a_full_repaint() {
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    let mut app = demo_app();
+    app.mouse_area = Rect::new(0, 0, 80, 20);
+    app.scroll = 10;
+    app.follow = false;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    for (kind, expected) in [
+        (MouseEventKind::ScrollUp, 7),
+        (MouseEventKind::ScrollDown, 10),
+    ] {
+        runtime.block_on(app.handle_event(
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &tx,
+        ));
+        assert_eq!(app.scroll, expected);
+        assert!(
+            !app.needs_repaint,
+            "scrolling must not ask for a full-screen clear"
+        );
     }
 }

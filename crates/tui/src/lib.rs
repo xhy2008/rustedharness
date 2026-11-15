@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
-use crossterm::terminal::{DisableLineWrap, EnableLineWrap};
+use crossterm::terminal::{
+    BeginSynchronizedUpdate, DisableLineWrap, EnableLineWrap, EndSynchronizedUpdate,
+};
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::Config;
 use rustedharness_core::protocol::HarnessEvent;
@@ -74,6 +76,36 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
     result
 }
 
+/// Draw one frame.
+///
+/// Everything - the optional clear included - happens inside a synchronized
+/// update so the terminal applies it as one atomic repaint. Without that the
+/// erase lands one write before the new content, and every full repaint reads
+/// as a black flash.
+///
+/// `force_clear` is only for the cases where the terminal's cells can no
+/// longer be trusted to match the frame buffer: resize, overlay change,
+/// session switch, or an explicit Ctrl+G.
+fn paint(terminal: &mut ratatui::DefaultTerminal, app: &mut App, force_clear: bool) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, BeginSynchronizedUpdate);
+    let mut outcome: Result<()> = Ok(());
+    if force_clear || std::mem::take(&mut app.needs_repaint) {
+        app.lines_sig = (usize::MAX, 0);
+        outcome = terminal.clear().map_err(anyhow::Error::from);
+    }
+    if outcome.is_ok() {
+        outcome = terminal
+            .draw(|frame| render::draw(app, frame))
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+    }
+    // Always close the block: leaving it open would freeze the screen until
+    // the next write finally flushes it.
+    let _ = execute!(stdout, EndSynchronizedUpdate);
+    outcome
+}
+
 /// Shut the agent down but never longer than a couple of seconds: a wedged
 /// LSP/MCP child must not be able to keep the TUI (and thus the terminal in
 /// raw/alt-screen mode) alive after the user has asked to quit.
@@ -118,13 +150,7 @@ async fn event_loop(
     const RESIZE_SETTLE: Duration = Duration::from_millis(150);
     let mut resize_at: Option<Instant> = None;
     let mut resize_dirty = false;
-    let mut last_follow = app.follow;
     loop {
-        // Any user-driven scroll invalidates nothing we can see, but it moves
-        // the transcript window; repainting the whole screen costs one write
-        // and guarantees no stale cell survives the jump.
-        let scrolled = app.follow != last_follow;
-        last_follow = app.follow;
         let settling = resize_at.is_some_and(|t| t.elapsed() < RESIZE_SETTLE);
         // Force a full repaint when the overlay changes (opens, closes, or
         // switches to a different size/type). Incremental diffs can leave stale
@@ -134,13 +160,8 @@ async fn event_loop(
         let overlay_changed = overlay != last_overlay;
         last_overlay = overlay;
         if !settling {
-            let repaint = std::mem::take(&mut app.needs_repaint);
-            if overlay_changed || resize_dirty || scrolled || repaint {
-                resize_dirty = false;
-                app.lines_sig = (usize::MAX, 0);
-                terminal.clear()?;
-            }
-            terminal.draw(|frame| render::draw(app, frame))?;
+            paint(terminal, app, overlay_changed || resize_dirty)?;
+            resize_dirty = false;
         }
         if let Some(pending) = app.pending.take() {
             let label = pending
