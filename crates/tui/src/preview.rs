@@ -130,7 +130,13 @@ fn demo_app() -> App {
         EntryKind::Assistant,
         "",
         "Both folds are in place: thinking collapses itself when the turn moves on, and every \
-         tool row carries its own expand state.",
+         tool row carries its own expand state.\n\
+         \n\
+         | check | result | note |\n\
+         | --- | :---: | ---: |\n\
+         | folds on finish | yes | 3 tests |\n\
+         | click to toggle | yes | owner map |\n\
+         | scroll costs | 0 bytes | no repaint |",
     );
     app.push(
         EntryKind::Notice,
@@ -198,7 +204,7 @@ fn dump(app: &mut App, width: u16, height: u16) -> String {
 #[ignore = "writes target/ui-preview.json; run on demand"]
 fn preview() {
     let mut app = demo_app();
-    let json = dump(&mut app, 108, 44);
+    let json = dump(&mut app, 108, 52);
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-preview.json");
     std::fs::write(&path, json).expect("write preview");
@@ -921,4 +927,72 @@ fn narrowing_a_picker_filter_keeps_the_overlay_identity() {
     );
     app.overlay = Overlay::None;
     assert_ne!(wide, app.overlay_key(), "closing is a change");
+}
+
+/// The models write tables constantly. Parsing and column layout come from
+/// `tui-markdown`; what this asserts is that the pipe source is gone and the
+/// grid fits the pane.
+#[test]
+fn markdown_tables_render_as_a_grid() {
+    let mut app = demo_app();
+    app.entries.clear();
+    app.push(
+        EntryKind::Assistant,
+        "",
+        "| check | result |\n| --- | :---: |\n| folds | yes |\n| scroll | 0 bytes |",
+    );
+
+    let width = 60u16;
+    dump(&mut app, width, 16);
+    let rows: Vec<String> = app
+        .lines_cache
+        .borrow()
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+
+    assert!(
+        rows.iter().any(|row| row.contains('┌') && row.contains('┬')),
+        "no table border: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("│ check")),
+        "header cell missing: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("│ 0 bytes │")),
+        "body cell missing: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("| ---")),
+        "raw markdown source leaked through: {rows:?}"
+    );
+    for row in &rows {
+        assert!(
+            ratatui::text::Line::raw(row.clone()).width() <= width as usize,
+            "table row overflows the pane: {row:?}"
+        );
+    }
+}
+
+/// A wide table has to shrink to the pane instead of running off the right
+/// edge - the whole point of handing the width to the renderer.
+#[test]
+fn a_table_too_wide_for_the_pane_is_wrapped() {
+    let mut app = demo_app();
+    app.entries.clear();
+    app.push(
+        EntryKind::Assistant,
+        "",
+        "| a much longer heading | another long heading | third |\n\
+         | --- | --- | --- |\n\
+         | a cell with a good deal of prose in it | and another one | x |",
+    );
+
+    let width = 44u16;
+    dump(&mut app, width, 20);
+    for line in app.lines_cache.borrow().iter() {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line.width() <= width as usize, "row overflows: {text:?}");
+    }
 }

@@ -1,5 +1,25 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：markdown 渲染改用 tui-markdown（2026-11-15 第十三轮）
+
+自己写的那套（标题/列表/引用/围栏/行内样式）只覆盖了模型实际会写的语法的一小部分，
+表格直接躺平。改成依赖 `tui-markdown` 0.3（pulldown-cmark，MIT/Apache）：
+
+- `crates/tui/src/markdown.rs` 只做三件事：把库的 `StyleSheet` 映射到我们的调色板；
+  把 `Line.style` 合并进 span 并补上默认前景色（库把元素样式放在 line 上）；按转录宽度
+  折行。
+- 表格、任务列表、删除线、脚注、GFM alert 全部由库处理，`Options::table_width` 负责
+  让表格收缩进面板宽度。
+- **禁用 `highlight-code`**（默认特性）：会拉进 syntect，编译时间翻倍，而我们的代码块
+  只需要一块底色。没有高亮时库走 `StyleSheet::code()`，正好是我们要的。
+- 自写换行改成按词断行（`wrap_words`）：中文没有空格时按字符断，长 URL 也强制断；
+  代码块整行补底色到面板宽度，保持"一整块"的观感。
+- 删掉 `render.rs` 里的 `heading/is_rule/bullet/inline_spans/text_flow` 与手写表格实验。
+
+测试：`markdown_tables_render_as_a_grid`（边框、表头、正文、不残留 `| ---`、不超宽）、
+`a_table_too_wide_for_the_pane_is_wrapped`。
+
+
 ## 已完成：输入/开面板不再整屏重绘（2026-11-15 第十二轮）
 
 现象：每敲一个字、每次打开命令面板，整个窗口闪一下。

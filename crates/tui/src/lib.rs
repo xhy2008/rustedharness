@@ -8,6 +8,7 @@
 
 mod app;
 mod entries;
+mod markdown;
 #[cfg(test)]
 mod preview;
 mod render;
