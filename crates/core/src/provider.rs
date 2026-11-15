@@ -35,19 +35,192 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// One image attached to a message, base64 encoded exactly as providers and
+/// pi's session format store it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImagePart {
+    pub mime_type: String,
+    /// Base64 payload without the `data:` prefix.
+    pub data: String,
+}
+
+impl ImagePart {
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.data)
+    }
+
+    pub fn from_data_url(url: &str) -> Option<Self> {
+        let rest = url.strip_prefix("data:")?;
+        let (meta, data) = rest.split_once(',')?;
+        let mime_type = meta.strip_suffix(";base64").unwrap_or(meta);
+        Some(Self {
+            mime_type: mime_type.to_string(),
+            data: data.to_string(),
+        })
+    }
+
+    /// Rough decoded size, for display only.
+    pub fn bytes(&self) -> usize {
+        self.data.len() * 3 / 4
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
     pub role: Role,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Images carried with the message. Kept apart from `content` so the plain
+    /// text path stays a `String`, and emitted as content parts on the wire.
+    pub images: Vec<ImagePart>,
+}
+
+/// Content parts, in the OpenAI-compatible shape every provider we talk to
+/// accepts for user messages.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum OutPart<'a> {
+    #[serde(rename = "text")]
+    Text { text: &'a str },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OutImageUrl },
+}
+
+#[derive(Serialize)]
+struct OutImageUrl {
+    url: String,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        // Only user messages are sent as a parts array: tool and assistant
+        // content is a plain string in every gateway we target.
+        if self.role == Role::User && !self.images.is_empty() {
+            let mut parts: Vec<OutPart<'_>> = Vec::new();
+            if let Some(text) = self.content.as_deref() {
+                if !text.is_empty() {
+                    parts.push(OutPart::Text { text });
+                }
+            }
+            for image in &self.images {
+                parts.push(OutPart::ImageUrl {
+                    image_url: OutImageUrl {
+                        url: image.data_url(),
+                    },
+                });
+            }
+            map.serialize_entry("content", &parts)?;
+        } else if let Some(content) = &self.content {
+            map.serialize_entry("content", content)?;
+        }
+        if let Some(reasoning) = &self.reasoning_content {
+            map.serialize_entry("reasoning_content", reasoning)?;
+        }
+        if let Some(calls) = &self.tool_calls {
+            map.serialize_entry("tool_calls", calls)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        if let Some(name) = &self.name {
+            map.serialize_entry("name", name)?;
+        }
+        map.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatMessageWire {
+    role: Role,
+    #[serde(default)]
+    content: Option<WireContent>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireContent {
+    Text(String),
+    Parts(Vec<WirePart>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum WirePart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: WireImageUrl },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct WireImageUrl {
+    url: String,
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ChatMessageWire::deserialize(deserializer)?;
+        let mut content = None;
+        let mut images = Vec::new();
+        match wire.content {
+            Some(WireContent::Text(text)) => content = Some(text),
+            Some(WireContent::Parts(parts)) => {
+                let mut text = String::new();
+                for part in parts {
+                    match part {
+                        WirePart::Text { text: chunk } => {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&chunk);
+                        }
+                        WirePart::ImageUrl { image_url } => {
+                            if let Some(image) = ImagePart::from_data_url(&image_url.url) {
+                                images.push(image);
+                            }
+                        }
+                        WirePart::Unknown => {}
+                    }
+                }
+                if !text.is_empty() {
+                    content = Some(text);
+                }
+            }
+            None => {}
+        }
+        Ok(Self {
+            role: wire.role,
+            content,
+            reasoning_content: wire.reasoning_content,
+            tool_calls: wire.tool_calls,
+            tool_call_id: wire.tool_call_id,
+            name: wire.name,
+            images,
+        })
+    }
 }
 
 impl ChatMessage {
@@ -63,6 +236,15 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: Some(content.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImagePart>) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(content.into()),
+            images,
             ..Default::default()
         }
     }

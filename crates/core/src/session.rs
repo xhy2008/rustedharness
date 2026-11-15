@@ -33,7 +33,10 @@ const FORMAT_VERSION: u32 = 3;
 /// Entry kinds that are ours, carried in pi `custom` entries: pi keeps them in
 /// the file and ignores them in the model context.
 const CUSTOM_TODOS: &str = "rustedharness.todos";
-const CUSTOM_COMPACT_MODEL: &str = "rustedharness.compact_model";
+/// One entry with both model choices. We deliberately do not write
+/// `model_change` records: a session has exactly one current model and one
+/// compaction model, and that is all we restore.
+const CUSTOM_MODELS: &str = "rustedharness.models";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMeta {
@@ -47,6 +50,8 @@ pub struct SessionMeta {
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadedSession {
+    /// File the session came from; resuming appends to this exact path.
+    pub path: PathBuf,
     pub meta: Option<SessionMeta>,
     pub messages: Vec<ChatMessage>,
     pub todos: Vec<TodoItem>,
@@ -101,7 +106,9 @@ impl SessionWriter {
     ) -> Result<Self> {
         let dir = cfg.dir.clone().unwrap_or_else(Config::sessions_dir);
         let id = uuid::Uuid::new_v4().to_string();
-        let path = dir.join(project_dir(cwd)).join(format!("{id}.jsonl"));
+        let path = dir
+            .join(project_dir(cwd))
+            .join(format!("{}_{id}.jsonl", file_timestamp()));
         let (provider, model) = split_model(agent_model);
         let mut writer = Self {
             id: id.clone(),
@@ -172,7 +179,12 @@ impl SessionWriter {
     }
 
     /// Append a user message. pi stores user content as a plain string.
+    /// Frontend commands and empty input are not conversation, so they are
+    /// never written.
     pub fn user(&mut self, text: &str) -> Result<()> {
+        if text.trim().is_empty() || is_command_input(text) {
+            return Ok(());
+        }
         self.append(EntryKind::Message {
             message: AgentMessage::User {
                 content: Content::Text(text.to_string()),
@@ -197,6 +209,12 @@ impl SessionWriter {
                 });
             }
         }
+        for image in &message.images {
+            content.push(Block::Image {
+                data: image.data.clone(),
+                mime_type: image.mime_type.clone(),
+            });
+        }
         for call in message.tool_calls.iter().flatten() {
             content.push(Block::ToolCall {
                 id: call.id.clone(),
@@ -204,6 +222,11 @@ impl SessionWriter {
                 arguments: serde_json::from_str(&call.function.arguments)
                     .unwrap_or_else(|_| Value::Object(Default::default())),
             });
+        }
+        // An empty assistant message is what pi records for a failed API call;
+        // it carries nothing and would only bloat the context on resume.
+        if content.is_empty() {
+            return Ok(());
         }
         self.append(EntryKind::Message {
             message: AgentMessage::Assistant {
@@ -241,16 +264,57 @@ impl SessionWriter {
 
     pub fn models(&mut self, agent: &str, compact: &str) -> Result<()> {
         let (provider, model) = split_model(agent);
-        self.provider = provider.clone();
-        self.model = model.clone();
-        self.append(EntryKind::ModelChange {
-            provider,
-            model_id: model,
-        })?;
+        self.provider = provider;
+        self.model = model;
+        let data = serde_json::json!({ "current": agent, "compact": compact });
+        // A session has one current model, not a trail of switches: rewrite the
+        // existing entry instead of appending another one.
+        if self.rewrite_custom(CUSTOM_MODELS, &data)? {
+            return Ok(());
+        }
         self.append(EntryKind::Custom {
-            custom_type: CUSTOM_COMPACT_MODEL.to_string(),
-            data: Some(Value::String(compact.to_string())),
+            custom_type: CUSTOM_MODELS.to_string(),
+            data: Some(data),
         })
+    }
+
+    /// Replace the newest `custom` entry of `custom_type` with new data,
+    /// swapping the file atomically. Returns false when there is none yet.
+    fn rewrite_custom(&mut self, custom_type: &str, data: &Value) -> Result<bool> {
+        if let Some(entry) = self.pending.iter_mut().rev().find(|entry| {
+            matches!(&entry.kind, EntryKind::Custom { custom_type: kind, .. } if kind == custom_type)
+        }) {
+            entry.kind = EntryKind::Custom {
+                custom_type: custom_type.to_string(),
+                data: Some(data.clone()),
+            };
+            entry.timestamp = now_iso();
+            return Ok(true);
+        }
+        if self.file.is_none() {
+            return Ok(false);
+        }
+        let raw = std::fs::read_to_string(&self.path)?;
+        let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+        let Some(index) = lines.iter().rposition(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|value| {
+                value.get("type").and_then(Value::as_str) == Some("custom")
+                    && value.get("customType").and_then(Value::as_str) == Some(custom_type)
+            })
+        }) else {
+            return Ok(false);
+        };
+        let mut entry: Value = serde_json::from_str(&lines[index])?;
+        entry["data"] = data.clone();
+        entry["timestamp"] = Value::String(now_iso());
+        lines[index] = serde_json::to_string(&entry)?;
+        let temp = self.path.with_extension("jsonl.tmp");
+        std::fs::write(&temp, lines.join("\n") + "\n")?;
+        // The append handle points at the file this rename replaces.
+        drop(self.file.take());
+        std::fs::rename(&temp, &self.path)?;
+        self.file = Some(OpenOptions::new().append(true).open(&self.path)?);
+        Ok(true)
     }
 
     /// Record provider-reported usage for the current model.
@@ -430,16 +494,13 @@ impl SessionStore {
         out
     }
 
-    /// Load by id or unique id prefix.
+    /// Load by id or unique id prefix. pi prefixes the file name with a
+    /// timestamp, so the id is the part after the last `_`.
     pub fn load(&self, id: &str) -> Result<LoadedSession> {
         let matches: Vec<PathBuf> = self
             .files()
             .into_iter()
-            .filter(|path| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem == id || stem.starts_with(id))
-            })
+            .filter(|path| session_id(path).is_some_and(|stem| stem == id || stem.starts_with(id)))
             .collect();
         match matches.len() {
             0 => Err(HarnessError::tool(
@@ -466,7 +527,7 @@ impl SessionStore {
             ));
         };
         for path in self.files() {
-            if path.file_stem().and_then(|s| s.to_str()) == Some(meta.id.as_str()) {
+            if session_id(&path).as_deref() == Some(meta.id.as_str()) {
                 std::fs::remove_file(path)?;
                 return Ok(());
             }
@@ -642,6 +703,34 @@ enum AgentMessage {
         content: Content,
         timestamp: i64,
     },
+    /// A `!command` run inside pi's TUI. pi converts it to a user message for
+    /// the model, so a pi session only replays faithfully if we do too.
+    #[serde(rename = "bashExecution")]
+    BashExecution {
+        command: String,
+        #[serde(default)]
+        output: String,
+        #[serde(rename = "exitCode", default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        cancelled: bool,
+        #[serde(rename = "excludeFromContext", default)]
+        exclude_from_context: bool,
+        timestamp: i64,
+    },
+    /// An extension-injected message (pi v3 renamed `hookMessage` to `custom`).
+    #[serde(rename = "custom")]
+    Custom {
+        content: Content,
+        #[serde(rename = "customType", default)]
+        custom_type: String,
+        timestamp: i64,
+    },
+    /// Any role pi adds later. Skipping it keeps the rest of the session, where
+    /// failing the entry would look like a torn write and mark the file
+    /// truncated.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -658,6 +747,39 @@ impl Default for Content {
 }
 
 impl Content {
+    /// True when the message carries nothing the model could read. pi stores a
+    /// failed API call as an empty assistant message.
+    fn is_empty(&self) -> bool {
+        match self {
+            Content::Text(text) => text.trim().is_empty(),
+            Content::Blocks(blocks) => blocks.iter().all(|block| match block {
+                Block::Text { text } => text.trim().is_empty(),
+                Block::Thinking { thinking } => thinking.trim().is_empty(),
+                Block::Image { data, .. } => data.is_empty(),
+                Block::ToolCall { .. } => false,
+                Block::Unknown => true,
+            }),
+        }
+    }
+
+    fn images(&self) -> Vec<crate::provider::ImagePart> {
+        let Content::Blocks(blocks) = self else {
+            return Vec::new();
+        };
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Image { data, mime_type } if !data.is_empty() => {
+                    Some(crate::provider::ImagePart {
+                        mime_type: mime_type.clone(),
+                        data: data.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn text(&self) -> String {
         match self {
             Content::Text(text) => text.clone(),
@@ -839,6 +961,7 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
     };
 
     Ok(LoadedSession {
+        path: path.to_path_buf(),
         truncated_tail,
         ..replay(&header, &entries)
     })
@@ -846,7 +969,10 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
 
 /// Walk the active branch and rebuild what the model would see.
 fn replay(header: &Header, entries: &[Entry]) -> LoadedSession {
-    let chain = active_chain(entries);
+    // Linear on purpose: we do not model pi's branch tree. A session is the
+    // entries in file order, and `parentId` is written only so pi can read
+    // what we wrote.
+    let chain: Vec<&Entry> = entries.iter().collect();
 
     // `context_edit` applies to entries earlier in the branch, so edits are
     // collected first: the latest one for a target wins.
@@ -918,9 +1044,14 @@ fn replay(header: &Header, entries: &[Entry]) -> LoadedSession {
                         todos = items;
                     }
                 }
-                CUSTOM_COMPACT_MODEL => {
-                    if let Some(name) = data.as_str() {
-                        compact_model = Some(name.to_string());
+                CUSTOM_MODELS => {
+                    if let Some(current) = data.get("current").and_then(Value::as_str) {
+                        if !current.is_empty() {
+                            agent_model = Some(current.to_string());
+                        }
+                    }
+                    if let Some(compact) = data.get("compact").and_then(Value::as_str) {
+                        compact_model = Some(compact.to_string());
                     }
                 }
                 _ => {}
@@ -946,12 +1077,12 @@ fn replay(header: &Header, entries: &[Entry]) -> LoadedSession {
         match &entry.kind {
             EntryKind::Compaction { summary, .. } => {
                 messages.push(ChatMessage::user(format!(
-                    "The earlier conversation was compacted. Summary://n//n{summary}"
+                    "{COMPACTION_PREFIX}{summary}{SUMMARY_SUFFIX}"
                 )));
             }
             EntryKind::BranchSummary { summary, .. } => {
                 messages.push(ChatMessage::user(format!(
-                    "A parallel branch was abandoned. Summary://n//n{summary}"
+                    "{BRANCH_PREFIX}{summary}{SUMMARY_SUFFIX}"
                 )));
             }
             EntryKind::CustomMessage { content, .. } => {
@@ -979,6 +1110,7 @@ fn replay(header: &Header, entries: &[Entry]) -> LoadedSession {
     }
 
     LoadedSession {
+        path: PathBuf::new(),
         meta: Some(SessionMeta {
             id: header.id.clone(),
             cwd: header.cwd.clone(),
@@ -1012,16 +1144,73 @@ fn merge_usage(
     }
 }
 
+/// Prefixes pi puts around a compaction summary. Using its exact wording keeps
+/// the context identical whichever tool resumes the session.
+const COMPACTION_PREFIX: &str = "The conversation history before this point was \
+compacted into the following summary:\n\n<summary>\n";
+const BRANCH_PREFIX: &str = "The following is a summary of a branch that this \
+conversation came back from:\n\n<summary>\n";
+const SUMMARY_SUFFIX: &str = "\n</summary>";
+
+/// A user line that is a frontend command (`/model`, `/settings`,
+/// `/compact ...`) rather than a prompt. Both tools handle commands outside the
+/// model context, but sessions still contain them.
+fn is_command_input(text: &str) -> bool {
+    let Some(rest) = text.trim().strip_prefix('/') else {
+        return false;
+    };
+    let name = rest.split([' ', '\n', '\t']).next().unwrap_or("");
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// pi's rendition of a `!command` result, verbatim.
+fn bash_execution_text(
+    command: &str,
+    output: &str,
+    exit_code: Option<i32>,
+    cancelled: bool,
+) -> String {
+    let mut text = format!("Ran `{command}`\n");
+    if output.is_empty() {
+        text.push_str("(no output)");
+    } else {
+        text.push_str(&format!("```\n{output}\n```"));
+    }
+    if cancelled {
+        text.push_str("\n\n(command cancelled)");
+    } else if let Some(code) = exit_code {
+        if code != 0 {
+            text.push_str(&format!("\n\nCommand exited with code {code}"));
+        }
+    }
+    text
+}
+
 /// Convert one stored message, collecting the model it names.
 fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<ChatMessage> {
     match message {
-        AgentMessage::User { content, .. } => Some(ChatMessage::user(content.text())),
+        AgentMessage::User { content, .. } => {
+            let text = content.text();
+            let images = content.images();
+            if images.is_empty() && (text.trim().is_empty() || is_command_input(&text)) {
+                return None;
+            }
+            Some(ChatMessage::user_with_images(text, images))
+        }
         AgentMessage::Assistant {
             content,
             provider,
             model,
             ..
         } => {
+            // A failed API call is stored as an assistant message with no
+            // content; it never entered the conversation.
+            if content.is_empty() {
+                return None;
+            }
             if !provider.is_empty() && !model.is_empty() {
                 agent_model.get_or_insert_with(|| join_model(provider, model));
             }
@@ -1045,11 +1234,34 @@ fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<C
         } => {
             let mut chat = ChatMessage::tool(tool_call_id, content.text());
             chat.name = Some(tool_name.clone());
-            chat.content = Some(content.text());
+            chat.images = content.images();
             let _ = is_error;
             Some(chat)
         }
-        AgentMessage::System { .. } => None,
+        AgentMessage::BashExecution {
+            command,
+            output,
+            exit_code,
+            cancelled,
+            exclude_from_context,
+            ..
+        } => {
+            if *exclude_from_context {
+                return None;
+            }
+            Some(ChatMessage::user(bash_execution_text(
+                command, output, *exit_code, *cancelled,
+            )))
+        }
+        AgentMessage::Custom { content, .. } => {
+            let text = content.text();
+            let images = content.images();
+            if text.trim().is_empty() && images.is_empty() {
+                return None;
+            }
+            Some(ChatMessage::user_with_images(text, images))
+        }
+        AgentMessage::System { .. } | AgentMessage::Other => None,
     }
 }
 
@@ -1078,30 +1290,11 @@ fn edited_message(message: &AgentMessage, replacement: &Value) -> Option<ChatMes
             chat.content = Some(parsed.text());
             Some(chat)
         }
-        AgentMessage::System { .. } => None,
+        AgentMessage::System { .. }
+        | AgentMessage::BashExecution { .. }
+        | AgentMessage::Custom { .. }
+        | AgentMessage::Other => None,
     }
-}
-
-/// Follow `parentId` from the newest entry back to the root.
-fn active_chain(entries: &[Entry]) -> Vec<&Entry> {
-    let by_id: HashMap<&str, &Entry> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
-    let Some(mut cursor) = entries.last() else {
-        return Vec::new();
-    };
-    let mut chain = Vec::new();
-    // Bounded so a corrupt file cannot spin forever.
-    for _ in 0..=entries.len() {
-        chain.push(cursor);
-        let Some(parent) = cursor.parent_id.as_deref() else {
-            break;
-        };
-        let Some(next) = by_id.get(parent) else {
-            break;
-        };
-        cursor = next;
-    }
-    chain.reverse();
-    chain
 }
 
 /// Last entry id plus the message ids in file order, for appending.
@@ -1130,17 +1323,25 @@ fn scan_chain(raw: &str) -> (Option<String>, Vec<String>) {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// pi's project folder: drop a leading separator, then turn `/`, `\` and `:`
-/// into `-`.
+/// pi's project folder: drop a leading separator, turn `/`, `\` and `:` into
+/// `-`, and wrap the result in `--` (`C:\work\app` -> `--C--work-app--`).
 fn project_dir(cwd: &Path) -> String {
     let raw = cwd.to_string_lossy();
-    raw.trim_start_matches(['/', '\\'])
+    let encoded: String = raw
+        .trim_start_matches(['/', '\\'])
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' => '-',
             other => other,
         })
-        .collect()
+        .collect();
+    format!("--{encoded}--")
+}
+
+/// pi names a session file `<ISO timestamp>_<id>.jsonl`, with `:` and `.`
+/// replaced by `-`. Matching the shape keeps one directory usable by both.
+fn file_timestamp() -> String {
+    now_iso().replace([':', '.'], "-")
 }
 
 fn split_model(model: &str) -> (String, String) {
@@ -1156,6 +1357,16 @@ fn join_model(provider: &str, model: &str) -> String {
     } else {
         format!("{provider}/{model}")
     }
+}
+
+/// The session id encoded in a file name: pi writes `<timestamp>_<id>.jsonl`,
+/// we write `<timestamp>_<id>.jsonl` too, so the id is the last `_` segment.
+fn session_id(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    Some(match stem.rsplit_once('_') {
+        Some((_, id)) => id.to_string(),
+        None => stem.to_string(),
+    })
 }
 
 fn new_id() -> String {
@@ -1208,20 +1419,20 @@ mod tests {
             .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
         assert_eq!(header["cwd"], cwd.to_string_lossy().to_string());
 
-        let model: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-        assert_eq!(model["type"], "model_change");
-        assert_eq!(model["provider"], "anthropic");
-        assert_eq!(model["modelId"], "claude-sonnet-4.5");
-        assert!(model["parentId"].is_null());
-
-        let compact: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-        assert_eq!(compact["type"], "custom");
-        assert_eq!(compact["customType"], CUSTOM_COMPACT_MODEL);
+        let models: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            models["type"], "custom",
+            "no model_change history is written"
+        );
+        assert_eq!(models["customType"], CUSTOM_MODELS);
+        assert_eq!(models["data"]["current"], "anthropic/claude-sonnet-4.5");
+        assert_eq!(models["data"]["compact"], "anthropic/haiku");
+        assert!(models["parentId"].is_null());
 
         let first: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(first["type"], "message");
         assert_eq!(
-            first["parentId"], compact["id"],
+            first["parentId"], models["id"],
             "entries chain in file order"
         );
         assert!(first["id"].as_str().is_some_and(|id| id.len() == 8));
@@ -1310,7 +1521,7 @@ mod tests {
 "#;
         std::fs::write(project.join(format!("{id}.jsonl")), raw).unwrap();
 
-        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        let loaded = SessionStore::new(&cfg).load(id).unwrap();
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.messages[0].content.as_deref(), Some("Hello"));
         assert_eq!(loaded.messages[1].content.as_deref(), Some("Hi!"));
@@ -1385,7 +1596,171 @@ mod tests {
 
     #[test]
     fn project_dirs_follow_pi() {
-        assert_eq!(project_dir(Path::new("/home/pi/proj")), "home-pi-proj");
-        assert_eq!(project_dir(Path::new(r"C:\work\app")), "C--work-app");
+        assert_eq!(project_dir(Path::new("/home/pi/proj")), "--home-pi-proj--");
+        assert_eq!(project_dir(Path::new(r"C:\work\app")), "--C--work-app--");
+    }
+
+    #[test]
+    fn session_files_are_named_like_pi() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let writer = SessionWriter::create(&cfg, Path::new("/home/pi/proj"), "p/m", "p/c").unwrap();
+        let name = writer
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // <ISO timestamp with : and . replaced>_<uuid>.jsonl
+        let (stamp, id) = name.split_once('_').expect("timestamp and id");
+        assert!(stamp.ends_with('Z') && !stamp.contains(':') && !stamp.contains('.'));
+        assert_eq!(
+            id,
+            format!("{}.jsonl", writer.id()),
+            "the id follows the last underscore"
+        );
+        assert_eq!(session_id(writer.path()).as_deref(), Some(writer.id()));
+    }
+
+    /// pi writes far more than the conversation: a failed API call is stored as
+    /// an empty assistant message, and switching models leaves a trail. None of
+    /// that belongs in the context we rebuild.
+    #[test]
+    fn pi_noise_is_skipped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let project = dir.path().join(project_dir(Path::new("/home/pi/project")));
+        std::fs::create_dir_all(&project).unwrap();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let raw = r#"{"type":"session","version":3,"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/home/pi/project"}
+{"type":"model_change","id":"m0000001","parentId":null,"timestamp":"2024-12-03T14:00:00.500Z","provider":"openai","modelId":"gpt-4o"}
+{"type":"message","id":"u0000001","parentId":"m0000001","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"/settings","timestamp":1733234401000}}
+{"type":"message","id":"u0000002","parentId":"u0000001","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"user","content":"fix the build","timestamp":1733234402000}}
+{"type":"message","id":"a0000001","parentId":"u0000002","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"assistant","content":[],"provider":"intern","model":"deepseek","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","errorMessage":"400: invalid request","timestamp":1733234403000}}
+{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"provider":"anthropic","model":"claude-sonnet-4-5","stopReason":"stop","timestamp":1733234404000}}
+{"type":"model_change","id":"m0000002","parentId":"a0000002","timestamp":"2024-12-03T14:00:05.000Z","provider":"anthropic","modelId":"claude-sonnet-4-5"}
+{"type":"message","id":"u0000003","parentId":"m0000002","timestamp":"2024-12-03T14:00:06.000Z","message":{"role":"user","content":"/usr/bin/env should stay","timestamp":1733234406000}}
+"#;
+        std::fs::write(
+            project.join(format!("2024-12-03T14-00-00-000Z_{id}.jsonl")),
+            raw,
+        )
+        .unwrap();
+
+        let store = SessionStore::new(&cfg);
+        // A pi file name carries a timestamp prefix; the id still resolves.
+        let loaded = store.load(&id[..8]).unwrap();
+        let texts: Vec<String> = loaded
+            .messages
+            .iter()
+            .filter_map(|m| m.content.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "fix the build".to_string(),
+                "done".to_string(),
+                "/usr/bin/env should stay".to_string()
+            ]
+        );
+        let meta = loaded.meta.unwrap();
+        assert_eq!(
+            meta.agent_model, "anthropic/claude-sonnet-4-5",
+            "last model wins"
+        );
+    }
+
+    #[test]
+    fn command_inputs_and_empty_messages_are_never_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "p/m", "p/c").unwrap();
+        writer.user("/settings").unwrap();
+        writer.user("/model anthropic/claude").unwrap();
+        writer.user("   ").unwrap();
+        writer.assistant(&ChatMessage::assistant("")).unwrap();
+        writer.user("real prompt").unwrap();
+        let id = writer.id().to_string();
+        drop(writer);
+
+        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        assert_eq!(loaded.messages.len(), 1, "only the prompt is stored");
+        assert_eq!(loaded.messages[0].content.as_deref(), Some("real prompt"));
+    }
+
+    /// pi stores `!command` runs as `bashExecution` messages and newer versions
+    /// may add roles we do not know; neither may break the session.
+    #[test]
+    fn pi_only_message_roles_survive_the_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let project = dir.path().join(project_dir(Path::new("/home/pi/project")));
+        std::fs::create_dir_all(&project).unwrap();
+        let id = "99999999-8888-7777-6666-555555555555";
+        let raw = r#"{"type":"session","version":3,"id":"99999999-8888-7777-6666-555555555555","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/home/pi/project"}
+{"type":"message","id":"u0000001","parentId":null,"timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"bashExecution","command":"ls","output":"main.rs","exitCode":0,"timestamp":1733234401000}}
+{"type":"message","id":"u0000002","parentId":"u0000001","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"bashExecution","command":"rm x","output":"","exitCode":2,"timestamp":1733234402000}}
+{"type":"message","id":"u0000003","parentId":"u0000002","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"somethingNew","timestamp":1733234403000}}
+{"type":"message","id":"u0000004","parentId":"u0000003","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"user","content":"still here","timestamp":1733234404000}}
+"#;
+        let path = project.join(format!("2024-12-03T14-00-00-000Z_{id}.jsonl"));
+        std::fs::write(&path, raw).unwrap();
+
+        let loaded = SessionStore::new(&cfg).load(id).unwrap();
+        assert!(!loaded.truncated_tail, "unknown roles are not a torn write");
+        let texts: Vec<String> = loaded
+            .messages
+            .iter()
+            .filter_map(|m| m.content.clone())
+            .collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[0], "Ran `ls`\n```\nmain.rs\n```");
+        assert!(texts[1].contains("Command exited with code 2"));
+        assert_eq!(texts[2], "still here");
+    }
+
+    /// Switching models updates one entry instead of appending a trail, so a
+    /// resumed session reads back a single current model.
+    #[test]
+    fn model_switches_replace_the_single_models_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "p/a", "p/c").unwrap();
+        writer.user("hello").unwrap();
+        writer.models("openai/gpt-5", "openai/mini").unwrap();
+        writer.assistant(&ChatMessage::assistant("hi")).unwrap();
+        writer
+            .models("anthropic/claude", "anthropic/haiku")
+            .unwrap();
+        let path = writer.path().to_path_buf();
+        let id = writer.id().to_string();
+        drop(writer);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.matches(CUSTOM_MODELS).count(),
+            1,
+            "one state entry, not a history: {raw}"
+        );
+        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        let meta = loaded.meta.unwrap();
+        assert_eq!(meta.agent_model, "anthropic/claude");
+        assert_eq!(meta.compact_model, "anthropic/haiku");
+        assert_eq!(loaded.messages.len(), 2, "the rewrite keeps every message");
+    }
+
+    #[test]
+    fn command_detection_matches_chat_commands_only() {
+        for command in ["/settings", "/model gpt-4o", "/compact 说明", "/help"] {
+            assert!(is_command_input(command), "{command}");
+        }
+        for prompt in [
+            "/usr/bin/env is a path",
+            "what is /settings?",
+            "/",
+            "write a file",
+        ] {
+            assert!(!is_command_input(prompt), "{prompt}");
+        }
     }
 }

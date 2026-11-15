@@ -80,7 +80,9 @@ impl Agent {
             .meta
             .clone()
             .ok_or_else(|| HarnessError::tool("E_SESSION_CORRUPT", "missing metadata"))?;
-        let path = store.dir().join(format!("{}.jsonl", meta.id));
+        // Append to the file the session was read from: it may live in a
+        // per-project folder and carry pi's `<timestamp>_<id>` name.
+        let path = loaded.path.clone();
         let cwd = cwd_override.unwrap_or_else(|| PathBuf::from(&meta.cwd));
         let backend: Arc<dyn Backend> = Arc::new(crate::provider::Router::from_config(&config)?);
         Self::build(

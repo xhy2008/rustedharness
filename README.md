@@ -257,10 +257,16 @@ appended to the tool result.
   `usage`, the harness warns once and reports no invented numbers.
 - **Todos**: `todo` maintains a plan. If work remains and the model stops, the
   harness injects a bounded chase message (at most `chaseLimit` times).
-- **Sessions**: append-only JSONL under `~/.rustedharness/sessions`, with
-  torn-tail recovery, pruning, and unique-prefix lookup. Saved sessions can be
-  resumed from the CLI, TUI, or web UI; compaction records are replayed so the
-  resumed transcript matches the compacted view.
+- **Sessions**: append-only JSONL under `~/.rustedharness/sessions` in pi's
+  v3 format, with torn-tail recovery, pruning, and unique-prefix lookup. Saved
+  sessions can be resumed from the CLI, TUI, or web UI; compaction records are
+  replayed so the resumed transcript matches the compacted view.
+  The layout is pi's, so `session.dir` can point at `~/.pi/agent/sessions` and
+  both tools open the same files: `<dir>/--<encoded cwd>--/<timestamp>_<id>.jsonl`.
+  What pi records as noise is deliberately left out - failed API calls (stored
+  by pi as empty error messages), per-switch `model_change` history (we keep one
+  model snapshot), and frontend commands such as `/settings` or `/model x`
+  entered in the composer.
 - **Workspace anchoring (R1–R4)**: relative paths resolve against the session
   workspace; absolute paths outside it are rejected. Symlinks are resolved
   before the check. Every tool is auto-allowed except a would-be R4 escape.

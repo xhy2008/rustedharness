@@ -1,5 +1,54 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：pi 上下文互通，且不落盘 pi 的噪声（2026-11-15 第十七轮）
+
+要求：**上下文与 pi 互通，但不保存 pi 里那些多余的东西（api 错误、模型切换历史、`/settings` 等命令输入）。**
+
+pi 会话里到底有什么（实测本机两个真实会话，其中一个 2924 行 / 1933 条消息）：
+- `message:assistant` 1444 条，其中 **973 条是 `content: []` + `stopReason: "error"` + `errorMessage`
+  的 API 失败记录**（DeepSeek 的 reasoning_effort 400）；
+- `model_change` 10 条（每切一次模型留一条）；
+- `context_edit` 981 条（pi 用来裁剪工具输出，`replacement: null` 表示移出上下文）；
+- 少量 `usage` / `compaction` / `thinking_level_change`。
+
+本轮改动（`crates/core/src/session.rs`）：
+
+1. **磁盘布局对齐 pi**：目录 `--<cwd 编码>--`（原来少了首尾 `--`，等于和 pi 分居两个目录），
+   文件名 `<ISO 时间戳>_<id>.jsonl`（原来只有 `<id>.jsonl`）。`session.dir` 指到
+   `~/.pi/agent/sessions` 后两边读写同一份文件；新增 `session_id()` 让 id 取文件名最后一个
+   `_` 之后的部分，所以 pi 文件名也能用 id/前缀加载。
+2. **读时过滤噪声**：
+   - 内容为空的消息整条丢弃（覆盖 pi 的 API 错误记录）；
+   - 纯命令输入（`/^[a-z][a-z0-9_-]*(\s|$)/`，如 `/settings`、`/model x`、`/compact 说明`）
+     丢弃，但 `/usr/bin/env ...` 这类正文保留；
+   - 新增 `bashExecution` / `custom` 消息角色，并按 pi 的 `bashExecutionToText` 原样转成
+     user 消息；未知角色走 `#[serde(other)]` 丢弃 —— 原来未知角色会让整条 entry 解析失败，
+     被误判成 "尾部被截断"。
+3. **写时不产生噪声**：`user()` 拒绝空文本与命令输入，`assistant()` 拒绝空内容；
+   模型不再写 `model_change`，而是一条 `rustedharness.models` `custom` 快照 —— **切换模型时
+   原地重写这一条**（temp + rename + 重开 append 句柄），所以文件里永远只有一条当前状态，
+   不会累积切换历史。
+4. **修复 resume 路径**：`Agent::resume` 原来拼 `<sessions>/<id>.jsonl`（旧扁平布局），
+   对 pi 文件和新布局都会 `os error 2`；改为使用 `LoadedSession::path`。
+5. **compaction / branch_summary 摘要改用 pi 的原文措辞**（`The conversation history before
+   this point was compacted into the following summary:` + `<summary>` 包裹），并修掉两处
+   `//n` 字面量（应为 `\n`）。
+6. `sessions show` 在 pi 会话没有 compact model 时不再打印空的 `→ `。
+
+**互通实测**（双向，不是只看单测）：
+- 读：`session.dir` 指向 pi 的 sessions 目录，`sessions list` 列出两个真实 pi 会话；
+  `sessions show 01a1b9c6` 读出 11 user / 239 assistant / 234 tool 条（973 条 API 错误全被过滤）。
+- 写：用 `run` 生成真实会话（含 thinking + toolCall + toolResult + usage），再用 pi 自己的
+  `SessionManager.open()` + `buildSessionContext()` 解析该文件 —— 8 条 entry、模型解析为
+  `{provider: intern, modelId: qwen3.8-27b}`、4 条消息全部还原。
+- resume：`run --resume <id>` 追加写回同一文件，pi 再解析得到 6 条消息；文件里 `models`
+  快照始终只有 1 条。
+
+测试（core session 12 条，新增 6 条）：`session_files_are_named_like_pi`、
+`pi_noise_is_skipped_on_load`、`command_inputs_and_empty_messages_are_never_written`、
+`pi_only_message_roles_survive_the_round_trip`、`model_switches_replace_the_single_models_entry`、
+`command_detection_matches_chat_commands_only`。
+
 ## 已完成：会话存储严格换成 pi v3 格式（2026-11-15 第十六轮）
 
 要求：照搬 pi 的上下文存储、能无损迁移 pi 会话、不要旧格式兼容。按

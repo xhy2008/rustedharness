@@ -644,9 +644,14 @@ fn sessions_command(config: Config, args: SessionsArgs) -> Result<()> {
         SessionsCommand::Show { id } => {
             let loaded = store.load(&id)?;
             if let Some(meta) = &loaded.meta {
+                let compact = if meta.compact_model.is_empty() {
+                    String::new()
+                } else {
+                    format!(" → {}", meta.compact_model)
+                };
                 println!(
-                    "session {} · {} · {} → {}",
-                    meta.id, meta.cwd, meta.agent_model, meta.compact_model
+                    "session {} · {} · {}{}",
+                    meta.id, meta.cwd, meta.agent_model, compact
                 );
             }
             if loaded.truncated_tail {

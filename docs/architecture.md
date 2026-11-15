@@ -114,13 +114,28 @@ retrigger compaction.
 
 ### Sessions
 
-`session.rs` writes one JSON object per message/record to
-`<data>/sessions/<id>.jsonl`, with a header record and compaction markers.
-Writes are append-only; a torn final line is ignored on load. Lookup scans the
-session directory and accepts an id or a unique prefix. The transcript file is
-created lazily with the first user message, so launching and quitting leaves no
-artifact behind; compaction records are replayed so a resumed transcript
-matches the compacted view.
+`session.rs` writes pi's v3 session format, one JSON object per entry, to
+`<dir>/--<encoded cwd>--/<timestamp>_<id>.jsonl`. The directory and file naming,
+the header, the entry ids and `parentId` chaining, and every entry type are pi's,
+so `session.dir` can point at `~/.pi/agent/sessions` and both tools read and
+append the same files. Writes are append-only; a torn final line is ignored on
+load. Lookup scans the session directory and accepts an id or a unique prefix,
+including for pi file names where the id follows the last `_`.
+
+Two kinds of noise are filtered rather than carried forward. On load, a message
+whose content is empty is dropped (pi stores every failed API call as an
+assistant message with `stopReason: "error"` and no content), as is a user line
+that is a frontend command (`/settings`, `/model x`, ...); roles we do not model
+(`bashExecution`, `custom`, future ones) are converted like pi converts them or
+skipped, never treated as a torn line. On write, the same two shapes are never
+produced, and the model is kept as a single `custom` snapshot entry that is
+rewritten in place instead of a `model_change` trail.
+
+The transcript file is created lazily with the first user message, so launching
+and quitting leaves no artifact behind; compaction records are replayed with
+pi's exact summary wording so a resumed transcript matches the compacted view.
+`LoadedSession::path` carries the resolved file, which is what `Agent::resume`
+appends to.
 
 ### Code intelligence
 
