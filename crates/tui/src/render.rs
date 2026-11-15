@@ -243,7 +243,7 @@ fn narrow(c: char) -> Option<&'static str> {
 /// both push the rest of the row into cells the frame buffer believes are
 /// blank, which is exactly how orphaned characters survive every repaint.
 /// Expand tabs, keep newlines, drop every other control character.
-fn sanitize(text: &str) -> Cow<'_, str> {
+pub(crate) fn sanitize(text: &str) -> Cow<'_, str> {
     let fold = ambiguous_is_wide();
     if !text
         .chars()
@@ -993,10 +993,14 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 .iter()
                 .enumerate()
                 .map(|(index, line)| {
-                    Line::from(vec![
-                        Span::styled(format!("{:>numbers$}  ", index + 1), style(FAINT)),
-                        Span::styled(sanitize(line).into_owned(), style(MUTED)),
-                    ])
+                    let mut spans = vec![Span::styled(
+                        format!("{:>numbers$}  ", index + 1),
+                        style(FAINT),
+                    )];
+                    // Highlighted spans carry their own colours; the gutter
+                    // stays quiet so it never competes with the code.
+                    spans.extend(line.spans.iter().cloned());
+                    Line::from(spans)
                 })
                 .collect();
             let flag = if *truncated { " (truncated)" } else { "" };

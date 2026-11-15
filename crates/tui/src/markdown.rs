@@ -8,9 +8,10 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use tui_markdown::{AlertKind, Options, StyleSheet};
+use tui_markdown::{AlertKind, BuiltinCodeTheme, Options, StyleSheet};
 
-use crate::theme::{ACCENT, BLUE, CODE_BG, DIM, FAINT, RED, TEXT, YELLOW};
+use crate::render::sanitize;
+use crate::theme::{ACCENT, BLUE, CODE_BG, DIM, FAINT, MUTED, RED, TEXT, YELLOW};
 
 /// Our palette as a `tui-markdown` style sheet.
 #[derive(Clone, Copy, Default)]
@@ -84,8 +85,82 @@ impl StyleSheet for Skin {
 
 /// Render markdown to transcript lines that fit `width` display columns.
 pub fn to_lines(markdown: &str, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(20);
-    let options = Options::new(Skin).table_width(width.min(u16::MAX as usize) as u16);
+    let mut lines = render(markdown, Some(width.max(20)));
+    // Models like to trail a turn with blank lines; the transcript expresses
+    // that with block spacing instead of empty rows at the very end.
+    while lines.last().is_some_and(|line| line.width() == 0) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Highlight one file for the viewer.
+///
+/// The content goes through the same pipeline as prose - wrapped in a fenced
+/// block naming the syntax - so a file and an embedded snippet of the same
+/// language cannot drift apart in colour. The fence is five tildes so a file
+/// that itself contains ``` fences cannot terminate it early.
+pub fn highlight(source: &str, language: &str) -> Vec<Line<'static>> {
+    // The final newline belongs to the file, not to an extra blank line: drop
+    // it so the viewer's row count matches `str::lines`.
+    let source = sanitize(source);
+    let body = source.strip_suffix('\n').unwrap_or(&source);
+    let fenced = format!("~~~~~{language}\n{body}\n~~~~~");
+    render(&fenced, None)
+}
+
+/// Un-highlighted rows for a file: what the viewer shows while the highlighter
+/// is still running, and what it keeps for files too large to bother with.
+pub fn plain(source: &str) -> Vec<Line<'static>> {
+    let source = sanitize(source);
+    source
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(MUTED))))
+        .collect()
+}
+
+/// Syntax token for a path, empty when the language is not recognised (the
+/// renderer then falls back to the plain code style).
+pub fn language_for(path: &str) -> &'static str {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => "rust",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" => "javascript",
+        "py" => "python",
+        "sh" | "bash" | "zsh" => "bash",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "hpp" | "cxx" => "c++",
+        "go" => "go",
+        "java" => "java",
+        "rb" => "ruby",
+        "php" => "php",
+        "html" | "htm" => "html",
+        "css" | "scss" => "css",
+        "sql" => "sql",
+        "lua" => "lua",
+        "diff" | "patch" => "diff",
+        _ => "",
+    }
+}
+
+fn render(markdown: &str, width: Option<usize>) -> Vec<Line<'static>> {
+    let mut options = Options::new(Skin)
+        // A Base16 theme that shares our palette's tone: muted blues, greens
+        // and purples. The highlighter colours tokens but does not paint a slab
+        // behind the block, so code sits on the same surface as the prose.
+        .code_theme(BuiltinCodeTheme::Base16OceanDark);
+    if let Some(width) = width {
+        options = options.table_width(width.min(u16::MAX as usize) as u16);
+    }
     let text = tui_markdown::from_str_with_options(markdown, &options);
 
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -93,7 +168,6 @@ pub fn to_lines(markdown: &str, width: usize) -> Vec<Line<'static>> {
         // The crate keeps element styles on the line and character styles on
         // the span; both have to survive, and `Text` borrows the markdown while
         // the transcript cache is `'static`.
-        let in_code_block = line.style.bg == Some(CODE_BG);
         let spans: Vec<Span<'static>> = line
             .spans
             .into_iter()
@@ -106,25 +180,12 @@ pub fn to_lines(markdown: &str, width: usize) -> Vec<Line<'static>> {
             })
             .collect();
 
-        let mut wrapped = wrap_words(spans, width);
-        if in_code_block {
-            // Code blocks read as one surface: paint the band to the full
-            // width instead of letting it end with the longest line.
-            for line in &mut wrapped {
-                let used = line.width();
-                if used < width {
-                    line.spans.push(Span::styled(
-                        " ".repeat(width - used),
-                        Style::default().bg(CODE_BG),
-                    ));
-                }
-            }
+        match width {
+            // The viewer scrolls instead of reflowing and numbers its own
+            // lines, so its rows must stay one-to-one with the file.
+            None => out.push(Line::from(spans)),
+            Some(width) => out.extend(wrap_words(spans, width)),
         }
-        out.extend(wrapped);
-    }
-
-    while out.last().is_some_and(|line| line.width() == 0) {
-        out.pop();
     }
     out
 }

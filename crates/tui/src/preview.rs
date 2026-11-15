@@ -952,7 +952,8 @@ fn markdown_tables_render_as_a_grid() {
         .collect();
 
     assert!(
-        rows.iter().any(|row| row.contains('┌') && row.contains('┬')),
+        rows.iter()
+            .any(|row| row.contains('┌') && row.contains('┬')),
         "no table border: {rows:?}"
     );
     assert!(
@@ -994,5 +995,99 @@ fn a_table_too_wide_for_the_pane_is_wrapped() {
     for line in app.lines_cache.borrow().iter() {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line.width() <= width as usize, "row overflows: {text:?}");
+    }
+}
+
+/// The viewer keeps its own line numbers, so the highlighter has to preserve
+/// the file's line count exactly - no trimming, no reflowing.
+#[test]
+fn highlighting_keeps_one_row_per_source_line() {
+    let source = "fn main() {\n    let x = 1; // note\n\n    println!(\"{x}\");\n}\n";
+    let lines = crate::markdown::highlight(source, "rust");
+    assert_eq!(lines.len(), 5, "one row per source line: {lines:?}");
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.style.fg.is_some()),
+        "no token was coloured"
+    );
+    assert!(
+        crate::markdown::language_for("src/main.rs") == "rust"
+            && crate::markdown::language_for("Cargo.toml") == "toml"
+            && crate::markdown::language_for("notes.zzz").is_empty(),
+        "extension mapping is wrong"
+    );
+}
+
+#[test]
+#[ignore = "writes target/ui-preview-file.json; run on demand"]
+fn preview_file_view() {
+    let mut app = demo_app();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs");
+    let source = std::fs::read_to_string(path).expect("theme.rs");
+    let lines = crate::markdown::highlight(&source, "rust");
+    app.overlay = Overlay::FileView {
+        path: "crates/tui/src/theme.rs".into(),
+        lines,
+        scroll: 6,
+        truncated: false,
+    };
+    parent_dump(&mut app, "ui-preview-file.json", 100, 30);
+}
+
+/// Opening a file must not stall the UI: the viewer highlights once, when the
+/// file is opened, so this is the budget that matters.
+#[test]
+#[ignore = "timing; run on demand"]
+fn highlight_budget() {
+    let unit = "pub const TEXT: Color = Color::Rgb(0xe4, 0xe5, 0xea); // reading colour\n";
+    for count in [100usize, 400, 1_600] {
+        let source = unit.repeat(count);
+        let started = std::time::Instant::now();
+        let lines = crate::markdown::highlight(&source, "rust");
+        println!(
+            "{count} lines -> {} rows in {:?}",
+            lines.len(),
+            started.elapsed()
+        );
+    }
+}
+
+/// Highlighting is asynchronous, so the result can arrive after the user closed
+/// the viewer or opened a different file. It must never paint into a viewer it
+/// does not belong to.
+#[test]
+fn a_finished_highlight_only_lands_on_its_own_file() {
+    use ratatui::text::Line;
+
+    let mut app = demo_app();
+    app.overlay = Overlay::FileView {
+        path: "a.rs".into(),
+        lines: vec![],
+        scroll: 0,
+        truncated: false,
+    };
+
+    app.on_op_result(crate::app::OpResult::Highlighted {
+        path: "b.rs".into(),
+        lines: vec![Line::from("wrong")],
+    });
+    match &app.overlay {
+        Overlay::FileView { lines, .. } => {
+            assert!(lines.is_empty(), "a stale result must be dropped")
+        }
+        _ => panic!("the viewer closed"),
+    }
+
+    app.on_op_result(crate::app::OpResult::Highlighted {
+        path: "a.rs".into(),
+        lines: vec![Line::from("coloured")],
+    });
+    match &app.overlay {
+        Overlay::FileView { lines, .. } => {
+            assert_eq!(lines.len(), 1, "the matching result is swapped in")
+        }
+        _ => panic!("the viewer closed"),
     }
 }

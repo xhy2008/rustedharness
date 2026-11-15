@@ -38,7 +38,17 @@ pub enum OpResult {
         server: String,
         result: std::result::Result<PathBuf, String>,
     },
+    /// A file finished highlighting on a worker thread.
+    Highlighted {
+        path: String,
+        lines: Vec<Line<'static>>,
+    },
 }
+
+/// Files above this size open without syntax highlighting. The highlighter is
+/// linear and a viewer is a peek tool; a half-megabyte source would spend
+/// seconds of CPU on colours nobody is going to read.
+const HIGHLIGHT_LIMIT: usize = 96 * 1024;
 
 /// Request to replace the current agent; the loop owns the event channel, so
 /// it performs the swap when this is set.
@@ -78,7 +88,10 @@ pub enum Overlay {
     },
     FileView {
         path: String,
-        lines: Vec<String>,
+        /// Syntax-highlighted file body, one entry per source line. Built once
+        /// when the file is opened: highlighting 500 KB on every keypress would
+        /// make scrolling stutter.
+        lines: Vec<Line<'static>>,
         scroll: usize,
         truncated: bool,
     },
@@ -464,6 +477,21 @@ impl App {
                 Ok(path) => self.notice(format!("{server} ready at {}", path.display())),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} install: {err}")),
             },
+            OpResult::Highlighted { path, lines } => {
+                // Only swap if that file is still on screen: the user may have
+                // closed the viewer or opened another file in the meantime.
+                if let Overlay::FileView {
+                    path: current,
+                    lines: current_lines,
+                    ..
+                } = &mut self.overlay
+                {
+                    if current == &path {
+                        *current_lines = lines;
+                        self.needs_repaint = true;
+                    }
+                }
+            }
         }
     }
 
@@ -1306,12 +1334,12 @@ impl App {
                     if name == ".." || is_dir {
                         self.open_file_browser(&path);
                     } else {
-                        self.open_file(&path);
+                        self.open_file(&path, op_tx);
                     }
                 }
             }
             Overlay::FileView { path, .. } => {
-                self.open_file(&path);
+                self.open_file(&path, op_tx);
             }
             Overlay::Settings { sel } => match sel {
                 0 => self.open_model_picker(ModelTarget::Agent),
@@ -1400,7 +1428,7 @@ impl App {
             }
             "/files" => self.open_file_browser(&arg),
             "/view" if arg.is_empty() => self.notice("usage: /view <path>"),
-            "/view" => self.open_file(&arg),
+            "/view" => self.open_file(&arg, op_tx),
             "/todo" => self.overlay = Overlay::Todos,
             "/procs" => self.overlay = Overlay::Processes,
             "/lsp" => {
@@ -1570,7 +1598,7 @@ impl App {
         };
     }
 
-    fn open_file(&mut self, rel: &str) {
+    fn open_file(&mut self, rel: &str, op_tx: &UnboundedSender<OpResult>) {
         let path = self
             .agent
             .cwd()
@@ -1590,13 +1618,25 @@ impl App {
                     &bytes[..]
                 };
                 let text = String::from_utf8_lossy(slice).to_string();
-                let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+                // Show the file immediately, in plain text; highlighting runs
+                // on a worker thread because syntect needs about a second for
+                // a thousand lines in a debug build, and a frozen UI on `/view`
+                // reads as a hang.
                 self.overlay = Overlay::FileView {
                     path: rel.to_string(),
-                    lines,
+                    lines: crate::markdown::plain(&text),
                     scroll: 0,
                     truncated,
                 };
+                if text.len() <= HIGHLIGHT_LIMIT {
+                    let tx = op_tx.clone();
+                    let path = rel.to_string();
+                    let language = crate::markdown::language_for(rel);
+                    tokio::task::spawn_blocking(move || {
+                        let lines = crate::markdown::highlight(&text, language);
+                        let _ = tx.send(OpResult::Highlighted { path, lines });
+                    });
+                }
             }
             Err(err) => {
                 self.overlay = Overlay::None;

@@ -1,5 +1,24 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：代码高亮（正文围栏 + /view）（2026-11-15 第十四轮）
+
+- `tui-markdown` 打开默认特性 `highlight-code`（syntect + onig），主题用
+  `BuiltinCodeTheme::Base16OceanDark`：色相和我们调色板一致（蓝/绿/紫/橙）。
+- `/view` 的文件查看器复用同一条管线：`markdown::highlight(source, language)` 把文件
+  包进五连波浪线的围栏再交给库，所以文件和正文里的同语言片段颜色永远一致；行数保持
+  1:1（去掉末尾换行再包），查看器的行号不跳。
+- 语言由扩展名映射（`markdown::language_for`），认不出就退回代码块的普通样式。
+- **高亮必须异步**：debug 构建下 syntect 约 1.3ms/行（100 行 0.4s、1600 行 2.4s，
+  其中 0.3s 是一次性的 syntax set 初始化）。所以打开文件先显示纯文本
+  （`markdown::plain`），`spawn_blocking` 里高亮完成后再通过 `OpResult::Highlighted`
+  换进来；超过 96 KB 的文件不高亮。结果只在该文件仍打开时生效。
+- 副作用：库对代码块**不输出背景色**（`as_24_bit_terminal_escaped(parts, false)`），
+  所以代码块不再有整块底色，只靠 token 颜色区分。要恢复底色得自己按围栏切分 markdown
+  —— 与"别再自己写渲染器"冲突，暂时接受。
+
+测试：`highlighting_keeps_one_row_per_source_line`、`a_finished_highlight_only_lands_on_its_own_file`。
+
+
 ## 已完成：markdown 渲染改用 tui-markdown（2026-11-15 第十三轮）
 
 自己写的那套（标题/列表/引用/围栏/行内样式）只覆盖了模型实际会写的语法的一小部分，
