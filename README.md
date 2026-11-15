@@ -373,6 +373,16 @@ rustedharness lsp update rust-analyzer    # re-install the newest release
 rustedharness lsp checksum rust-analyzer  # show the digest and its source
 ```
 
+The TUI exposes the same four verbs under one command, so nothing LSP-related
+is a top-level slash command:
+
+| Command | Effect |
+| --- | --- |
+| `/lsp` | status panel: language, installed version, state |
+| `/lsp install <id>` | download the newest release |
+| `/lsp update <id>` | re-install from the newest release |
+| `/lsp checksum <id>` | digest an install would verify |
+
 `lsp checksum` is informational: installation performs the same lookup and
 verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
 quota; it is never required for a normal install.

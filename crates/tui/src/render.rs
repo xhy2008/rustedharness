@@ -1158,16 +1158,20 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{:14}", status.language), style(MUTED)),
+                    Span::styled(
+                        format!("{:12}", status.version.as_deref().unwrap_or("-")),
+                        style(DIM),
+                    ),
                     Span::styled(format!("{:12}", status.state), style(color)),
                     Span::styled(
-                        clip(&sanitize(status.detail.as_deref().unwrap_or("")), 44),
+                        clip(&sanitize(status.detail.as_deref().unwrap_or("")), 32),
                         style(FAINT),
                     ),
                 ]));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "/checksum <id>   /install <id>   any key to close",
+                "/lsp install <id>   /lsp update <id>   /lsp checksum <id>",
                 style(FAINT),
             )));
             draw_info_block(frame, body, lines);

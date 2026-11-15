@@ -1,5 +1,21 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：TUI 的 LSP 命令全部收进 /lsp 子命令（2026-11-15 第十八轮）
+
+要求：把 `/install` 并进 `/lsp install`，其他 LSP 相关命令也合并成 `lsp` 子命令。
+
+- 删除顶层 `/install`、`/checksum`，改为 `/lsp install|update|checksum <id>`；`/lsp` 仍然是状态面板。
+- `App::lsp_command` 解析子命令；`install` 与 `update` 共用一条路径（`install_lsp(.., update)`），
+  `checksum` 仍然只读。未知子命令给出可用列表。
+- `/lsp` 面板加一列"INSTALLED"（`ServerStatus::version`），底部提示改为三条新命令；
+  原来版本列宽 10 会让 `2026-11-12` 与状态列粘在一起，改成 12。
+- 启动检查更新的通知不再写死 CLI 命令：core 只发 `<旧> -> <新>`，CLI 追加
+  `rustedharness lsp update <id>`，TUI 追加 `/lsp update <id>`。
+- 新增测试：`lsp_commands_live_under_lsp`、`slash_completion_sees_the_lsp_subcommands`
+  （tui crate 原来没有测试模块），以及预览用例 `preview_lsp_panel`（`--ignored`，写
+  `target/ui-preview-lsp.json`），实机渲染确认三列对齐。
+- README 补一张 TUI 命令表。
+
 ## 已完成：pi 上下文互通，且不落盘 pi 的噪声（2026-11-15 第十七轮）
 
 要求：**上下文与 pi 互通，但不保存 pi 里那些多余的东西（api 错误、模型切换历史、`/settings` 等命令输入）。**

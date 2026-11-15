@@ -210,11 +210,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/view <path>", "open a file read-only"),
     ("/todo", "show the todo list"),
     ("/lsp", "language server status"),
-    (
-        "/checksum <id>",
-        "inspect the verified language server digest",
-    ),
-    ("/install <id>", "install a language server"),
+    ("/lsp install <id>", "download the newest release"),
+    ("/lsp update <id>", "re-install from the newest release"),
+    ("/lsp checksum <id>", "digest an install would verify"),
     ("/procs", "background processes"),
     ("/copy", "copy the last assistant reply"),
     ("/quit", "exit"),
@@ -685,8 +683,12 @@ impl App {
                 state,
                 detail,
             } => {
+                let hint = match state.as_str() {
+                    "update_available" => format!(" - /lsp update {server_id}"),
+                    _ => String::new(),
+                };
                 self.notice(format!(
-                    "lsp {server_id}: {state}{}",
+                    "lsp {server_id}: {state}{}{hint}",
                     detail.map(|d| format!(" — {d}")).unwrap_or_default()
                 ));
             }
@@ -1440,35 +1442,7 @@ impl App {
             "/view" => self.open_file(&arg, op_tx),
             "/todo" => self.overlay = Overlay::Todos,
             "/procs" => self.overlay = Overlay::Processes,
-            "/lsp" => {
-                self.lsp = self.agent.lsp_statuses();
-                self.overlay = Overlay::Lsp;
-            }
-            "/checksum" if arg.is_empty() => self.notice("usage: /checksum <server-id>"),
-            "/checksum" => {
-                let agent = self.agent.clone();
-                let server = arg.clone();
-                let tx = op_tx.clone();
-                tokio::spawn(async move {
-                    let result = agent.lsp_checksum(&server).await.map_err(|e| e.to_string());
-                    let _ = tx.send(OpResult::Checksum { server, result });
-                });
-                self.notice(format!("checksumming {arg}..."));
-            }
-            "/install" if arg.is_empty() => self.notice("usage: /install <server-id>"),
-            "/install" => {
-                let agent = self.agent.clone();
-                let server = arg.clone();
-                let tx = op_tx.clone();
-                tokio::spawn(async move {
-                    let result = agent
-                        .install_lsp(&server, None, false)
-                        .await
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(OpResult::Installed { server, result });
-                });
-                self.notice(format!("installing {arg}..."));
-            }
+            "/lsp" => self.lsp_command(&arg, op_tx),
             "/copy" => self.copy_last_assistant(),
             "/quit" | "/exit" => self.quit = true,
             other => self.push(
@@ -1478,6 +1452,71 @@ impl App {
             ),
         }
         Ok(())
+    }
+
+    /// `/lsp` and its subcommands; everything language-server related lives
+    /// here instead of in top-level commands.
+    fn lsp_command(&mut self, arg: &str, op_tx: &UnboundedSender<OpResult>) {
+        let (sub, server) = match arg.split_once(' ') {
+            Some((sub, rest)) => (sub, rest.trim()),
+            None => (arg, ""),
+        };
+        match sub {
+            "" => {
+                self.lsp = self.agent.lsp_statuses();
+                self.overlay = Overlay::Lsp;
+            }
+            "install" | "update" => {
+                if server.is_empty() {
+                    self.notice(format!("usage: /lsp {sub} <server-id>"));
+                    return;
+                }
+                let update = sub == "update";
+                let server = server.to_string();
+                let agent = self.agent.clone();
+                let tx = op_tx.clone();
+                let name = server.clone();
+                tokio::spawn(async move {
+                    let result = agent
+                        .install_lsp(&name, None, update)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(OpResult::Installed {
+                        server: name,
+                        result,
+                    });
+                });
+                self.notice(format!(
+                    "{} {server}...",
+                    if update { "updating" } else { "installing" }
+                ));
+            }
+            "checksum" => {
+                if server.is_empty() {
+                    self.notice("usage: /lsp checksum <server-id>");
+                    return;
+                }
+                let server = server.to_string();
+                let agent = self.agent.clone();
+                let tx = op_tx.clone();
+                let name = server.clone();
+                tokio::spawn(async move {
+                    let result = agent.lsp_checksum(&name).await.map_err(|e| e.to_string());
+                    let _ = tx.send(OpResult::Checksum {
+                        server: name,
+                        result,
+                    });
+                });
+                self.notice(format!("checksumming {server}..."));
+            }
+            other => self.push(
+                EntryKind::Error,
+                "",
+                format!(
+                    "unknown lsp subcommand: {other} - try /lsp, /lsp install, /lsp update or /lsp checksum"
+                ),
+            ),
+        }
     }
 
     fn set_model(&mut self, model: &str, target: ModelTarget) {
@@ -1864,4 +1903,45 @@ fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
     clipboard
         .set_text(text.to_string())
         .map_err(|err| format!("copy failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything language-server related is a `/lsp` subcommand; the old
+    /// top-level `/install` and `/checksum` must not come back.
+    #[test]
+    fn lsp_commands_live_under_lsp() {
+        for (command, _) in COMMANDS {
+            assert_ne!(*command, "/install", "use /lsp install");
+            assert_ne!(*command, "/checksum", "use /lsp checksum");
+        }
+        for sub in [
+            "/lsp install <id>",
+            "/lsp update <id>",
+            "/lsp checksum <id>",
+        ] {
+            assert!(COMMANDS.iter().any(|(command, _)| *command == sub), "{sub}");
+        }
+    }
+
+    #[test]
+    fn slash_completion_sees_the_lsp_subcommands() {
+        // The picker filters on the first token, so every `/lsp ...` entry
+        // appears once the user types `/lsp`.
+        let shown: Vec<&str> = COMMANDS
+            .iter()
+            .map(|(command, _)| *command)
+            .filter(|command| {
+                command
+                    .trim_start_matches('/')
+                    .split(' ')
+                    .next()
+                    .unwrap_or("")
+                    .starts_with("lsp")
+            })
+            .collect();
+        assert_eq!(shown.len(), 4, "{shown:?}");
+    }
 }

@@ -1059,10 +1059,9 @@ impl LspHub {
             self.emit(HarnessEvent::DownloadStatus {
                 server_id: spec.id.to_string(),
                 state: "update_available".to_string(),
-                detail: Some(format!(
-                    "{current} -> {latest}; run `rustedharness lsp update {}`",
-                    spec.id
-                )),
+                // Frontends append their own follow-up: the CLI's verbs differ
+                // from the TUI's slash commands.
+                detail: Some(format!("{current} -> {latest}")),
             });
         }
     }

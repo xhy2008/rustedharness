@@ -378,6 +378,40 @@ fn preview_selection() {
     parent_dump(&mut app, "ui-preview-selection.json", 108, 26);
 }
 
+/// The `/lsp` panel: installed version, live state, and the subcommands that
+/// replaced `/install` and `/checksum`.
+#[test]
+#[ignore = "writes target/ui-preview-lsp.json; run on demand"]
+fn preview_lsp_panel() {
+    let mut app = demo_app();
+    app.lsp = vec![
+        rustedharness_core::lsp::ServerStatus {
+            language: "rust".into(),
+            server: "rust-analyzer".into(),
+            version: Some("2026-11-12".into()),
+            state: "running".into(),
+            detail: None,
+            pid: Some(4242),
+            restarts: 0,
+            install_hint: "rustup component add rust-analyzer".into(),
+            runtime_deps: Vec::new(),
+        },
+        rustedharness_core::lsp::ServerStatus {
+            language: "lua".into(),
+            server: "lua-language-server".into(),
+            version: Some("3.19.2".into()),
+            state: "available".into(),
+            detail: Some("newer release available".into()),
+            pid: None,
+            restarts: 0,
+            install_hint: "download from github.com/LuaLS/lua-language-server/releases".into(),
+            runtime_deps: Vec::new(),
+        },
+    ];
+    app.overlay = Overlay::Lsp;
+    parent_dump(&mut app, "ui-preview-lsp.json", 100, 20);
+}
+
 #[test]
 #[ignore = "writes target/ui-preview-idle.json; run on demand"]
 fn preview_idle() {

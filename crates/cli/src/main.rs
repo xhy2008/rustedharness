@@ -475,8 +475,12 @@ async fn pump(
                 state,
                 detail,
             } => {
+                let hint = match state.as_str() {
+                    "update_available" => format!(" - run: rustedharness lsp update {server_id}"),
+                    _ => String::new(),
+                };
                 eprintln!(
-                    "\x1b[2m[lsp download {server_id}: {state}]\x1b[0m{}",
+                    "\x1b[2m[lsp download {server_id}: {state}]\x1b[0m{}{hint}",
                     detail.map(|d| format!(" {d}")).unwrap_or_default()
                 );
             }
