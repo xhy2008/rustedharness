@@ -485,6 +485,7 @@ async fn pump(
                 server_id,
                 state,
                 detail,
+                ..
             } => {
                 let hint = match state.as_str() {
                     "update_available" => format!(" - run: rustedharness lsp update {server_id}"),
@@ -590,7 +591,44 @@ async fn lsp_install(
     if let Some(sha) = sha256 {
         rustedharness_core::lsp::pin_sha256(&mut lsp, server, sha)?;
     }
-    let path = rustedharness_core::lsp::install_server(&lsp, &cwd, server, update, None).await?;
+    // Progress goes to stderr so the caller's stdout stays clean. Without a
+    // sink a 50 MB download prints nothing at all and reads as a hang.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let sink = tokio::spawn(async move {
+        // A line per 10% is enough on a fast link, but a throttled mirror can
+        // take minutes per 10%, so print at least every few seconds as well.
+        let mut last_step: Option<u8> = None;
+        let mut last_print = std::time::Instant::now();
+        while let Some(event) = rx.recv().await {
+            let HarnessEvent::DownloadStatus {
+                server_id,
+                state,
+                detail,
+                percent,
+            } = event
+            else {
+                continue;
+            };
+            if state == "downloading" && percent.is_some() {
+                let step = percent.map(|percent| percent / 10);
+                if step == last_step && last_print.elapsed() < std::time::Duration::from_secs(5) {
+                    continue;
+                }
+                last_step = step;
+                last_print = std::time::Instant::now();
+            }
+            eprintln!(
+                "\x1b[2m[lsp {server_id}: {state}]\x1b[0m{}",
+                detail
+                    .map(|detail| format!(" {detail}"))
+                    .unwrap_or_default()
+            );
+        }
+    });
+    let result =
+        rustedharness_core::lsp::install_server(&lsp, &cwd, server, update, Some(tx)).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sink).await;
+    let path = result?;
     println!("installed {server}: {}", path.display());
     Ok(())
 }

@@ -479,6 +479,19 @@ fn the_compact_column_disappears_when_it_is_the_same_model() {
     );
 }
 
+/// A download in flight: the status line, not the transcript.
+#[test]
+#[ignore = "writes target/ui-preview-download.json; run on demand"]
+fn preview_download() {
+    let mut app = demo_app();
+    app.download = Some(crate::app::DownloadProgress {
+        server: "clangd".into(),
+        percent: Some(42),
+        detail: Some("42% 12.3/29.4 MB".into()),
+    });
+    parent_dump(&mut app, "ui-preview-download.json", 100, 20);
+}
+
 /// The settings panel: one toggle for the compaction model.
 #[test]
 #[ignore = "writes target/ui-preview-settings.json; run on demand"]

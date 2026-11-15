@@ -382,8 +382,10 @@ newest release and keeps a single version per server in the cache.
 Transport rules are enforced for every download:
 
 - HTTPS only, with redirects re-checked against a host whitelist;
-- the archive is at most 256 MiB and extracts without escapes;
+- the archive is at most 256 MiB, enforced while it streams in;
 - connecting times out after 15s and a stalled transfer after 60s;
+- the body is streamed, so the status line shows `lsp clangd 42% 12.3/29.4 MB`
+  and `lsp install` prints a line at least every few seconds while it runs;
 - the user consents interactively, or `lsp.allowDownloadsNoninteractive` /
   `--yes` is set.
 

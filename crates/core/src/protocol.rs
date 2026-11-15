@@ -77,6 +77,9 @@ pub enum HarnessEvent {
         server_id: String,
         state: String,
         detail: Option<String>,
+        /// Bytes downloaded so far, in percent, while `state` is `downloading`.
+        #[serde(default)]
+        percent: Option<u8>,
     },
     TokenUsage {
         input_tokens: u64,

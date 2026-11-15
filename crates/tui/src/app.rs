@@ -115,6 +115,29 @@ pub enum ModelTarget {
     Compact,
 }
 
+/// A download in flight: the server, how far it got and what of.
+#[derive(Debug, Clone)]
+pub struct DownloadProgress {
+    pub server: String,
+    pub percent: Option<u8>,
+    pub detail: Option<String>,
+}
+
+impl DownloadProgress {
+    /// `"clangd 42% 12.3/29.4 MB"`, or the server alone before bytes arrive.
+    fn text(&self) -> String {
+        match (&self.detail, self.percent) {
+            (Some(detail), _) if detail.contains('%') || detail.contains("MB") => {
+                format!("{} {detail}", self.server)
+            }
+            (Some(detail), Some(percent)) => format!("{} {percent}% {detail}", self.server),
+            (Some(detail), None) => format!("{} {detail}", self.server),
+            (None, Some(percent)) => format!("{} {percent}%", self.server),
+            (None, None) => self.server.clone(),
+        }
+    }
+}
+
 pub struct ConsentCard {
     pub id: String,
     pub display_name: String,
@@ -146,6 +169,8 @@ pub struct App {
     pub cwd: String,
     pub agent_model: String,
     pub compact_model: String,
+    /// The download in flight, shown in the status line.
+    pub download: Option<DownloadProgress>,
     /// Mirrors `anotherModelForCompact`; the settings panel flips it.
     pub another_model_for_compact: bool,
     pub input_tokens: u64,
@@ -276,6 +301,7 @@ impl App {
             cwd: String::new(),
             agent_model: String::new(),
             compact_model: String::new(),
+            download: None,
             another_model_for_compact: true,
             input_tokens: 0,
             output_tokens: 0,
@@ -508,6 +534,9 @@ impl App {
     /// its warm-up state, and how many others are running. `None` when no
     /// server is live, so a workspace without one adds no noise.
     pub fn lsp_summary(&self) -> Option<(String, bool)> {
+        if let Some(download) = &self.download {
+            return Some((format!("lsp {}", download.text()), true));
+        }
         let mut live: Vec<&ServerStatus> = self
             .lsp
             .iter()
@@ -687,6 +716,19 @@ impl App {
                 state,
                 detail,
             } => {
+                // A failed download never sends a final DownloadStatus, so the
+                // status line would keep showing the last percentage.
+                if state != "downloading" {
+                    let server =
+                        rustedharness_core::lsp::spec_for_language(&language).map(|s| s.id);
+                    if self
+                        .download
+                        .as_ref()
+                        .is_some_and(|download| Some(download.server.as_str()) == server)
+                    {
+                        self.download = None;
+                    }
+                }
                 if let Some(status) = self.lsp.iter_mut().find(|s| s.language == language) {
                     status.state = state.clone();
                     status.detail = detail.clone();
@@ -761,7 +803,19 @@ impl App {
                 server_id,
                 state,
                 detail,
+                percent,
             } => {
+                // Progress belongs in the status line: a notice per chunk
+                // would flood the transcript during a 50 MB download.
+                if state == "downloading" {
+                    self.download = Some(DownloadProgress {
+                        server: server_id,
+                        percent,
+                        detail,
+                    });
+                    return;
+                }
+                self.download = None;
                 let hint = match state.as_str() {
                     "update_available" => format!(" - /lsp update {server_id}"),
                     _ => String::new(),
@@ -2131,6 +2185,54 @@ mod tests {
             .block_on(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx))
             .unwrap();
         assert!(matches!(app.overlay, Overlay::None), "second esc leaves");
+    }
+
+    /// A download in flight shows on the status line instead of writing a
+    /// notice per chunk, and it disappears when the install ends - including
+    /// when it fails without a final status.
+    #[test]
+    fn a_download_shows_its_progress_on_the_status_line() {
+        let mut app = crate::preview::demo_app();
+        app.lsp.clear();
+        let entries = app.entries.len();
+        app.on_harness_event(HarnessEvent::DownloadStatus {
+            server_id: "clangd".into(),
+            state: "downloading".into(),
+            detail: Some("42% 12.3/29.4 MB".into()),
+            percent: Some(42),
+        });
+        assert_eq!(
+            app.lsp_summary(),
+            Some(("lsp clangd 42% 12.3/29.4 MB".to_string(), true))
+        );
+        assert_eq!(
+            app.entries.len(),
+            entries,
+            "progress is not a transcript entry"
+        );
+
+        app.on_harness_event(HarnessEvent::DownloadStatus {
+            server_id: "clangd".into(),
+            state: "installed".into(),
+            detail: None,
+            percent: None,
+        });
+        assert!(app.download.is_none(), "installed clears the progress");
+        assert_eq!(app.lsp_summary(), None);
+
+        // A failure reports through LspStatus only; the bar must go away.
+        app.on_harness_event(HarnessEvent::DownloadStatus {
+            server_id: "clangd".into(),
+            state: "downloading".into(),
+            detail: Some("7% 2.0/29.4 MB".into()),
+            percent: Some(7),
+        });
+        app.on_harness_event(HarnessEvent::LspStatus {
+            language: "c".into(),
+            state: "absent".into(),
+            detail: Some("request failed: operation timed out".into()),
+        });
+        assert!(app.download.is_none(), "a failed download clears it too");
     }
 
     #[test]

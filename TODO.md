@@ -1,5 +1,44 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：LSP 下载进度 + 失败不再静默（2026-11-15 第二十七轮）
+
+用户报告：下载只有一句 `downloading`，任务管理器里几乎没网络流量，疑似静默失败。
+
+**实测结论：不是失败，是慢 + 完全没有反馈。** 用同配置客户端打真实地址测得：
+
+```
+send: 3.0s status=200 len=29690805      ← 28.3 MB，头很快就回来了
+1 MB after 68.2s, 2 MB after 92.6s      ← 体只有 ~30 KB/s，一分钟才 1 MB
+```
+
+28 MB 在 30 KB/s 下要十几分钟，而原来的代码是 `response.bytes().await`：**整包读完才返回**，
+中途零输出，看起来就是死掉了。
+
+改动：
+1. **流式下载**：`bytes_stream()` 逐块累积，边下边校验 256 MiB 上限（原来只能事后查）。
+   每 250ms（或到 100%）发一次 `DownloadStatus`，`detail` 是 `"42% 12.3/29.4 MB"`；
+   面板/状态栏里的 state detail 只放 `42%`。
+2. **协议加字段**：`DownloadStatus` 新增 `percent: Option<u8>`，前端不用再解析字符串。
+3. **TUI**：进度不再写进对话（一次下载几百行），而是进状态栏 —— `lsp clangd 42% 12.3/29.4 MB`
+   （`App::download`）。失败时不会收到最终的 `DownloadStatus`，所以 `LspStatus` 一旦离开
+   `downloading` 就把进度条清掉，不会永远停在 7%。
+4. **CLI**：`lsp install` 原来传 `events: None`，所以**一句都不打印**；现在开事件通道，边下边打到
+   stderr，10% 一步或至少每 5 秒一行（慢速镜像下按百分比打会几分钟才一行）。
+5. **静默失败**：自动下载失败原来只写进 state detail（需要打开 /lsp 才看得到），现在额外发一条
+   `Notice{level:"warning"}`，对话里直接能看到 `could not install <id> automatically: …`。
+
+实测（同一台机器、同一地址）：
+
+```
+[lsp clangd: consented]
+[lsp clangd: unverified] installing without checksum verification: could not read the release digest (HTTP 403 Forbidden)
+[lsp clangd: downloading] 1% 0.3/28.3 MB
+[lsp clangd: downloading] 2% 0.8/28.3 MB
+```
+
+测试：`a_download_shows_its_progress_on_the_status_line`（进度进状态栏、不增对话条目、
+installed 与 LspStatus 失败都能清除进度），预览 `preview_download`。
+
 ## 已完成：ctrl+t 管 todo、/settings 回归、二进制文件不退出（2026-11-15 第二十六轮）
 
 上一轮把 `/settings` 整个删掉是错的：用户要的是把那四行只读信息删掉，把"主模型压缩"开关放进去。

@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1185,6 +1186,7 @@ impl LspHub {
                 // Frontends append their own follow-up: the CLI's verbs differ
                 // from the TUI's slash commands.
                 detail: Some(format!("{current} -> {latest}")),
+                percent: None,
             });
         }
     }
@@ -1229,6 +1231,7 @@ impl LspHub {
             server_id: server_id.to_string(),
             state: if allow { "consented" } else { "declined" }.to_string(),
             detail: None,
+            percent: None,
         });
     }
 
@@ -1561,7 +1564,16 @@ impl LspHub {
                         }
                     },
                     Err(err) => {
+                        // Silently degrading here is how an install that never
+                        // happened looked like a hang.
                         self.set_state(language, "absent", Some(err.to_string()));
+                        self.emit(HarnessEvent::Notice {
+                            level: "warning".to_string(),
+                            message: format!(
+                                "could not install {} automatically: {}",
+                                spec.id, err
+                            ),
+                        });
                     }
                 }
             } else {
@@ -1670,6 +1682,7 @@ impl LspHub {
                 detail: Some(format!(
                     "installing without checksum verification: {warning}"
                 )),
+                percent: None,
             });
         }
 
@@ -1718,6 +1731,7 @@ impl LspHub {
             server_id: spec.id.to_string(),
             state: "downloading".to_string(),
             detail: Some(format!("{display} {version}")),
+            percent: Some(0),
         });
 
         // No total timeout: a 256 MiB artifact may legitimately take minutes.
@@ -1762,17 +1776,51 @@ impl LspHub {
                 ));
             }
         }
-        let bytes = response.bytes().await.map_err(|e| {
-            HarnessError::tool(
-                "E_LSP_DOWNLOAD",
-                format!("read failed: {}", error_chain(&e)),
-            )
-        })?;
-        if bytes.len() > 256 * 1024 * 1024 {
-            return Err(HarnessError::tool(
-                "E_LSP_DOWNLOAD",
-                "download exceeds 256 MiB",
-            ));
+        // Stream the body: buffering it whole means a 50 MB download looks
+        // like a hang, and the size cap could only be checked afterwards.
+        let total = response.content_length();
+        let mut stream = response.bytes_stream();
+        let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+        let mut last_report = Instant::now();
+        let mut reported: u8 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                HarnessError::tool(
+                    "E_LSP_DOWNLOAD",
+                    format!("read failed: {}", error_chain(&e)),
+                )
+            })?;
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > MAX_DOWNLOAD_BYTES {
+                return Err(HarnessError::tool(
+                    "E_LSP_DOWNLOAD",
+                    format!(
+                        "download exceeds {} MiB",
+                        MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                    ),
+                ));
+            }
+            // Four updates a second is enough to look alive without spamming
+            // the event channel on a fast link.
+            let now = Instant::now();
+            let received = bytes.len() as u64;
+            let percent = total
+                .filter(|total| *total > 0)
+                .map(|total| (received * 100 / total).min(100) as u8);
+            if now.duration_since(last_report) >= Duration::from_millis(250)
+                || percent.is_some_and(|percent| percent == 100 && reported < 100)
+            {
+                last_report = now;
+                reported = percent.unwrap_or(0);
+                let detail = progress_text(received, total);
+                self.set_state(spec.language, "downloading", Some(detail.clone()));
+                self.emit(HarnessEvent::DownloadStatus {
+                    server_id: spec.id.to_string(),
+                    state: "downloading".to_string(),
+                    detail: Some(detail),
+                    percent,
+                });
+            }
         }
         if let Some(expected) = expected.as_deref() {
             let actual = hex::encode(Sha256::digest(&bytes));
@@ -1781,6 +1829,7 @@ impl LspHub {
                     server_id: spec.id.to_string(),
                     state: "checksum_failed".to_string(),
                     detail: Some(format!("expected {expected}, got {actual}")),
+                    percent: None,
                 });
                 // A published digest that does not match is a hard failure:
                 // the artifact is not the one the vendor signed off on.
@@ -1804,6 +1853,7 @@ impl LspHub {
             server_id: spec.id.to_string(),
             state: "installed".to_string(),
             detail: Some(binary_path.display().to_string()),
+            percent: None,
         });
         self.set_state(
             spec.language,
@@ -2467,6 +2517,23 @@ const WARMUP_CEILING: Duration = Duration::from_secs(180);
 
 /// How long `op = "install"` waits for the consent card before giving up.
 const CONSENT_WAIT: Duration = Duration::from_secs(120);
+
+/// Hard cap on an artifact, enforced while it streams in.
+const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+/// `"42% 12.3/29.4 MB"`, or just the byte count when the server sends no length.
+fn progress_text(received: u64, total: Option<u64>) -> String {
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    match total.filter(|total| *total > 0) {
+        Some(total) => format!(
+            "{}% {:.1}/{:.1} MB",
+            (received * 100 / total).min(100),
+            mb(received),
+            mb(total)
+        ),
+        None => format!("{:.1} MB", mb(received)),
+    }
+}
 
 struct DocState {
     version: i64,
