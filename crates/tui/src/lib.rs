@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
+use crossterm::terminal::{DisableLineWrap, EnableLineWrap};
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::Config;
 use rustedharness_core::protocol::HarnessEvent;
@@ -39,7 +40,17 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
 
     let mut terminal = ratatui::init();
     let mut stdout = std::io::stdout();
-    let _ = execute!(stdout, EnableMouseCapture);
+    // Autowrap is the single worst enemy of a full-screen TUI: one row that
+    // renders a cell wider than we measured (ambiguous-width glyph, CJK
+    // punctuation) makes the terminal scroll, after which every diff lands on
+    // the wrong row and the screen fills with orphaned characters. Turn it off
+    // for the whole session and restore it on the way out.
+    let _ = execute!(stdout, EnableMouseCapture, DisableLineWrap);
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), EnableLineWrap);
+        previous_hook(info);
+    }));
     let stop = Arc::new(AtomicBool::new(false));
     let (key_tx, mut key_rx) = mpsc::unbounded_channel();
     let (op_tx, mut op_rx) = mpsc::unbounded_channel();
@@ -58,7 +69,7 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
 
     stop.store(true, Ordering::Relaxed);
     graceful_shutdown(&app.agent).await;
-    let _ = execute!(stdout, DisableMouseCapture);
+    let _ = execute!(stdout, DisableMouseCapture, EnableLineWrap);
     ratatui::restore();
     result
 }
@@ -107,7 +118,13 @@ async fn event_loop(
     const RESIZE_SETTLE: Duration = Duration::from_millis(150);
     let mut resize_at: Option<Instant> = None;
     let mut resize_dirty = false;
+    let mut last_follow = app.follow;
     loop {
+        // Any user-driven scroll invalidates nothing we can see, but it moves
+        // the transcript window; repainting the whole screen costs one write
+        // and guarantees no stale cell survives the jump.
+        let scrolled = app.follow != last_follow;
+        last_follow = app.follow;
         let settling = resize_at.is_some_and(|t| t.elapsed() < RESIZE_SETTLE);
         // Force a full repaint when the overlay changes (opens, closes, or
         // switches to a different size/type). Incremental diffs can leave stale
@@ -117,7 +134,8 @@ async fn event_loop(
         let overlay_changed = overlay != last_overlay;
         last_overlay = overlay;
         if !settling {
-            if overlay_changed || resize_dirty {
+            let repaint = std::mem::take(&mut app.needs_repaint);
+            if overlay_changed || resize_dirty || scrolled || repaint {
                 resize_dirty = false;
                 app.lines_sig = (usize::MAX, 0);
                 terminal.clear()?;

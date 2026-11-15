@@ -1,5 +1,41 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：修复滚动后悬空字符 + 改线性选区 + 修剪贴板乱码（2026-11-15 第三轮）
+
+用户反馈三件事：**恢复历史会话后滚动屏幕会出现悬空字符；选区是矩形框，不符合终端原生选择；复制出来是乱码。**
+
+### 1. 悬空字符：串行换行把整块屏幕顶歪了
+
+根因是**终端自动换行**：只要有一行比我们量出来的宽度多出 1 列（东亚歧义宽度字符、CJK 标点、字体回退把某个字形画成 2 列），终端就会自动折行并把整屏向上顶一行；此后 ratatui 的增量刷新全部落在错误的行上，旧内容残留在各式各样的小格子里，就成了截图里那一列悬空的 `3` / `t` / `)`。
+
+修法（`lib.rs`）：
+- 启动时 `execute!(stdout, EnableMouseCapture, DisableLineWrap)`，退出时 `EnableLineWrap`；同时串接 panic hook，先开换行再交给 ratatui 的复原钩子，避免进程崩掉后终端一直不换行。
+- 用户滚动（`follow` 翻转）和切换会话后强制整屏重绘（`terminal.clear()` + 缓存失效），把可能已经积累的错位一次性抹掉。
+- `Ctrl+G` 除了回到末尾，也强制整屏重绘，作为“屏幕花了按一下”的兜底。
+
+另外把缓存签名从「按长度」换成「按内容」（`xxh32`），避免恢复会话时同长度的正文替换后仍然渲染旧行。
+
+### 2. 选区：矩形 -> 线性
+
+- `App::ordered()` 先把两个角按「行优先、同行比列」排序，`selection_row_span()` 给出某一行应该取的半开列区间：首行从锚点列开始，中间行整行，末行到光标列结束——和终端一致。
+- 高亮（`render`）与复制（`app`）共用同一套区间计算，不会再出现“看起来选中了、复制出来是另一块”的情况。
+- 复制按**显示列**切片（`slice_columns`），双宽字符不会被劈成半个，每行尾部空白会被 trim。
+- 拖到上下边缘会自动滚动，锚点跟着平移，可以选超过一屏的内容。
+- 复制成功/失败改成状态栏 toast（`App::toast`，约 2 秒后消失），不再往转录里插一条 `copied N lines` 把内容顶走。
+
+### 3. 剪贴板乱码
+
+原来是 `text.as_bytes()` 直接灌给 `clip.exe`，它按 ANSI 代码页（中文 Windows 是 936）解码，中文/emoji 全成乱码。改用 `arboard`（Win32 `CF_UNICODETEXT` / macOS / X11 通用）：`arboard::{version = "3", default-features = false}`。失败时 toast 报错而不是静默。
+
+### 测试
+
+`preview` 模块（都跑在 TestBackend 上，不碰真实终端）：
+- `selection_is_linear_not_rectangular`：首行切锚点、中间行整行、末行切光标。
+- `slice_columns_never_splits_a_wide_character`：CJK 按列切片。
+- `clipboard_round_trips_unicode`（ignore，会覆盖剪贴板）：验证平台剪贴板能往返中文。
+
+`cargo test --workspace` 全绿（core 147 / tui 4 / cli 4）。
+
 ## 已完成：思考 / 工具折叠交互（2026-11-15 第二轮）
 
 用户需求：**取消顶部栏；思考输出过程中展开、结束自动折叠、鼠标点击切换折叠；工具输出同理。**
@@ -144,7 +180,8 @@ git -C E:/rustedharness -c user.name="xhy37000616" -c user.email="xhy37000616@16
 
 ## 关键背景（勿踩）
 
-- TUI 是全屏 + 拖拽复制方案（用户否决过 inline viewport 方案，别再碰）。
+- TUI 是全屏 + 拖拽复制方案（用户否决过 inline viewport 方案，别再碰）。选区必须是**线性**的（首行切锚点列、中间整行、末行切光标列），不要退回矩形框。
+- 运行期必须保持 `DisableLineWrap`（`lib.rs` 里 `execute!` 打开、退出/panic 时恢复）：一旦允许自动换行，任何一行超出 1 列都会把整屏顶歪，之后全是悬空字符。
 - 渲染宽度：`draw()` 全局右留 1 列；UI 内已禁用东亚歧义宽度字符（· … ¥ 除外），新增 UI 字符串只用 ASCII 标点做分隔符/省略号。`¥` 允许保留（cost 字段）。
 - UI 字形只能用 WGL4 覆盖集（`● × ○ › │ · ─` + 圆角框），不要再引入 `✔ ✘ ❯ ▏ ╌` 或 braille spinner：Windows 等宽字体没这些字形，会显示成方块。
 - 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。宽度不足时按 路径→CacheHit→cost→compact 顺序隐藏字段（见 `render::footer_line` 的 layouts 表），不要退回强制截断。

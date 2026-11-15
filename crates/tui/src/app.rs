@@ -155,6 +155,11 @@ pub struct App {
     pub reasoning_at: Option<usize>,
     pub live_tool: Option<(String, usize)>,
     pub tick: u64,
+    /// Transient status message (copy confirmations), shown in the footer for
+    /// a couple of seconds instead of pushing a transcript entry.
+    pub toast: Option<(String, u64, bool)>,
+    /// Set when the whole screen must be repainted from scratch.
+    pub needs_repaint: bool,
     pub quit: bool,
     pub pending: Option<PendingSession>,
 }
@@ -230,6 +235,8 @@ impl App {
             reasoning_at: None,
             live_tool: None,
             tick: 0,
+            toast: None,
+            needs_repaint: false,
             quit: false,
             pending: None,
         };
@@ -263,6 +270,8 @@ impl App {
         self.selection = None;
         self.slash_dismissed = false;
         self.populate(snapshot);
+        self.selection = None;
+        self.needs_repaint = true;
     }
 
     pub fn populate(&mut self, snapshot: SessionSnapshot) {
@@ -361,6 +370,26 @@ impl App {
         self.entries.push(entry);
         if self.follow {
             self.scroll = usize::MAX;
+        }
+    }
+
+    /// Show a transient footer message (copy confirmations, clipboard errors).
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), self.tick, false));
+    }
+
+    pub fn toast_error(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), self.tick, true));
+    }
+
+    /// The toast still being inside its display window, if any.
+    pub fn active_toast(&self) -> Option<(&str, bool)> {
+        const TICKS: u64 = 16;
+        match &self.toast {
+            Some((text, started, error)) if self.tick.saturating_sub(*started) < TICKS => {
+                Some((text.as_str(), *error))
+            }
+            _ => None,
         }
     }
 
@@ -681,7 +710,7 @@ impl App {
                         self.selection = Some((point, point));
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if let Some((anchor, _)) = self.selection {
+                        if let Some((mut anchor, _)) = self.selection {
                             let col = mouse.column.clamp(
                                 self.mouse_area.x,
                                 self.mouse_area.right().saturating_sub(1),
@@ -690,8 +719,21 @@ impl App {
                                 self.mouse_area.y,
                                 self.mouse_area.bottom().saturating_sub(1),
                             );
-                            self.selection =
-                                Some((anchor, (col - self.mouse_area.x, row - self.mouse_area.y)));
+                            let point = (col - self.mouse_area.x, row - self.mouse_area.y);
+                            // Dragging past an edge scrolls the transcript, like
+                            // a native terminal; the anchor rides along so the
+                            // selection keeps covering the same text.
+                            let last = self.mouse_area.height.saturating_sub(1);
+                            if point.1 == 0 && self.scroll > 0 {
+                                self.follow = false;
+                                self.scroll -= 1;
+                                anchor.1 = anchor.1.saturating_add(1);
+                            } else if point.1 == last && self.mouse_area.height > 1 {
+                                self.follow = false;
+                                self.scroll += 1;
+                                anchor.1 = anchor.1.saturating_sub(1);
+                            }
+                            self.selection = Some((anchor, point));
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
@@ -811,7 +853,11 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('g') => {
+                    // Also doubles as "fix my screen": a full repaint clears
+                    // anything the terminal left behind after an external
+                    // scroll or a mode switch.
                     self.follow = true;
+                    self.needs_repaint = true;
                     return Ok(());
                 }
                 KeyCode::Char('m') => {
@@ -823,7 +869,7 @@ impl App {
                         execute!(out, crossterm::event::DisableMouseCapture)
                     };
                     self.notice(if self.mouse_enabled {
-                        "mouse on — wheel scrolls, drag selects and copies (Shift+drag works natively in most terminals too)"
+                        "mouse on - wheel scrolls, drag selects linearly and copies on release (ctrl+m hands selection back to the terminal)"
                     } else {
                         "mouse off — terminal handles selection natively again (Ctrl+M re-enables wheel + drag-copy)"
                     });
@@ -1057,53 +1103,58 @@ impl App {
         }
     }
 
-    /// Release of a left-drag: copy the selected transcript region to the
-    /// system clipboard. Plain text comes from the cached render lines with
-    /// background padding trimmed.
+    /// Release of a left-drag: copy the selected transcript region.
+    ///
+    /// The selection is linear, like every terminal: rows between the anchor
+    /// and the cursor are taken whole, and only the first and last row are cut
+    /// at the column boundary.
     fn finish_selection(&mut self) {
-        let Some(((c1, r1), (c2, r2))) = self.selection else {
+        let Some((a, b)) = self.selection else {
             return;
         };
-        if c1 == c2 && r1 == r2 {
+        if a == b {
             self.selection = None;
-            self.toggle_row(r1);
+            self.toggle_row(a.1);
             return;
         }
-        let (top, bottom) = (r1.min(r2), r1.max(r2));
-        let (c_top, c_bottom) = if r1 <= r2 { (c1, c2) } else { (c2, c1) };
-        let text = {
-            let cache = self.lines_cache.borrow();
-            let mut picked: Vec<String> = Vec::new();
-            for row in top..=bottom {
-                let index = self.scroll + row as usize;
-                let Some(line) = cache.get(index) else {
-                    continue;
-                };
-                let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                let plain = plain.trim_end();
-                let start = if row == top { c_top as usize } else { 0 };
-                let end = if row == bottom {
-                    c_bottom as usize + 1
-                } else {
-                    usize::MAX
-                };
-                let picked_line: String = plain
-                    .chars()
-                    .skip(start)
-                    .take(end.saturating_sub(start))
-                    .collect();
-                picked.push(picked_line);
-            }
-            picked.join("\n")
+        let Some(text) = self.selection_text() else {
+            return;
         };
-        if text.trim().is_empty() {
-            return;
+        let lines = text.lines().count();
+        match copy_to_clipboard(&text) {
+            Ok(()) => self.toast(format!("copied {lines} line{}", plural(lines))),
+            Err(err) => self.toast_error(format!("clipboard: {err}")),
         }
-        copy_to_clipboard(&text);
-        self.notice(format!(
-            "copied {} line(s) to clipboard",
-            text.lines().count()
-        ));
+    }
+
+    /// Plain text under the current selection, one entry per screen row, with
+    /// the visual padding trimmed. `None` when the selection is empty.
+    pub(crate) fn selection_text(&self) -> Option<String> {
+        let (a, b) = self.selection?;
+        if a == b {
+            return None;
+        }
+        let ((top_col, top), (bottom_col, bottom)) = ordered(a, b);
+        let cache = self.lines_cache.borrow();
+        let mut picked: Vec<String> = Vec::new();
+        for row in top..=bottom {
+            let index = self.scroll + row;
+            let Some(line) = cache.get(index) else {
+                continue;
+            };
+            let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let Some((start, end)) = selection_row_span(row, top, top_col, bottom, bottom_col)
+            else {
+                continue;
+            };
+            picked.push(slice_columns(&plain, start, end).trim_end().to_string());
+        }
+        let text = picked.join("\n");
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     fn copy_last_assistant(&mut self) {
@@ -1114,10 +1165,10 @@ impl App {
             .find(|e| e.kind == EntryKind::Assistant)
             .map(|e| e.body.clone());
         match text {
-            Some(text) => {
-                copy_to_clipboard(&text);
-                self.notice("copied last reply");
-            }
+            Some(text) => match copy_to_clipboard(&text) {
+                Ok(()) => self.toast("copied last reply"),
+                Err(err) => self.toast_error(format!("clipboard: {err}")),
+            },
             None => self.notice("no assistant reply to copy yet"),
         }
     }
@@ -1649,31 +1700,69 @@ pub fn spinner(tick: u64) -> &'static str {
     SPINNER[(tick as usize / 4) % SPINNER.len()]
 }
 
-fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    #[cfg(windows)]
-    let mut builder = {
-        let mut cmd = Command::new("clip");
-        cmd.stdin(Stdio::piped());
-        cmd
-    };
-    #[cfg(target_os = "macos")]
-    let mut builder = {
-        let mut cmd = Command::new("pbcopy");
-        cmd.stdin(Stdio::piped());
-        cmd
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut builder = {
-        let mut cmd = Command::new("wl-copy");
-        cmd.stdin(Stdio::piped());
-        cmd
-    };
-    if let Ok(mut child) = builder.spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
+/// Order two selection corners top-left to bottom-right, comparing columns
+/// only when both are on the same row (that is what makes the selection
+/// linear rather than rectangular).
+pub fn ordered(a: (u16, u16), b: (u16, u16)) -> ((usize, usize), (usize, usize)) {
+    let first = (a.0 as usize, a.1 as usize);
+    let second = (b.0 as usize, b.1 as usize);
+    if (second.1, second.0) < (first.1, first.0) {
+        (second, first)
+    } else {
+        (first, second)
     }
+}
+
+/// Half-open column range selected on `row`, or `None` when the row is outside
+/// the selection. `(col, row)` tuples, not `(row, col)`.
+pub fn selection_row_span(
+    row: usize,
+    top: usize,
+    top_col: usize,
+    bottom: usize,
+    bottom_col: usize,
+) -> Option<(usize, usize)> {
+    if row < top || row > bottom {
+        return None;
+    }
+    let start = if row == top { top_col } else { 0 };
+    let end = if row == bottom {
+        bottom_col + 1
+    } else {
+        usize::MAX
+    };
+    if end <= start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+/// Slice a rendered row by display columns so double-width characters are
+/// never cut in half and the result matches what the user sees highlighted.
+pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut column = 0usize;
+    for c in text.chars() {
+        let width = ratatui::text::Span::raw(String::from(c)).width();
+        if column >= end {
+            break;
+        }
+        if column >= start {
+            out.push(c);
+        }
+        column += width;
+    }
+    out
+}
+
+/// Copy through the platform clipboard API instead of piping bytes into
+/// `clip.exe`, which decodes stdin with the ANSI code page and turns every
+/// non-ASCII character into mojibake on a Chinese Windows.
+fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|err| format!("copy failed: {err}"))
 }

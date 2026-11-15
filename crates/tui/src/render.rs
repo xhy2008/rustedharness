@@ -19,7 +19,8 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{
-    human_count, model_filtered, session_filtered, shorten_path, App, Overlay, PickerItem,
+    human_count, model_filtered, ordered, selection_row_span, session_filtered, shorten_path, App,
+    Overlay, PickerItem,
 };
 use crate::entries::{Entry, EntryKind};
 use crate::theme::*;
@@ -346,15 +347,18 @@ fn bullet(text: &str) -> Option<(&'static str, &str)> {
 // transcript
 // ---------------------------------------------------------------------------
 
+/// Hash the transcript by content, not by length: a restored or re-streamed
+/// entry can be replaced by text of the same size, and a length-only signature
+/// would keep rendering the stale lines from the cache.
 fn transcript_signature(app: &App) -> u64 {
     let mut hash = 0u64;
     for entry in &app.entries {
         let flags =
             (entry.expanded as u64) << 62 | entry.ok.map(|o| o as u64 + 1).unwrap_or(0) << 60;
-        let mix = ((entry.kind as u64) << 56)
-            ^ ((entry.title.len() as u64) << 28)
-            ^ ((entry.arg.len() as u64) << 12)
-            ^ entry.body.len() as u64;
+        let body = xxhash_rust::xxh32::xxh32(entry.body.as_bytes(), 0) as u64;
+        let title = xxhash_rust::xxh32::xxh32(entry.title.as_bytes(), 1) as u64;
+        let arg = xxhash_rust::xxh32::xxh32(entry.arg.as_bytes(), 2) as u64;
+        let mix = ((entry.kind as u64) << 56) ^ (title << 40) ^ (arg << 20) ^ body;
         hash = hash.wrapping_mul(1000003) ^ flags ^ mix;
     }
     hash
@@ -577,18 +581,27 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(cache.as_slice()).scroll((app.scroll as u16, 0));
     frame.render_widget(paragraph, area);
 
-    // Drag-selection highlight: restyle the cells under the selected rect
-    // without touching their glyphs.
-    if let Some(((c1, r1), (c2, r2))) = app.selection {
-        let x1 = area.x + c1.min(c2);
-        let x2 = (area.x + c1.max(c2)).min(area.right().saturating_sub(1));
-        let y1 = area.y + r1.min(r2);
-        let y2 = (area.y + r1.max(r2)).min(area.bottom().saturating_sub(1));
+    // Drag-selection highlight. Linear, like a terminal: middle rows are
+    // highlighted edge to edge, only the first and last row stop at the drag
+    // column.
+    if let Some((a, b)) = app.selection {
+        let ((top_col, top), (bottom_col, bottom)) = ordered(a, b);
         let style = Style::default().fg(TEXT).bg(SELECTED_BG);
+        let width = area.width as usize;
         let buffer = frame.buffer_mut();
-        for y in y1..=y2 {
-            for x in x1..=x2 {
-                if let Some(cell) = buffer.cell_mut(ratatui::layout::Position::new(x, y)) {
+        for row in top..=bottom {
+            if row >= area.height as usize {
+                break;
+            }
+            let Some((start, end)) = selection_row_span(row, top, top_col, bottom, bottom_col)
+            else {
+                continue;
+            };
+            let y = area.y + row as u16;
+            for column in start..end.min(width) {
+                if let Some(cell) =
+                    buffer.cell_mut(ratatui::layout::Position::new(area.x + column as u16, y))
+                {
                     cell.set_style(style);
                 }
             }
@@ -691,6 +704,13 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
 
     let build = |cwd: usize, compact: bool, cache: bool, cost: bool, tokens: bool| {
         let mut spans: Vec<Span<'static>> = Vec::new();
+        if let Some((text, error)) = app.active_toast() {
+            spans.push(Span::styled(
+                text.to_string(),
+                style(if error { RED } else { ACCENT }),
+            ));
+            spans.push(Span::styled("|", style(FAINT)));
+        }
         if app.busy {
             spans.push(Span::styled(
                 format!("working{}", crate::app::spinner(app.tick)),
@@ -1016,15 +1036,16 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 kv("esc", "cancel turn, clear input, close overlay"),
                 kv("ctrl+c", "clear editor, quit when empty"),
                 kv("ctrl+d", "quit"),
-                kv("ctrl+o", "collapse/expand tool output"),
-                kv("ctrl+t", "show/hide thinking"),
+                kv("ctrl+o", "expand/collapse all tool output"),
+                kv("ctrl+t", "expand/collapse all thinking"),
                 kv("ctrl+l", "model picker"),
                 kv("ctrl+r", "session picker"),
                 kv("ctrl+f", "file browser"),
                 kv("ctrl+x", "copy last reply"),
-                kv("ctrl+g", "follow transcript end"),
-                kv("ctrl+m", "toggle mouse (off = native select)"),
-                kv("drag", "copy selected transcript text"),
+                kv("ctrl+g", "follow end / repaint"),
+                kv("ctrl+m", "toggle mouse capture (off = native select)"),
+                kv("click", "fold/unfold a tool or thinking block"),
+                kv("drag", "linear selection, copied on release"),
                 kv("pgup/pgdn", "scroll transcript"),
                 Line::from(""),
                 kv("/", "command list"),

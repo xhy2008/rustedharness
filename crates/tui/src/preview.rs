@@ -357,6 +357,14 @@ fn streaming_blocks_open_themselves_and_fold_on_completion() {
 }
 
 #[test]
+#[ignore = "writes target/ui-preview-selection.json; run on demand"]
+fn preview_selection() {
+    let mut app = demo_app();
+    app.selection = Some(((10, 2), (30, 6)));
+    parent_dump(&mut app, "ui-preview-selection.json", 108, 26);
+}
+
+#[test]
 #[ignore = "writes target/ui-preview-idle.json; run on demand"]
 fn preview_idle() {
     let mut app = demo_app();
@@ -375,4 +383,77 @@ fn parent_dump(app: &mut crate::app::App, name: &str, width: u16, height: u16) {
         .join(name);
     std::fs::write(&path, json).expect("write preview");
     println!("wrote {}", path.display());
+}
+
+#[test]
+fn selection_is_linear_not_rectangular() {
+    let mut app = demo_app();
+    dump(&mut app, 100, 40);
+
+    let rows: Vec<String> = app
+        .lines_cache
+        .borrow()
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    // Drag from column 6 of the first text row to column 4 three rows down.
+    let (top, bottom) = (0usize, 3usize);
+    app.selection = Some(((6, top as u16), (4, bottom as u16)));
+    let text = app.selection_text().expect("selection text");
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(
+        lines.len(),
+        bottom - top + 1,
+        "one output line per screen row"
+    );
+    assert_eq!(
+        lines[0],
+        crate::app::slice_columns(&rows[top], 6, usize::MAX).trim_end(),
+        "first row cut at the anchor"
+    );
+    for row in top + 1..bottom {
+        assert_eq!(
+            lines[row - top],
+            rows[row].trim_end(),
+            "middle rows are taken whole"
+        );
+    }
+    assert_eq!(
+        lines[bottom - top],
+        crate::app::slice_columns(&rows[bottom], 0, 5).trim_end(),
+        "last row stops at the cursor"
+    );
+    // A rectangular selection would clip every row to the drag columns; whole
+    // middle rows are what makes it linear.
+    assert!(
+        lines.iter().skip(1).any(|line| line.chars().count() > 5),
+        "middle rows must not be clipped to the drag columns"
+    );
+}
+
+#[test]
+fn slice_columns_never_splits_a_wide_character() {
+    use crate::app::slice_columns;
+    // 回归 = columns 0-1 and 2-3, then a/b/c at 4/5/6.
+    assert_eq!(slice_columns("回归abc", 0, 2), "回");
+    assert_eq!(slice_columns("回归abc", 2, 4), "归");
+    assert_eq!(slice_columns("回归abc", 1, 4), "归");
+    assert_eq!(slice_columns("回归abc", 0, 7), "回归abc");
+    assert_eq!(slice_columns("回归abc", 4, 7), "abc");
+    assert_eq!(slice_columns("回归abc", 6, 99), "c");
+    assert_eq!(slice_columns("abc", 1, 2), "b");
+    assert_eq!(slice_columns("", 0, 5), "");
+}
+
+/// Smoke test for the clipboard path: the platform API must round-trip
+/// non-ASCII text, which the old `clip.exe` pipe could not do on a Chinese
+/// Windows. Overwrites the clipboard, so it only runs on demand.
+#[test]
+#[ignore = "overwrites the clipboard; run on demand"]
+fn clipboard_round_trips_unicode() {
+    let text = "回归全部通过 — 边界用例 ✨";
+    let mut clipboard = arboard::Clipboard::new().expect("clipboard");
+    clipboard.set_text(text.to_string()).expect("set text");
+    assert_eq!(clipboard.get_text().expect("get text"), text);
 }
