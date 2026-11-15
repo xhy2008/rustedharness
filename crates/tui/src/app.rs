@@ -159,7 +159,9 @@ pub struct App {
     pub pending: Option<PendingSession>,
 }
 
-const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+/// Animated dots, all three frames the same width so the status line never
+/// jitters. Braille and dingbat spinners are not in every terminal font.
+const SPINNER: [&str; 3] = ["·  ", "·· ", "···"];
 
 const COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this command list"),
@@ -233,15 +235,7 @@ impl App {
             pending: None,
         };
         app.populate(app.agent.snapshot());
-        app.push(
-            EntryKind::Notice,
-            "",
-            format!(
-                "RustedHarness | workspace {} | model {} | /help for commands",
-                shorten_path(&app.cwd, 40),
-                app.agent_model
-            ),
-        );
+        app.push_welcome();
         app
     }
 
@@ -271,6 +265,18 @@ impl App {
         self.selection = None;
         self.slash_dismissed = false;
         self.populate(snapshot);
+        self.push_welcome();
+    }
+
+    /// Masthead at the top of a session: name, version, workspace, model.
+    fn push_welcome(&mut self) {
+        let entry = Entry::new(
+            EntryKind::Welcome,
+            env!("CARGO_PKG_VERSION"),
+            self.cwd.clone(),
+        )
+        .with_arg(self.agent_model.clone());
+        self.push_entry(entry);
     }
 
     pub fn populate(&mut self, snapshot: SessionSnapshot) {
@@ -308,11 +314,9 @@ impl App {
                 if let Some(calls) = message.tool_calls {
                     for call in calls {
                         let args = call.function.arguments.clone();
-                        let mut entry = Entry::new(
-                            EntryKind::Tool,
-                            format!("{} {}", call.function.name, brief(&args)),
-                            args,
-                        );
+                        let mut entry =
+                            Entry::new(EntryKind::Tool, call.function.name.as_str(), "")
+                                .with_arg(tool_summary(&call.function.name, &args));
                         entry.expanded = self.tools_open;
                         self.push_entry(entry);
                     }
@@ -424,8 +428,8 @@ impl App {
                 arguments,
             } => {
                 let args = arguments.to_string();
-                let mut entry =
-                    Entry::new(EntryKind::Tool, format!("{name} {}", brief(&args)), args);
+                let mut entry = Entry::new(EntryKind::Tool, name.as_str(), "")
+                    .with_arg(tool_summary(&name, &args));
                 entry.expanded = self.tools_open;
                 self.push_entry(entry);
                 self.live_tool = Some((id, self.entries.len() - 1));
@@ -435,10 +439,8 @@ impl App {
             HarnessEvent::ToolOutput { name, text, .. } => {
                 if let Some((_, index)) = self.live_tool {
                     if let Some(entry) = self.entries.get_mut(index) {
-                        entry.title = format!("{name} ...");
-                        let tail = tail_lines(&text, 12);
-                        entry.body.push('\n');
-                        entry.body.push_str(&tail);
+                        let _ = name;
+                        entry.body = tail_lines(&text, 20);
                     }
                 }
             }
@@ -456,18 +458,13 @@ impl App {
                 match &self.live_tool {
                     Some((live_id, index)) if live_id == &id => {
                         if let Some(entry) = self.entries.get_mut(*index) {
-                            entry.title = format!("{name} {}", if ok { "✔" } else { "✘" });
                             entry.ok = Some(ok);
                             entry.body = body;
                         }
                         self.live_tool = None;
                     }
                     _ => {
-                        let mut entry = Entry::new(
-                            EntryKind::Tool,
-                            format!("{name} {}", if ok { "✔" } else { "✘" }),
-                            body,
-                        );
+                        let mut entry = Entry::new(EntryKind::Tool, name.as_str(), body);
                         entry.ok = Some(ok);
                         entry.expanded = self.tools_open;
                         self.push_entry(entry);
@@ -1526,15 +1523,90 @@ pub(crate) fn shorten_path(path: &str, max: usize) -> String {
     format!("...{tail}")
 }
 
-fn brief(value: &str) -> String {
+/// Human-facing one-liner for a tool call: the primary argument instead of the
+/// raw JSON blob, e.g. `[bash] cargo test --workspace` rather than
+/// `{"command":"cargo test --workspace","timeout_ms":120000}`.
+fn tool_summary(name: &str, raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return one_line(raw, 96);
+    };
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let summary = match name {
+        "grep" | "glob" => match (text("pattern"), text("path")) {
+            (Some(pattern), Some(path)) => format!("{pattern}  in {path}"),
+            (Some(pattern), None) => pattern,
+            _ => first_string(&value, raw),
+        },
+        "edit" => {
+            let count = value
+                .get("edits")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len);
+            match (text("path"), count) {
+                (Some(path), Some(n)) => format!("{path}  ({n} edit{})", plural(n)),
+                (Some(path), None) => path,
+                (None, _) => first_string(&value, raw),
+            }
+        }
+        "lsp" => match (text("op"), text("path")) {
+            (Some(op), Some(path)) => format!("{op}  {path}"),
+            (_, path) => path.unwrap_or_else(|| first_string(&value, raw)),
+        },
+        "todo" => value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| format!("{} item{}", items.len(), plural(items.len())))
+            .unwrap_or_else(|| "list".to_string()),
+        "await" => value
+            .get("pid")
+            .map(|pid| format!("pid {pid}"))
+            .unwrap_or_default(),
+        "web_search" => text("query").unwrap_or_else(|| first_string(&value, raw)),
+        _ => text("command")
+            .or_else(|| text("path"))
+            .unwrap_or_else(|| first_string(&value, raw)),
+    };
+    one_line(&summary, 96)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn first_string(value: &serde_json::Value, fallback: &str) -> String {
+    value
+        .as_object()
+        .and_then(|map| {
+            map.values()
+                .find_map(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Collapse a multi-line value into one row of at most `max` characters.
+fn one_line(value: &str, max: usize) -> String {
     let flat: String = value
         .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    if flat.chars().count() <= 80 {
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
         flat
     } else {
-        format!("{}...", flat.chars().take(80).collect::<String>())
+        format!(
+            "{}...",
+            flat.chars().take(max.saturating_sub(3)).collect::<String>()
+        )
     }
 }
 
@@ -1555,7 +1627,7 @@ pub fn human_count(value: u64) -> String {
 }
 
 pub fn spinner(tick: u64) -> &'static str {
-    SPINNER[(tick as usize / 3) % SPINNER.len()]
+    SPINNER[(tick as usize / 4) % SPINNER.len()]
 }
 
 fn copy_to_clipboard(text: &str) {

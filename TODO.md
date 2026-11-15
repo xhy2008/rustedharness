@@ -1,6 +1,54 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：TUI 视觉重做（2026-11-15）
+
+用户需求：**当前 TUI 很难看，按 pi agent 的样式重做。**
+
+参考：pi 的视觉语法是「一份文档，不是一堆表单」——无边框记录流、用户消息一条安静底色带、工具调用压成一行灰字、正文就是文本、只有一个圆角输入框、一行状态栏，颜色只留给必须一眼看到的状态。本轮把 TUI 整体搬成这套语法。
+
+### 布局（`crates/tui/src/render.rs` 全量重写）
+
+1. 三段式：`transcript`（顶部留 1 行呼吸 / 左缩进 1 列 / 右侧留 2 列防 CJK 溢出）→ `editor`（3 行圆角框）→ `footer`（1 行状态栏）。转录内容向右偏移后，`app.mouse_area` 同步指向内容区，拖拽选区坐标不用改。
+2. 用户消息：整行底色带 `USER_BG` + 强调色 `›`，换行续行缩进 2 空格并补齐底色，形成一条完整色带。
+3. 助手正文：内置极简 markdown——`#` 标题加粗、`-`/`1.` 列表（破折号用强调色）、`>` 引用（`│` 竖线 + 斜体）、` ``` ` 围栏代码（`CODE_BG` 通栏底 + 2 空格缩进）、行内 `` `code` ``（`CODE_BG` 底）、`**bold**`。
+4. 思考：`·` + DIM 斜体；超 700 字截断。
+5. 工具调用：单行 `● [name] 参数摘要`（`●` 绿=成功 / `×` 红=失败 / `○` 黄=运行中）。折叠时下面补一行首行输出的 DIM 预览 + `+N`；`Ctrl+O` 展开为 4 空格缩进的整段输出（失败时整段红色）。
+6. 通知 `·`、错误 `×`、压缩 `── 标题 ──────`（铺满内容宽度）。
+7. 顶部 masthead（`EntryKind::Welcome`）：`RustedHarness 0.1.0` / `cwd · model` / 一条 `BORDER_DIM` 分隔线 / 三个快捷键提示。新建会话与切换会话都会重新插入。
+8. 编辑器：圆角框，`›` 强调色提示符，竖线光标；忙碌时边框转强调色；空输入时只显示 FAINT 斜体占位符（不画光标——`› │` 两竖挨着会被读成分隔线）。
+9. 状态栏：字段与顺序保持不变（`cwd|model|compact|ctx|in/out|CacheHit|¥cost`），但空间不足时按 **路径长度 → CacheHit → cost → compact model** 逐级隐藏，只有实在放不下才截断；同一行绝不换行（换行会把编辑器顶掉）。`working` 后跟等宽三点动画，排队时显示 `N queued`。
+10. 覆盖层：全部改成圆角 + 不透明底 `BG_BASE` + 左右各 1 列内边距；标题写在左上边框、`n of m` 写在右上边框；列表按最长 label 自适应两列；pick 面板与编辑器之间留 1 行空隙。
+
+### 字形（重要）
+
+只使用 WGL4 覆盖、Consolas/Cascadia 都有的字符：`● × ○ › │ · ─ ╭╮╰╯`。删掉了 `✔ ✘ ❯ ▏ ╌ ⠋`——它们在 Windows 默认等宽字体里是豆腐块（旧版工具行前面那个方块就是这么来的）。spinner 改成三帧等宽点 `·  / ·· / ···`。
+
+### 数据模型
+
+- `entries::Entry` 新增 `arg`（工具参数的一行摘要），`title` 现在只放工具名；`EntryKind` 新增 `Welcome`。
+- `app::tool_summary` 从工具调用 JSON 里提取真正有意义的参数：shell 取 `command`、read/write/edit 取 `path`（edit 追加 `(N edits)`）、grep/glob 取 `pattern in path`、web_search 取 `query`、await 取 `pid`、todo 取条数，取不到就退回第一个字符串字段。原始 JSON 不再显示（`{"command":"cargo test","timeout_ms":120000}` 这种对用户没有价值）。
+- `ToolOutput` 流式输出改为覆盖 `body`（原先往 JSON 参数后面追加，展开后是一堆废文本）。
+
+### 预览工具（新增）
+
+`crates/tui/src/preview.rs`：用 `Agent::with_backend` + 桩 backend 构造一个装满代表性条目的 `App`，用 `TestBackend` 渲染后把单元格（字符/fg/bg）dump 成 `target/ui-preview*.json`。
+
+```bash
+cargo test -p rustedharness-tui -- --ignored preview   # 主界面 + 窄屏
+cargo test -p rustedharness-tui -- --ignored preview_picker|preview_panel|preview_idle
+```
+
+`.workbuddy/preview/render.py` 把 json 画成 PNG（不提交，随手看样式用）。四个预览测试都是 `#[ignore]`，不参与 `cargo test`。
+
+### 验证
+
+- `cargo test --workspace` 全绿（core 147 + cli 4 + 4 个 ignored 预览）。
+- `cargo clippy --workspace --all-targets` 无警告；`cargo fmt` 已跑。
+- 实机：`timeout 5 winpty -Xallow-non-tty ./target/debug/rustedharness.exe tui` 跑满 5s 未崩（80 列，状态栏自动省掉 compact 字段）。
+- 注意：winpty 会把 24bit 颜色降成 ANSI-16，从 winpty 抓下来的帧偏色是采集工具的问题，不是应用的问题；Windows Terminal 下 `Color::Rgb` 是直出的。
+
 ## 已完成：会话文件惰性创建（2026-11-08，本轮已实现并提交）
+
 
 用户需求：**在用户发送第一条消息之前，不得创建会话 jsonl 文件**。
 
@@ -82,7 +130,8 @@ git -C E:/rustedharness -c user.name="xhy37000616" -c user.email="xhy37000616@16
 
 - TUI 是全屏 + 拖拽复制方案（用户否决过 inline viewport 方案，别再碰）。
 - 渲染宽度：`draw()` 全局右留 1 列；UI 内已禁用东亚歧义宽度字符（· … ¥ 除外），新增 UI 字符串只用 ASCII 标点做分隔符/省略号。`¥` 允许保留（cost 字段）。
-- 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。
+- UI 字形只能用 WGL4 覆盖集（`● × ○ › │ · ─` + 圆角框），不要再引入 `✔ ✘ ❯ ▏ ╌` 或 braille spinner：Windows 等宽字体没这些字形，会显示成方块。
+- 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。宽度不足时按 路径→CacheHit→cost→compact 顺序隐藏字段（见 `render::footer_line` 的 layouts 表），不要退回强制截断。
 - resize 防抖：lib.rs event_loop，Resize 风暴期间跳过 draw，静默 150ms 后 clear+强制重绘（RESIZE_SETTLE 常量）。
 - 工作区根锁死（target/debug 启动限制）是设计内行为，不要改。
 - 不要写依赖网络的实机测试。

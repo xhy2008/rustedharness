@@ -7,3 +7,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# WorkBuddy session data
+.workbuddy/

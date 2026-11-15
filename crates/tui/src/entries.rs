@@ -2,6 +2,8 @@
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
+    /// Startup block: name, version, workspace, model.
+    Welcome,
     User,
     Assistant,
     Reasoning,
@@ -13,8 +15,10 @@ pub enum EntryKind {
 
 pub struct Entry {
     pub kind: EntryKind,
-    /// One-line identity of the entry (tool name, notice text).
+    /// One-line identity of the entry (tool name, notice heading).
     pub title: String,
+    /// Tool argument summary rendered next to the tool name.
+    pub arg: String,
     /// Wrapped body. Tool bodies stay collapsed unless expanded.
     pub body: String,
     /// Per-tool expand state; also read by the global Ctrl+O toggle.
@@ -28,15 +32,21 @@ impl Entry {
         Self {
             kind,
             title: title.into(),
+            arg: String::new(),
             body: body.into(),
             expanded: false,
             ok: None,
         }
     }
 
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.arg = arg.into();
+        self
+    }
+
     pub fn visible_body(&self, tools_open: bool) -> bool {
         match self.kind {
-            EntryKind::Tool => self.expanded && tools_open,
+            EntryKind::Tool => self.expanded && tools_open && !self.body.trim().is_empty(),
             _ => true,
         }
     }

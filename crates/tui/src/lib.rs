@@ -8,6 +8,8 @@
 
 mod app;
 mod entries;
+#[cfg(test)]
+mod preview;
 mod render;
 mod theme;
 

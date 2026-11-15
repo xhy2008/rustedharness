@@ -1,32 +1,39 @@
-//! A small, Pi-inspired dark palette for the full-screen TUI.
+//! Palette for the full-screen TUI.
 //!
-//! Values approximate Pi's `dark` theme (OKHSL) in sRGB so the UI keeps the
-//! same feel without pulling in a colour-management crate. The palette is
-//! intentionally flat: borders are dim, muted text carries metadata, and the
-//! accent is reserved for focus, the selected row and the user message block.
+//! Deliberately low-chroma and quiet, in the spirit of Pi: the transcript is
+//! carried by two shades of text and a lot of empty space, borders are almost
+//! invisible, and colour is reserved for state that the eye must find
+//! instantly (ok / failed tool call, context pressure, cost). Nothing here
+//! paints large areas except the user-message band and inline code, and both
+//! stay within a few points of the terminal background.
 
 use ratatui::style::Color;
 
-pub const TEXT: Color = Color::Rgb(0xe3, 0xe4, 0xe9);
-pub const MUTED: Color = Color::Rgb(0xa4, 0xa6, 0xaf);
-pub const DIM: Color = Color::Rgb(0x82, 0x84, 0x8e);
-pub const THINKING: Color = Color::Rgb(0x9a, 0x9c, 0xa6);
+/// Primary reading colour for prose.
+pub const TEXT: Color = Color::Rgb(0xe4, 0xe5, 0xea);
+/// Secondary text: tool bodies, notices, list rows.
+pub const MUTED: Color = Color::Rgb(0xa6, 0xa9, 0xb2);
+/// Metadata that should be legible but never compete with content.
+pub const DIM: Color = Color::Rgb(0x77, 0x7a, 0x84);
+/// Rules, gutters, hints. Barely there on purpose.
+pub const FAINT: Color = Color::Rgb(0x4b, 0x4e, 0x57);
 
-pub const ACCENT: Color = Color::Rgb(0xc2, 0x8d, 0xd8);
-pub const BLUE: Color = Color::Rgb(0x8e, 0xa9, 0xea);
-pub const GREEN: Color = Color::Rgb(0x7f, 0xd8, 0xb0);
-pub const RED: Color = Color::Rgb(0xf0, 0x94, 0x7a);
-pub const YELLOW: Color = Color::Rgb(0xcf, 0xe8, 0x7a);
+pub const ACCENT: Color = Color::Rgb(0xb2, 0x9c, 0xe6);
+pub const BLUE: Color = Color::Rgb(0x93, 0xb0, 0xe6);
+pub const GREEN: Color = Color::Rgb(0x84, 0xcf, 0xac);
+pub const RED: Color = Color::Rgb(0xe8, 0x8d, 0x80);
+pub const YELLOW: Color = Color::Rgb(0xdf, 0xb8, 0x77);
 
-pub const BORDER: Color = Color::Rgb(0x84, 0x9c, 0xd8);
-pub const BORDER_DIM: Color = Color::Rgb(0x55, 0x57, 0x5f);
+/// Frame colour for the editor box, overlays and cards.
+pub const BORDER: Color = Color::Rgb(0x3d, 0x40, 0x49);
+/// Frame colour when the surface is not focused.
+pub const BORDER_DIM: Color = Color::Rgb(0x2e, 0x31, 0x38);
 
-pub const USER_BG: Color = Color::Rgb(0x23, 0x2c, 0x55);
-pub const TOOL_BG: Color = Color::Rgb(0x32, 0x33, 0x38);
+/// Band behind the echoed user message.
+pub const USER_BG: Color = Color::Rgb(0x26, 0x28, 0x2f);
+/// Inline code and fenced blocks inside assistant prose.
+pub const CODE_BG: Color = Color::Rgb(0x21, 0x23, 0x29);
 /// Opaque backdrop for modal overlays so the transcript never bleeds through.
-pub const BG_BASE: Color = Color::Rgb(0x14, 0x16, 0x1a);
-pub const TOOL_OK_BG: Color = Color::Rgb(0x22, 0x40, 0x36);
-pub const TOOL_ERR_BG: Color = Color::Rgb(0x46, 0x2a, 0x22);
-
-/// Background used for the selected row in pickers and overlays.
-pub const SELECTED_BG: Color = Color::Rgb(0x2a, 0x34, 0x60);
+pub const BG_BASE: Color = Color::Rgb(0x1b, 0x1c, 0x22);
+/// Background of the selected row in pickers and overlays.
+pub const SELECTED_BG: Color = Color::Rgb(0x2c, 0x2f, 0x3a);
