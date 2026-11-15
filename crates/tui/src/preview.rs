@@ -70,8 +70,8 @@ fn demo_app() -> App {
     app.push(
         EntryKind::User,
         "",
-        "the transcript looks cramped. can you make the tool calls quieter and give the \
-         composer a real frame?",
+        "the transcript looks cramped. can you make the tool calls quieter and give the \n\
+         composer a real frame?\n\n\t- tabs in a paste must not shift the row\n\t- nor may a \\x1b[31mraw escape\\x1b[0m",
     );
     let mut thinking = Entry::new(
         EntryKind::Reasoning,
@@ -396,17 +396,20 @@ fn selection_is_linear_not_rectangular() {
         .iter()
         .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    // Drag from column 6 of the first text row to column 4 three rows down.
-    let (top, bottom) = (0usize, 3usize);
+    // The thinking block: one header row plus wrapped body rows, all non-empty.
+    let top = rows
+        .iter()
+        .position(|row| row.starts_with("v thinking"))
+        .expect("expanded thinking header");
+    let bottom = top + 2;
+    assert!(rows[bottom].trim_end().chars().count() > 6);
+
+    // Drag from column 6 of the first row to column 4 three rows down.
     app.selection = Some(((6, top as u16), (4, bottom as u16)));
     let text = app.selection_text().expect("selection text");
     let lines: Vec<&str> = text.lines().collect();
 
-    assert_eq!(
-        lines.len(),
-        bottom - top + 1,
-        "one output line per screen row"
-    );
+    assert_eq!(lines.len(), bottom - top + 1, "one output line per screen row");
     assert_eq!(
         lines[0],
         crate::app::slice_columns(&rows[top], 6, usize::MAX).trim_end(),
@@ -456,4 +459,34 @@ fn clipboard_round_trips_unicode() {
     let mut clipboard = arboard::Clipboard::new().expect("clipboard");
     clipboard.set_text(text.to_string()).expect("set text");
     assert_eq!(clipboard.get_text().expect("get text"), text);
+}
+
+/// Tool output is raw file text: tabs and escape sequences must never reach a
+/// span, or the terminal advances to a tab stop the frame buffer knows nothing
+/// about and the row silently desyncs (the "orphaned character" bug).
+#[test]
+fn tool_output_cannot_desync_the_screen() {
+    let mut app = demo_app();
+    app.entries.clear();
+    let mut entry = Entry::new(EntryKind::Tool, "read", "").with_arg("src/main.rs");
+    entry.ok = Some(true);
+    entry.expanded = true;
+    entry.body = "\tfn main() {\n\t\tprintln!(\"\u{1b}[31mred\u{1b}[0m\");\r\n\t}\n".into();
+    app.entries.push(entry);
+    app.push(EntryKind::User, "", "tabs\tin\tchat\r\nlines");
+
+    let width = 80u16;
+    dump(&mut app, width, 20);
+    let limit = (width - 3) as usize; // left pad + right gutter
+    let lines = app.lines_cache.borrow().clone();
+    assert!(!lines.is_empty());
+    for line in &lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains('\t'), "unexpanded tab: {text:?}");
+        assert!(
+            !text.chars().any(|c| c.is_control()),
+            "control character reached a span: {text:?}"
+        );
+        assert!(line.width() <= limit, "row wider than the area: {text:?}");
+    }
 }

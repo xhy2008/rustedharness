@@ -12,6 +12,8 @@
 //! Nothing is boxed except surfaces the user can interact with (editor,
 //! pickers, cards), so the transcript reads as a document rather than a form.
 
+use std::borrow::Cow;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -121,6 +123,31 @@ fn fill(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
 // text flow
 // ---------------------------------------------------------------------------
 
+/// Make text safe to put in a span.
+///
+/// Tool output is raw file text (`read`, `grep`, `edit`) and models emit
+/// anything at all, so bodies routinely contain tabs and escape sequences.
+/// A tab is measured as zero columns by unicode-width but the terminal jumps
+/// to the next tab stop, and an escape sequence is executed by the terminal:
+/// both push the rest of the row into cells the frame buffer believes are
+/// blank, which is exactly how orphaned characters survive every repaint.
+/// Expand tabs, keep newlines, drop every other control character.
+fn sanitize(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(|c| c.is_control() && c != '\n') {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Wrap styled fragments to `width` display columns.
 ///
 /// `first` is the prefix of the opening row, `cont` the prefix of continuation
@@ -142,6 +169,17 @@ fn flow(
 
     for frag in frags {
         for c in frag.content.chars() {
+            // A newline inside a fragment (a pasted multi-line prompt, a tool
+            // result) must become a real line break here: emitted into a span
+            // it would move the terminal cursor behind the frame buffer's back.
+            if c == '\n' {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                spans.push(Span::styled(cont.0.to_string(), cont.1));
+                used = display_width(cont.0);
+                last = None;
+                filled = false;
+                continue;
+            }
             let cw = char_width(c);
             if filled && used + cw > width {
                 lines.push(Line::from(std::mem::take(&mut spans)));
@@ -391,20 +429,23 @@ fn transcript_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<usize>)
 }
 
 fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+    let title = sanitize(&entry.title);
+    let arg = sanitize(&entry.arg);
+    let body = sanitize(&entry.body);
     match entry.kind {
         EntryKind::User => {
             let band = |c: Color| style(c).bg(USER_BG);
-            let frags = vec![Span::styled(entry.body.clone(), band(TEXT))];
+            let frags = vec![Span::styled(body.to_string(), band(TEXT))];
             let lines = flow(frags, ("› ", band(ACCENT)), ("  ", band(TEXT)), width);
             lines.into_iter().map(|l| fill(l, width, USER_BG)).collect()
         }
-        EntryKind::Assistant => prose_lines(&entry.body, width),
-        EntryKind::Reasoning => reasoning_lines(entry, width),
-        EntryKind::Tool => tool_lines(entry, width),
+        EntryKind::Assistant => prose_lines(&body, width),
+        EntryKind::Reasoning => reasoning_lines(entry, &body, width),
+        EntryKind::Tool => tool_lines(entry, title.as_ref(), arg.as_ref(), &body, width),
         EntryKind::Notice => {
             let mut lines = Vec::new();
-            if entry.title.is_empty() {
-                for raw in entry.body.lines() {
+            if title.is_empty() {
+                for raw in body.lines() {
                     lines.extend(flow(
                         vec![Span::styled(raw.to_string(), style(DIM))],
                         ("· ", style(FAINT)),
@@ -415,9 +456,9 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
             } else {
                 lines.push(Line::from(vec![
                     Span::styled("· ", style(FAINT)),
-                    Span::styled(entry.title.clone(), style(MUTED)),
+                    Span::styled(title.to_string(), style(MUTED)),
                 ]));
-                for raw in entry.body.lines() {
+                for raw in body.lines() {
                     lines.extend(flow(
                         vec![Span::styled(raw.to_string(), style(DIM))],
                         ("  ", style(FAINT)),
@@ -431,7 +472,7 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
         EntryKind::Error => {
             let base = style(RED);
             let mut lines = Vec::new();
-            for raw in entry.body.lines() {
+            for raw in body.lines() {
                 lines.extend(flow(
                     vec![Span::styled(raw.to_string(), base)],
                     ("× ", base),
@@ -442,13 +483,13 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
             lines
         }
         EntryKind::Compaction => {
-            let rule = format!("── {} ", entry.title);
+            let rule = format!("── {} ", title);
             let pad = width.saturating_sub(display_width(&rule)).min(width);
             let mut lines = vec![Line::from(vec![
                 Span::styled(rule, style(FAINT)),
                 Span::styled("─".repeat(pad), style(FAINT)),
             ])];
-            let summary: String = entry.body.chars().take(400).collect();
+            let summary: String = body.chars().take(400).collect();
             for raw in summary.lines() {
                 lines.extend(flow(
                     vec![Span::styled(raw.to_string(), style(DIM))],
@@ -462,7 +503,13 @@ fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     }
 }
 
-fn tool_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+fn tool_lines(
+    entry: &Entry,
+    title: &str,
+    arg: &str,
+    body: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
     let (glyph, color) = match entry.ok {
         Some(true) => ("●", GREEN),
         Some(false) => ("×", RED),
@@ -470,15 +517,15 @@ fn tool_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     };
     let mut spans = vec![
         Span::styled(format!("{glyph} "), style(color)),
-        Span::styled(format!("[{}]", entry.title), style(MUTED)),
+        Span::styled(format!("[{title}]"), style(MUTED)),
     ];
-    if !entry.arg.is_empty() {
+    if !arg.is_empty() {
         spans.push(Span::styled(" ", style(FAINT)));
-        spans.push(Span::styled(entry.arg.clone(), style(DIM)));
+        spans.push(Span::styled(arg.to_string(), style(DIM)));
     }
     let mut lines = vec![Line::from(spans)];
 
-    let body = entry.body.trim_end();
+    let body = body.trim_end();
     if body.is_empty() {
         return lines;
     }
@@ -521,15 +568,15 @@ fn tool_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Thinking block: open while it streams, folded to a single line afterwards.
-fn reasoning_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+fn reasoning_lines(entry: &Entry, body: &str, width: usize) -> Vec<Line<'static>> {
     let base = style(DIM).add_modifier(Modifier::ITALIC);
-    let marker = if entry.expanded { "▼" } else { "►" };
+    let marker = if entry.expanded { "v" } else { ">" };
     let mut head = vec![
         Span::styled(format!("{marker} "), style(FAINT)),
         Span::styled("thinking", style(DIM)),
     ];
     if !entry.expanded {
-        let count = entry.body.lines().count();
+        let count = body.lines().count();
         head.push(Span::styled(
             format!("  {count} line{}", if count == 1 { "" } else { "s" }),
             style(FAINT),
@@ -538,11 +585,11 @@ fn reasoning_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     }
 
     let mut lines = vec![Line::from(head)];
-    let body = if entry.body.chars().count() > 700 {
-        let head: String = entry.body.chars().take(700).collect();
+    let body = if body.chars().count() > 700 {
+        let head: String = body.chars().take(700).collect();
         format!("{head}...")
     } else {
-        entry.body.clone()
+        body.to_string()
     };
     for raw in body.lines() {
         lines.extend(flow(
@@ -968,7 +1015,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 .map(|(index, line)| {
                     Line::from(vec![
                         Span::styled(format!("{:>numbers$}  ", index + 1), style(FAINT)),
-                        Span::styled(line.clone(), style(MUTED)),
+                        Span::styled(sanitize(line).into_owned(), style(MUTED)),
                     ])
                 })
                 .collect();
@@ -1065,7 +1112,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", item.status.symbol()), style(color)),
-                    Span::styled(item.content.clone(), style(MUTED)),
+                    Span::styled(sanitize(&item.content).into_owned(), style(MUTED)),
                 ]));
             }
             lines.push(Line::from(""));
@@ -1116,7 +1163,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                     Span::styled(format!("{:14}", status.language), style(MUTED)),
                     Span::styled(format!("{:12}", status.state), style(color)),
                     Span::styled(
-                        clip(status.detail.as_deref().unwrap_or(""), 44),
+                        clip(&sanitize(status.detail.as_deref().unwrap_or("")), 44),
                         style(FAINT),
                     ),
                 ]));
@@ -1252,7 +1299,7 @@ fn draw_picker(
                 },
             ),
             Span::styled(
-                format!("{:<label_col$}", clip(&item.label, label_col)),
+                format!("{:<label_col$}", clip(&sanitize(&item.label), label_col)),
                 row_style,
             ),
         ];
@@ -1260,7 +1307,7 @@ fn draw_picker(
             let room = width.saturating_sub(label_col + 3);
             if room > 4 {
                 spans.push(Span::styled(
-                    format!("  {}", clip(&item.detail, room)),
+                    format!("  {}", clip(&sanitize(&item.detail), room)),
                     if selected {
                         style(MUTED).bg(SELECTED_BG)
                     } else {

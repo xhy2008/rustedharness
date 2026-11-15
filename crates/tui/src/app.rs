@@ -696,9 +696,11 @@ impl App {
                     MouseEventKind::ScrollUp => {
                         self.follow = false;
                         self.scroll = self.scroll.saturating_sub(3);
+                        self.needs_repaint = true;
                     }
                     MouseEventKind::ScrollDown => {
                         self.scroll += 3;
+                        self.needs_repaint = true;
                     }
                     MouseEventKind::Down(MouseButton::Left)
                         if in_body && !self.overlay_active() =>
@@ -727,10 +729,12 @@ impl App {
                             if point.1 == 0 && self.scroll > 0 {
                                 self.follow = false;
                                 self.scroll -= 1;
+                                self.needs_repaint = true;
                                 anchor.1 = anchor.1.saturating_add(1);
                             } else if point.1 == last && self.mouse_area.height > 1 {
                                 self.follow = false;
                                 self.scroll += 1;
+                                self.needs_repaint = true;
                                 anchor.1 = anchor.1.saturating_sub(1);
                             }
                             self.selection = Some((anchor, point));
@@ -1122,7 +1126,10 @@ impl App {
         };
         let lines = text.lines().count();
         match copy_to_clipboard(&text) {
-            Ok(()) => self.toast(format!("copied {lines} line{}", plural(lines))),
+            Ok(()) => {
+                self.selection = None;
+                self.toast(format!("copied {lines} line{}", plural(lines)));
+            }
             Err(err) => self.toast_error(format!("clipboard: {err}")),
         }
     }
