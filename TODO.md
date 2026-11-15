@@ -1,5 +1,31 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：状态栏显示 LSP 与预热状态（2026-11-15 第二十二轮）
+
+要求：底部状态栏显示运行中的 lsp 名称和预热状态。
+
+**先补齐数据**：原来 `ensure_client` 一 spawn 完就写 `running`，`is_warming()`
+只体现在 `LspAnswer::warmup_hint` 里，状态栏根本看不到"在预热"。改动：
+- `mark_started()` 在 spawn 后按 `client.is_warming()` 写 `warming` 或 `running`；
+- `new()` 里新增 400ms 的 `settle_warmups` 观察任务（`Weak<LspHub>`，锁 + 比较 Instant，
+  无 I/O），`$/progress` 全部结束后把 `warming` 翻成 `running` 并 emit `LspStatus`，
+  所以状态栏会自己从 warm 变回正常，不用轮询 UI。
+
+**状态栏**：`App::lsp_summary()` 汇总 `running` / `warming` / `degraded` 的行：
+- 文案 `lsp rust`（就绪）、`lsp lua warm`（预热中，黄色）、`lsp c down`（失败，红色），
+  前缀是语言名而不是 id —— `typescript-language-server-js` 这种 id 会把整行挤爆，
+  完整 id/版本/原因在 `/lsp` 面板里；
+- 优先级按"需要注意的程度"排序（down > warm > running），其余用 `+N` 汇总；
+- 没有任何在跑的服务器时不显示，避免占位噪声。
+
+**牺牲顺序**也调整了：原来是 …→cost→tokens→compact，现在把 `lsp` 放到倒数第二位
+（只在整行彻底放不下时才去掉），100 列下会先牺牲 `in/out` 与 compact 模型。实测 100 列：
+`working.  1 queued|E:/rustedharness|claude-sonnet-4.5|ctx 12.4%/200.0k|lsp lua warm +1`。
+
+测试：`the_status_line_summarises_live_servers`（app）、
+`the_status_line_reports_the_language_server` + `the_language_server_survives_narrow_status_lines`
+（preview，直接读渲染后最后一行的文本断言），live 探针断言预热后 state 变成 `running`。
+
 ## 已完成：LSP 检索速度 + pdb 瘦身（2026-11-15 第二十一轮）
 
 ### 实测数据（临时 cargo 工程 + `tests/lsp_live.rs`）

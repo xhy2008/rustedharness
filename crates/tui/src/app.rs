@@ -505,6 +505,45 @@ impl App {
         }
     }
 
+    /// `lsp` segment of the status line: the server that is up (or starting),
+    /// its warm-up state, and how many others are running. `None` when no
+    /// server is live, so a workspace without one adds no noise.
+    pub fn lsp_summary(&self) -> Option<(String, bool)> {
+        let mut live: Vec<&ServerStatus> = self
+            .lsp
+            .iter()
+            .filter(|status| matches!(status.state.as_str(), "running" | "warming" | "degraded"))
+            .collect();
+        if live.is_empty() {
+            return None;
+        }
+        // The row that needs attention first: a server that is down, then one
+        // still loading, then the boring good case. `/lsp` has the full list.
+        live.sort_by_key(|status| match status.state.as_str() {
+            "degraded" => 0,
+            "warming" => 1,
+            _ => 2,
+        });
+        let head = live[0];
+        let state = match head.state.as_str() {
+            "warming" => " warm",
+            "degraded" => " down",
+            _ => "",
+        };
+        let extra = live.len() - 1;
+        let more = if extra > 0 {
+            format!(" +{extra}")
+        } else {
+            String::new()
+        };
+        // The language keeps the segment short; the panel (`/lsp`) shows the
+        // server id, version and detail for the same row.
+        Some((
+            format!("lsp {}{state}{more}", head.language),
+            head.state == "warming",
+        ))
+    }
+
     pub fn notice(&mut self, text: impl Into<String>) {
         self.push(EntryKind::Notice, "", text);
     }
@@ -1998,6 +2037,51 @@ mod tests {
         ] {
             assert!(COMMANDS.iter().any(|(command, _)| *command == sub), "{sub}");
         }
+    }
+
+    fn status(language: &str, server: &str, state: &str) -> rustedharness_core::lsp::ServerStatus {
+        rustedharness_core::lsp::ServerStatus {
+            language: language.into(),
+            server: server.into(),
+            version: None,
+            state: state.into(),
+            detail: None,
+            pid: None,
+            restarts: 0,
+            install_hint: String::new(),
+            runtime_deps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_status_line_summarises_live_servers() {
+        let mut app = crate::preview::demo_app();
+
+        app.lsp.clear();
+        assert!(app.lsp_summary().is_none(), "no servers, no segment");
+
+        app.lsp = vec![status("rust", "rust-analyzer", "running")];
+        assert_eq!(app.lsp_summary(), Some(("lsp rust".to_string(), false)));
+
+        // Warming is the transient state worth colouring.
+        app.lsp = vec![status("lua", "lua-language-server", "warming")];
+        assert_eq!(app.lsp_summary(), Some(("lsp lua warm".to_string(), true)));
+
+        // A server that is down is what needs attention, plus the count of the
+        // ones hidden behind it.
+        app.lsp = vec![
+            status("rust", "rust-analyzer", "running"),
+            status("lua", "lua-language-server", "warming"),
+            status("c", "clangd", "degraded"),
+        ];
+        assert_eq!(
+            app.lsp_summary(),
+            Some(("lsp c down +2".to_string(), false))
+        );
+
+        // Absent servers are not "running" and stay out of the status line.
+        app.lsp = vec![status("go", "gopls", "absent")];
+        assert!(app.lsp_summary().is_none());
     }
 
     #[test]

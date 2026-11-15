@@ -388,6 +388,11 @@ from the registry and marks each one installed, downloadable, or manual. On the
 CLI every subcommand validates the id against the same registry, so a typo
 prints the valid list.
 
+The status line carries the live state: `lsp rust` while a server is up,
+`lsp rust warm` while it is still loading the workspace, `lsp c down` when it
+failed to start, and `+N` for the servers behind it. `/lsp` shows the full list
+with ids and versions.
+
 `lsp checksum` is informational: installation performs the same lookup and
 verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
 quota; it is never required for a normal install.

@@ -66,6 +66,30 @@ pub(crate) fn demo_app() -> App {
     app.compact_model = "claude-haiku-4.5".into();
     app.todo = Vec::new();
     app.entries.clear();
+    app.lsp = vec![
+        rustedharness_core::lsp::ServerStatus {
+            language: "rust".into(),
+            server: "rust-analyzer".into(),
+            version: Some("2026-11-12".into()),
+            state: "running".into(),
+            detail: None,
+            pid: Some(4242),
+            restarts: 0,
+            install_hint: "rustup component add rust-analyzer".into(),
+            runtime_deps: Vec::new(),
+        },
+        rustedharness_core::lsp::ServerStatus {
+            language: "lua".into(),
+            server: "lua-language-server".into(),
+            version: Some("3.19.2".into()),
+            state: "warming".into(),
+            detail: None,
+            pid: Some(4243),
+            restarts: 0,
+            install_hint: "download from github.com/LuaLS/lua-language-server/releases".into(),
+            runtime_deps: Vec::new(),
+        },
+    ];
 
     app.push(
         EntryKind::User,
@@ -282,6 +306,48 @@ fn preview_panel() {
 
 /// The click-to-fold path end to end: render (which fills the owner map),
 /// click a tool row, then click a separator row that owns nothing.
+/// Text of one rendered row, for asserting on what the screen really shows.
+fn row_text(json: &str, row: usize) -> String {
+    let value: serde_json::Value = serde_json::from_str(json).expect("preview json");
+    value["rows"]
+        .as_array()
+        .and_then(|rows| rows.get(row))
+        .and_then(|cells| cells.as_array())
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|cell| cell[0].as_str().unwrap_or(" "))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_status_line_reports_the_language_server() {
+    let mut app = demo_app();
+    let json = dump(&mut app, 120, 20);
+    let footer = row_text(&json, 19);
+    assert!(footer.contains("lsp lua warm +1"), "{footer}");
+
+    // Without a live server the segment disappears instead of showing "none".
+    let mut app = demo_app();
+    app.lsp.clear();
+    let json = dump(&mut app, 120, 20);
+    let footer = row_text(&json, 19);
+    assert!(!footer.contains("lsp "), "{footer}");
+}
+
+/// A narrow terminal must shed the token counts before the language server,
+/// because that is the only field that changes on its own.
+#[test]
+fn the_language_server_survives_narrow_status_lines() {
+    let mut app = demo_app();
+    let json = dump(&mut app, 100, 20);
+    let footer = row_text(&json, 19);
+    assert!(footer.contains("lsp lua warm +1"), "{footer}");
+    assert!(!footer.contains("in 31.2k"), "{footer}");
+}
+
 #[test]
 fn clicking_a_row_folds_the_entry_that_owns_it() {
     let mut app = demo_app();

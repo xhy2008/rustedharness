@@ -729,95 +729,111 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
     };
     let ctx_str = format!("ctx {:.1}%/{}", ctx_pct, human_count(app.context_limit));
 
-    let build = |cwd: usize, compact: bool, cache: bool, cost: bool, tokens: bool| {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if let Some((text, error)) = app.active_toast() {
-            spans.push(Span::styled(
-                text.to_string(),
-                style(if error { RED } else { ACCENT }),
-            ));
-            spans.push(Span::styled("|", style(FAINT)));
-        }
-        if app.busy {
-            spans.push(Span::styled(
-                format!("working{}", crate::app::spinner(app.tick)),
-                style(YELLOW),
-            ));
-            if !app.queue.is_empty() {
+    let lsp = app.lsp_summary();
+
+    let build =
+        |cwd: usize, compact: bool, cache: bool, cost: bool, show_lsp: bool, tokens: bool| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if let Some((text, error)) = app.active_toast() {
                 spans.push(Span::styled(
-                    format!("{} queued", app.queue.len()),
+                    text.to_string(),
+                    style(if error { RED } else { ACCENT }),
+                ));
+                spans.push(Span::styled("|", style(FAINT)));
+            }
+            if app.busy {
+                spans.push(Span::styled(
+                    format!("working{}", crate::app::spinner(app.tick)),
+                    style(YELLOW),
+                ));
+                if !app.queue.is_empty() {
+                    spans.push(Span::styled(
+                        format!("{} queued", app.queue.len()),
+                        style(DIM),
+                    ));
+                }
+                spans.push(Span::styled("|", style(FAINT)));
+            }
+            spans.push(Span::styled(shorten_path(&app.cwd, cwd), style(MUTED)));
+            spans.push(Span::styled("|", style(FAINT)));
+            spans.push(Span::styled(app.agent_model.clone(), style(BLUE)));
+            if compact {
+                spans.push(Span::styled("|", style(FAINT)));
+                spans.push(Span::styled(
+                    format!("compact {}", app.compact_model),
                     style(DIM),
                 ));
             }
             spans.push(Span::styled("|", style(FAINT)));
-        }
-        spans.push(Span::styled(shorten_path(&app.cwd, cwd), style(MUTED)));
-        spans.push(Span::styled("|", style(FAINT)));
-        spans.push(Span::styled(app.agent_model.clone(), style(BLUE)));
-        if compact {
-            spans.push(Span::styled("|", style(FAINT)));
-            spans.push(Span::styled(
-                format!("compact {}", app.compact_model),
-                style(DIM),
-            ));
-        }
-        spans.push(Span::styled("|", style(FAINT)));
-        spans.push(Span::styled(ctx_str.clone(), style(ctx_color)));
-        if tokens {
-            spans.push(Span::styled("|", style(FAINT)));
-            spans.push(Span::styled(
-                format!(
-                    "in {}|out {}",
-                    human_count(app.input_tokens),
-                    human_count(app.output_tokens)
-                ),
-                style(DIM),
-            ));
-        }
-        if cache {
-            if let Some(pct) = app.cache_hit_pct {
+            spans.push(Span::styled(ctx_str.clone(), style(ctx_color)));
+            if show_lsp {
+                if let Some((text, warming)) = &lsp {
+                    spans.push(Span::styled("|", style(FAINT)));
+                    spans.push(Span::styled(
+                        text.clone(),
+                        style(if *warming { YELLOW } else { GREEN }),
+                    ));
+                }
+            }
+            if tokens {
                 spans.push(Span::styled("|", style(FAINT)));
                 spans.push(Span::styled(
-                    format!("CacheHit{pct}%"),
-                    style(if pct >= 80 { GREEN } else { YELLOW }),
+                    format!(
+                        "in {}|out {}",
+                        human_count(app.input_tokens),
+                        human_count(app.output_tokens)
+                    ),
+                    style(DIM),
                 ));
             }
-        }
-        if cost {
-            if let Some(total) = app.cost_usd {
-                spans.push(Span::styled("|", style(FAINT)));
-                spans.push(Span::styled(format_cost(total), style(ACCENT)));
+            if cache {
+                if let Some(pct) = app.cache_hit_pct {
+                    spans.push(Span::styled("|", style(FAINT)));
+                    spans.push(Span::styled(
+                        format!("CacheHit{pct}%"),
+                        style(if pct >= 80 { GREEN } else { YELLOW }),
+                    ));
+                }
             }
-        }
-        if let Some(reason) = &app.last_stop {
-            if reason != "completed" {
-                spans.push(Span::styled("|", style(FAINT)));
-                spans.push(Span::styled(reason.clone(), style(DIM)));
+            if cost {
+                if let Some(total) = app.cost_usd {
+                    spans.push(Span::styled("|", style(FAINT)));
+                    spans.push(Span::styled(format_cost(total), style(ACCENT)));
+                }
             }
-        }
-        Line::from(spans)
-    };
+            if let Some(reason) = &app.last_stop {
+                if reason != "completed" {
+                    spans.push(Span::styled("|", style(FAINT)));
+                    spans.push(Span::styled(reason.clone(), style(DIM)));
+                }
+            }
+            Line::from(spans)
+        };
 
+    // Order of sacrifice: path length, cache hit, cost, token counts, the
+    // compaction model, then the language server. Losing `lsp` last keeps the
+    // one field that changes on its own visible for as long as possible.
     let layouts = [
-        (40usize, true, true, true, true),
-        (24, true, true, true, true),
-        (24, true, false, true, true),
-        (24, true, false, false, true),
-        (16, true, false, false, true),
-        (16, false, false, false, true),
-        (10, false, false, false, true),
-        (8, false, false, false, false),
+        (40usize, true, true, true, true, true),
+        (24, true, true, true, true, true),
+        (24, true, false, true, true, true),
+        (24, true, false, false, true, true),
+        (24, true, false, false, true, false),
+        (24, false, false, false, true, false),
+        (16, false, false, false, true, false),
+        (10, false, false, false, true, false),
+        (8, false, false, false, false, false),
     ];
     let mut last = None;
-    for (cwd, compact, cache, cost, tokens) in layouts {
-        let line = build(cwd, compact, cache, cost, tokens);
+    for (cwd, compact, cache, cost, show_lsp, tokens) in layouts {
+        let line = build(cwd, compact, cache, cost, show_lsp, tokens);
         if line.width() <= width {
             return line;
         }
         last = Some(line);
     }
     clip_line(
-        last.unwrap_or_else(|| build(8, false, false, false, false)),
+        last.unwrap_or_else(|| build(8, false, false, false, false, false)),
         width as u16,
     )
 }

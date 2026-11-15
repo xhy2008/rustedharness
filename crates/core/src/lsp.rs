@@ -1013,6 +1013,21 @@ impl LspHub {
                 });
             }
         }
+        if config.enabled {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let weak = Arc::downgrade(&hub);
+                handle.spawn(async move {
+                    // Cheap: lock, compare an Instant, unlock. Only a transition
+                    // emits an event.
+                    let mut ticker = tokio::time::interval(Duration::from_millis(400));
+                    loop {
+                        ticker.tick().await;
+                        let Some(hub) = weak.upgrade() else { return };
+                        hub.settle_warmups().await;
+                    }
+                });
+            }
+        }
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&hub);
             let idle = config.idle_timeout_secs.max(30);
@@ -1039,6 +1054,42 @@ impl LspHub {
     pub fn emit(&self, event: HarnessEvent) {
         if let Some(tx) = &self.events {
             let _ = tx.send(event);
+        }
+    }
+
+    /// Report a server that just initialized: "warming" while it is still
+    /// loading its workspace, "running" once it answered ready.
+    fn mark_started(&self, language: &str, client: &LspClient) {
+        if client.is_warming() {
+            self.set_state(language, "warming", None);
+        } else {
+            self.set_state(language, "running", None);
+        }
+    }
+
+    /// Flip a warmed-up client from "warming" to "running" so a status line can
+    /// show a warm-up that actually ends. Runs from the periodic watcher.
+    async fn settle_warmups(&self) {
+        let clients: Vec<(String, Arc<LspClient>)> = {
+            let clients = self.clients.lock().await;
+            clients
+                .iter()
+                .map(|(language, client)| (language.clone(), client.clone()))
+                .collect()
+        };
+        for (language, client) in clients {
+            if client.is_warming() {
+                continue;
+            }
+            let was_warming = self
+                .states
+                .lock()
+                .unwrap()
+                .get(&language)
+                .is_some_and(|state| state.state == "warming");
+            if was_warming {
+                self.set_state(&language, "running", None);
+            }
         }
     }
 
@@ -1486,7 +1537,7 @@ impl LspHub {
                     Ok(path) => match self.spawn_and_init(spec, &path).await {
                         Ok(client) => {
                             clients.insert(language.to_string(), client.clone());
-                            self.set_state(language, "running", None);
+                            self.mark_started(language, &client);
                             return Some(client);
                         }
                         Err(err) => {
@@ -1524,7 +1575,7 @@ impl LspHub {
             match self.spawn_and_init(spec, &command).await {
                 Ok(client) => {
                     clients.insert(language.to_string(), client.clone());
-                    self.set_state(language, "running", None);
+                    self.mark_started(language, &client);
                     return Some(client);
                 }
                 Err(err) => {

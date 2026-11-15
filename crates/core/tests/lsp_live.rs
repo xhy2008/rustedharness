@@ -106,6 +106,15 @@ async fn rust_analyzer_answers_a_definition() {
         samples[8],
         warm.elapsed()
     );
+    // The status line relies on this: "warming" during load, "running" after.
+    let state = hub
+        .statuses()
+        .into_iter()
+        .find(|status| status.language == "rust")
+        .map(|status| status.state)
+        .unwrap_or_default();
+    println!("rust state after warm-up: {state}");
+    assert_eq!(state, "running");
     hub.shutdown_all().await;
 }
 
