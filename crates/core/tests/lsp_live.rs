@@ -77,13 +77,74 @@ async fn rust_analyzer_answers_a_definition() {
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    hub.shutdown_all().await;
 
     let answer = answer.expect("rust-analyzer never produced a precise answer");
-    println!("answer: {}\nafter {:?}", answer.text, started.elapsed());
+    println!(
+        "answer: {}\nfirst precise answer after {:?}",
+        answer.text,
+        started.elapsed()
+    );
     assert!(
         answer.text.contains("src/lib.rs:1"),
         "definition should land on line 1: {}",
         answer.text
     );
+
+    // Warm latency: what a query costs once the crate is loaded.
+    let warm = Instant::now();
+    let mut samples = Vec::new();
+    for _ in 0..10 {
+        let at = Instant::now();
+        let result = hub.answer(query()).await.unwrap();
+        assert_eq!(result.match_kind, "lsp-precise", "{}", result.text);
+        samples.push(at.elapsed());
+    }
+    samples.sort();
+    println!(
+        "10 warm definitions: median {:?} p90 {:?} total {:?}",
+        samples[5],
+        samples[8],
+        warm.elapsed()
+    );
+    hub.shutdown_all().await;
+}
+
+/// The startup warm-up exists so the first `lsp` call does not wait for
+/// rust-analyzer to load the crate: by the time a user asks, the server should
+/// already be ready and the query should cost milliseconds.
+#[tokio::test]
+#[ignore = "needs rust-analyzer on PATH; takes ~20s on purpose"]
+async fn prewarm_takes_the_cold_start_off_the_critical_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("probe");
+    let lib = project(&cwd);
+    let config = rustedharness_core::config::Config::default();
+    let hub = LspHub::new(cwd.clone(), &config.lsp, None);
+
+    // LspHub::new schedules the warm-up 500ms in; give rust-analyzer the time
+    // it needs without ever asking it a question.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let at = Instant::now();
+    let answer = hub
+        .answer(LspQuery {
+            op: LspOp::Definition,
+            path: lib,
+            line: 6,
+            column: 5,
+            symbol: None,
+            apply: false,
+            timeout_ms: 15_000,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let elapsed = at.elapsed();
+    println!("first query after warm-up: {elapsed:?} {}", answer.text);
+    assert_eq!(answer.match_kind, "lsp-precise", "{}", answer.text);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cold start is still on the critical path: {elapsed:?}"
+    );
+    hub.shutdown_all().await;
 }

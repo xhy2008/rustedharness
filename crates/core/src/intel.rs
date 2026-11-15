@@ -331,6 +331,28 @@ impl CodeIndex {
             .replace('\\', "/")
     }
 
+    /// Indexed files per language, most common first. Used to decide which
+    /// language server is worth starting before the first query arrives.
+    pub fn language_counts(&self) -> Vec<(String, u64)> {
+        let _ = self.refresh();
+        let conn = self.db.lock().unwrap();
+        let Ok(mut statement) =
+            conn.prepare("SELECT language, COUNT(*) FROM files GROUP BY language ORDER BY 2 DESC")
+        else {
+            return Vec::new();
+        };
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        });
+        match rows {
+            Ok(rows) => rows
+                .flatten()
+                .map(|(language, count)| (language, count.max(0) as u64))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     pub fn identifier_at(&self, path: &Path, line: u32, column: u32) -> Option<String> {
         let language = crate::lsp::language_for_path(path)?;
         let text = std::fs::read_to_string(path).ok()?;

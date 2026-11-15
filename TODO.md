@@ -1,5 +1,47 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：LSP 检索速度 + pdb 瘦身（2026-11-15 第二十一轮）
+
+### 实测数据（临时 cargo 工程 + `tests/lsp_live.rs`）
+
+| 阶段 | 耗时 |
+| --- | --- |
+| 冷启动到第一个 precise 答案 | **8.9 s**（rust-analyzer 载入 crate） |
+| 预热后单次 definition | **1.8 ms** 中位 / 2.3 ms p90 |
+| 启动预热后再问 | **2.9 ms** |
+
+结论：**慢的只有冷启动**，热查询已经是毫秒级。所以优化点全在"别让第一次调用等索引"。
+
+### 改了三处
+
+1. **启动预热**（`LspHub::prewarm`，`new()` 里 500ms 后后台跑）：用 `CodeIndex::language_counts()`
+   （新方法，`SELECT language, COUNT(*) FROM files GROUP BY language`）取工作区占比最高的语言，
+   只有 `resolve_command` 已找到可执行文件时才 spawn —— **预热永不下载**。实测把 8.9s 的
+   冷启动移到后台：预热完再查询 2.9ms 就是 precise。
+2. **`$/progress` 跟踪**（原来完全忽略）：`window/workDoneProgress/create` + `$/progress`
+   的 begin/end 维护 `token -> title`，`is_warming()` 现在等于"仍在 2s 窗口内 或 还有未结束的
+   progress"，上限 180s（`WARMUP_CEILING`，防止永不结束的 token 把我们永久钉在 L0）。
+   提示因此变成 `rust-analyzer is still warming up (Indexing); showing name-based results`
+   —— 之前是在索引期间直接发查询，服务器返回 null，我们把它当成 "no matches" 报给模型，
+   是**错误答案**。
+3. **空结果重试**：`empty_lookup()` 只对 definition/typeDefinition/implementation/references
+   生效，刚 didOpen 的文件拿到空结果时重试 2 次（150/300ms），不再把"还没分析完"报成"没有匹配"。
+   hover/diagnostics 的空中文是合法的，不重试（预热后中位 1.8ms 说明没有误触发）。
+
+### pdb 瘦身
+
+`Cargo.toml` 新增 `[profile.dev] debug = "line-tables-only"`，**增量编译保留**。重建后：
+
+| 产物 | 之前 | 之后 |
+| --- | --- | --- |
+| `rustedharness.pdb` | 209 MB | **99 MB** |
+| `rustedharness_tui-*.pdb` | 166–186 MB | **77 MB** |
+| `web-*.pdb` | — | 20 MB |
+
+代价：`target/debug` 里现在 4.1 GB 是本次构建、**13.9 GB 是旧 profile 的残留**（旧 pdb +
+失效的 incremental），需要一次性 `cargo clean` 才会真正腾出来；清掉之后目录约 4 GB，
+而且以后不会再长回 15 GB。
+
 ## 已完成：LSP 起不来时说明原因 + 端到端探针（2026-11-15 第二十轮）
 
 问题起因：问"lsp 能否被正确调用"。实测本机 `rust-analyzer` 是 rustup 的**代理 shim**，

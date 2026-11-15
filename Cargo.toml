@@ -91,6 +91,12 @@ rustedharness-core = { path = "crates/core" }
 rustedharness-tui = { path = "crates/tui" }
 rustedharness-web = { path = "crates/web" }
 
+# Debug builds keep incremental compilation, but full DWARF is what makes the
+# PDB files 200 MB each. Line tables keep file:line in backtraces at a fraction
+# of the size.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

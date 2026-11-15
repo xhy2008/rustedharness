@@ -668,6 +668,24 @@ async fn latest_tag(repo: &str) -> Result<String> {
 
 /// Render an error and its causes, since `reqwest` puts the interesting part
 /// of a transport failure in `source()`.
+/// A location answer that came back empty, which is worth retrying: a server
+/// that has just been handed the document may not have analysed it yet.
+/// Diagnostics and hover have legitimate empty answers, so they are exempt.
+fn empty_lookup(query: &LspQuery, answer: &LspAnswer) -> bool {
+    if !matches!(
+        query.op,
+        LspOp::Definition | LspOp::TypeDefinition | LspOp::Implementation | LspOp::References
+    ) {
+        return false;
+    }
+    match &answer.raw {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
 /// ` (server said: ...)` when the child printed anything, else empty.
 fn detail_from_stderr(tail: &str) -> String {
     let tail = tail.trim();
@@ -979,6 +997,14 @@ impl LspHub {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let weak = Arc::downgrade(&hub);
                 handle.spawn(async move {
+                    // Let the first frame paint before spending CPU on a server.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    if let Some(hub) = weak.upgrade() {
+                        hub.prewarm().await;
+                    }
+                });
+                let weak = Arc::downgrade(&hub);
+                handle.spawn(async move {
                     // Let the session start before touching the network.
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     if let Some(hub) = weak.upgrade() {
@@ -1047,6 +1073,27 @@ impl LspHub {
             });
         entry.restarts += 1;
         entry.restarts
+    }
+
+    /// Start the server for the language this workspace mostly consists of,
+    /// so the first `lsp` call does not pay for cargo metadata and indexing.
+    /// Only a server that is already available is started: a warm-up never
+    /// downloads anything.
+    async fn prewarm(self: &Arc<Self>) {
+        let index = self.index.clone();
+        let Ok(counts) = tokio::task::spawn_blocking(move || index.language_counts()).await else {
+            return;
+        };
+        let Some((language, _)) = counts.into_iter().next() else {
+            return;
+        };
+        let Some(spec) = spec_for_language(&language) else {
+            return;
+        };
+        if self.resolve_command(spec).is_none() {
+            return;
+        }
+        let _ = self.ensure_client(&language).await;
     }
 
     /// Compare every installed server with the newest published release and
@@ -1764,17 +1811,36 @@ impl LspHub {
             if self.config.enabled {
                 if let Some((client, warming)) = self.client_for_path(&query.path).await {
                     if warming && query.op != LspOp::Diagnostics {
-                        warmup_hint = Some(format!(
-                            "{} is still warming up; showing name-based results",
-                            spec_for_language(language)
-                                .map(|s| s.id)
-                                .unwrap_or("server")
-                        ));
+                        let doing = client.progress_titles();
+                        let name = spec_for_language(language)
+                            .map(|s| s.id)
+                            .unwrap_or("server");
+                        warmup_hint = Some(if doing.is_empty() {
+                            format!("{name} is still warming up; showing name-based results")
+                        } else {
+                            format!(
+                                "{name} is still warming up ({}); showing name-based results",
+                                doing.join(", ")
+                            )
+                        });
                     } else {
                         let mut last_error = None;
                         for attempt in 0..3u64 {
                             match self.execute_l1(&client, &query, limit).await {
-                                Ok(answer) => return Ok(answer),
+                                Ok(answer) => {
+                                    // A server that was just handed the file can
+                                    // answer "nothing here" before it has looked
+                                    // at the symbol; ask again instead of
+                                    // reporting a false negative.
+                                    if empty_lookup(&query, &answer) && attempt < 2 {
+                                        tokio::time::sleep(Duration::from_millis(
+                                            150 * (attempt + 1),
+                                        ))
+                                        .await;
+                                        continue;
+                                    }
+                                    return Ok(answer);
+                                }
                                 Err(err) if is_transient_lsp_error(&err) && attempt < 2 => {
                                     tokio::time::sleep(Duration::from_millis(250 * (attempt + 1)))
                                         .await;
@@ -2161,10 +2227,17 @@ pub struct LspClient {
     /// Newest lines the server wrote to stderr. A rustup shim that refuses to
     /// run says why here, and that is the only explanation the user gets.
     stderr_tail: Arc<Mutex<Vec<String>>>,
+    /// Open `$/progress` windows (token -> title). rust-analyzer reports its
+    /// index there, which is the only honest "not ready yet" signal we get.
+    progress: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// How many stderr lines to keep for error messages.
 const STDERR_TAIL: usize = 8;
+
+/// A progress window that never closes must not pin us to the name-based index
+/// forever.
+const WARMUP_CEILING: Duration = Duration::from_secs(180);
 
 struct DocState {
     version: i64,
@@ -2225,6 +2298,7 @@ impl LspClient {
         let diag_seq = Arc::new(diag_tx);
         let now = Instant::now();
 
+        let progress: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let client = Arc::new(Self {
             server_id: spec.id.to_string(),
             pid,
@@ -2241,6 +2315,7 @@ impl LspClient {
             ready_at: now + Duration::from_secs(2),
             last_used: Mutex::new(now),
             stderr_tail,
+            progress: progress.clone(),
         });
 
         // Reader loop.
@@ -2254,7 +2329,7 @@ impl LspClient {
                         continue;
                     }
                 };
-                handle_message(&value, &stdin, &pending, &diagnostics, &diag_seq).await;
+                handle_message(&value, &stdin, &pending, &diagnostics, &diag_seq, &progress).await;
             }
             // Fail all pending requests so callers do not wait for the timeout.
             let mut pending = pending.lock().unwrap();
@@ -2272,7 +2347,23 @@ impl LspClient {
     }
 
     pub fn is_warming(&self) -> bool {
-        Instant::now() < self.ready_at
+        if Instant::now() < self.ready_at {
+            return true;
+        }
+        // rust-analyzer spends most of its start-up reporting index progress.
+        !self.progress.lock().unwrap().is_empty() && self.spawned_at.elapsed() < WARMUP_CEILING
+    }
+
+    /// Titles of the work the server is still doing, for user-facing hints.
+    pub fn progress_titles(&self) -> Vec<String> {
+        let progress = self.progress.lock().unwrap();
+        let mut titles: Vec<String> = progress
+            .values()
+            .filter(|t| !t.is_empty())
+            .cloned()
+            .collect();
+        titles.sort();
+        titles
     }
 
     pub fn spawned_at(&self) -> Instant {
@@ -2553,6 +2644,7 @@ async fn handle_message(
     pending: &PendingMap,
     diagnostics: &Arc<Mutex<HashMap<PathBuf, DiagEntry>>>,
     diag_seq: &Arc<watch::Sender<u64>>,
+    progress: &Arc<Mutex<HashMap<String, String>>>,
 ) {
     let id = value.get("id").cloned();
     let method = value.get("method").and_then(Value::as_str);
@@ -2621,6 +2713,35 @@ async fn handle_message(
                 .lock()
                 .unwrap()
                 .insert(path, DiagEntry { seq, items });
+        }
+        (None, Some("$/progress")) => {
+            let Some(params) = value.get("params") else {
+                return;
+            };
+            let Some(token) = params.get("token").map(|t| match t {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            }) else {
+                return;
+            };
+            let kind = params
+                .pointer("/value/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("report");
+            match kind {
+                "begin" => {
+                    let title = params
+                        .pointer("/value/title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    progress.lock().unwrap().insert(token, title);
+                }
+                "end" => {
+                    progress.lock().unwrap().remove(&token);
+                }
+                _ => {}
+            }
         }
         _ => {}
     }
