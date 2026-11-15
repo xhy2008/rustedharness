@@ -10,6 +10,7 @@ use std::sync::Arc;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use rustedharness_core::config::Config;
+use rustedharness_core::protocol::HarnessEvent;
 use rustedharness_core::provider::{Backend, ChatRequest, Completion, StreamEvent};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
@@ -65,10 +66,6 @@ fn demo_app() -> App {
     app.compact_model = "claude-haiku-4.5".into();
     app.todo = Vec::new();
     app.entries.clear();
-    let mtime = "claude-sonnet-4.5";
-
-    app.push(EntryKind::Welcome, "0.1.0", "E:/rustedharness");
-    app.entries.last_mut().unwrap().arg = mtime.to_string();
 
     app.push(
         EntryKind::User,
@@ -76,12 +73,15 @@ fn demo_app() -> App {
         "the transcript looks cramped. can you make the tool calls quieter and give the \
          composer a real frame?",
     );
-    app.push(
+    let mut thinking = Entry::new(
         EntryKind::Reasoning,
         "thinking",
         "The band behind the user message is doing too much work, and every tool call draws a \
-         three-line box. I should keep one accent colour and let whitespace separate blocks.",
+         three-line box. I should keep one accent colour and let whitespace separate blocks.\n\
+         Finished blocks can fold to a single line so a long session stays readable.",
     );
+    thinking.expanded = true;
+    app.entries.push(thinking);
     app.push(
         EntryKind::Assistant,
         "",
@@ -118,6 +118,20 @@ fn demo_app() -> App {
         Entry::new(EntryKind::Tool, "edit", "").with_arg("crates/tui/src/theme.rs  (2 edits)");
     app.entries.push(tool);
 
+    let folded = Entry::new(
+        EntryKind::Reasoning,
+        "thinking",
+        "Which status glyphs survive in Consolas? Box-drawing and the geometric shape block are \
+         safe; dingbats are not.\nThey also need to be single width, otherwise the header shifts \
+         by a column.",
+    );
+    app.entries.push(folded);
+    app.push(
+        EntryKind::Assistant,
+        "",
+        "Both folds are in place: thinking collapses itself when the turn moves on, and every \
+         tool row carries its own expand state.",
+    );
     app.push(
         EntryKind::Notice,
         "",
@@ -251,11 +265,102 @@ fn preview_panel() {
     parent_dump(&mut app, "ui-preview-consent.json", 100, 30);
 }
 
+/// The click-to-fold path end to end: render (which fills the owner map),
+/// click a tool row, then click a separator row that owns nothing.
+#[test]
+fn clicking_a_row_folds_the_entry_that_owns_it() {
+    let mut app = demo_app();
+    dump(&mut app, 100, 40);
+
+    let (row, index) = {
+        let owners = app.owner_cache.borrow();
+        let lines = app.lines_cache.borrow();
+        let row = lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .starts_with("● [bash]")
+            })
+            .expect("bash row");
+        (row, owners[row])
+    };
+    assert_ne!(index, usize::MAX, "transcript rows must map to an entry");
+    assert!(!app.entries[index].expanded, "tools start folded");
+
+    app.toggle_row(row as u16);
+    assert!(app.entries[index].expanded, "click unfolds the tool output");
+    app.toggle_row(row as u16);
+    assert!(!app.entries[index].expanded, "second click folds it again");
+
+    // A blank separator row owns nothing and must be a no-op.
+    let blank = app
+        .lines_cache
+        .borrow()
+        .iter()
+        .position(|line| line.spans.is_empty())
+        .expect("separator row");
+    let before = app.entries.iter().map(|e| e.expanded).collect::<Vec<_>>();
+    app.toggle_row(blank as u16);
+    let after = app.entries.iter().map(|e| e.expanded).collect::<Vec<_>>();
+    assert_eq!(before, after);
+}
+
+/// A reasoning block opens while it streams and folds as soon as the model
+/// starts writing the answer; a tool opens while it runs and folds on result.
+#[test]
+fn streaming_blocks_open_themselves_and_fold_on_completion() {
+    let mut app = demo_app();
+    app.entries.clear();
+
+    app.on_harness_event(HarnessEvent::AssistantReasoning {
+        text: "look at the reducer".into(),
+    });
+    assert_eq!(app.entries.len(), 1);
+    assert!(app.entries[0].expanded, "thinking streams open");
+    app.on_harness_event(HarnessEvent::AssistantReasoning {
+        text: " and the renderer".into(),
+    });
+    assert_eq!(app.entries.len(), 1, "chunks append to one entry");
+    assert_eq!(app.entries[0].body, "look at the reducer and the renderer");
+
+    app.on_harness_event(HarnessEvent::AssistantDelta {
+        text: "Done.".into(),
+    });
+    assert!(
+        !app.entries[0].expanded,
+        "thinking folds when content starts"
+    );
+
+    app.on_harness_event(HarnessEvent::ToolCall {
+        id: "t1".into(),
+        name: "bash".into(),
+        arguments: serde_json::json!({ "command": "cargo test" }),
+    });
+    let tool = app.entries.len() - 1;
+    assert!(
+        app.entries[tool].expanded,
+        "a running tool shows its output"
+    );
+    assert_eq!(app.entries[tool].arg, "cargo test");
+
+    app.on_harness_event(HarnessEvent::ToolResult {
+        id: "t1".into(),
+        name: "bash".into(),
+        ok: true,
+        content: "ok. 12 passed".into(),
+        metadata: None,
+    });
+    assert!(!app.entries[tool].expanded, "a finished tool folds");
+}
+
 #[test]
 #[ignore = "writes target/ui-preview-idle.json; run on demand"]
 fn preview_idle() {
     let mut app = demo_app();
-    app.entries.truncate(1);
+    app.entries.clear();
     app.input.clear();
     app.cursor = 0;
     app.busy = true;

@@ -347,7 +347,7 @@ fn bullet(text: &str) -> Option<(&'static str, &str)> {
 // ---------------------------------------------------------------------------
 
 fn transcript_signature(app: &App) -> u64 {
-    let mut hash = (if app.tools_open { 1u64 } else { 0 }) ^ if app.show_thinking { 2 } else { 0 };
+    let mut hash = 0u64;
     for entry in &app.entries {
         let flags =
             (entry.expanded as u64) << 62 | entry.ok.map(|o| o as u64 + 1).unwrap_or(0) << 60;
@@ -360,31 +360,34 @@ fn transcript_signature(app: &App) -> u64 {
     hash
 }
 
-fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+/// Build the transcript plus a parallel owner map: `owners[i]` is the entry
+/// index that produced line `i`, which is what click-to-fold needs. Separator
+/// rows own nothing (`usize::MAX`).
+fn transcript_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
     let width = width.max(20);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut owners: Vec<usize> = Vec::new();
     let mut prev: Option<EntryKind> = None;
 
-    for entry in &app.entries {
-        if entry.kind == EntryKind::Reasoning && !app.show_thinking {
-            continue;
-        }
+    for (index, entry) in app.entries.iter().enumerate() {
         if let Some(previous) = prev {
             let tight = previous == EntryKind::Tool && entry.kind == EntryKind::Tool;
             if !tight {
                 lines.push(Line::from(""));
+                owners.push(usize::MAX);
             }
         }
         prev = Some(entry.kind);
-        lines.extend(entry_lines(entry, app, width));
+        let start = lines.len();
+        lines.extend(entry_lines(entry, width));
+        owners.extend(std::iter::repeat_n(index, lines.len() - start));
     }
 
-    lines
+    (lines, owners)
 }
 
-fn entry_lines(entry: &Entry, app: &App, width: usize) -> Vec<Line<'static>> {
+fn entry_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     match entry.kind {
-        EntryKind::Welcome => welcome_lines(entry, width),
         EntryKind::User => {
             let band = |c: Color| style(c).bg(USER_BG);
             let frags = vec![Span::styled(entry.body.clone(), band(TEXT))];
@@ -392,31 +395,8 @@ fn entry_lines(entry: &Entry, app: &App, width: usize) -> Vec<Line<'static>> {
             lines.into_iter().map(|l| fill(l, width, USER_BG)).collect()
         }
         EntryKind::Assistant => prose_lines(&entry.body, width),
-        EntryKind::Reasoning => {
-            let body = if entry.body.chars().count() > 700 {
-                let head: String = entry.body.chars().take(700).collect();
-                format!("{head}...")
-            } else {
-                entry.body.clone()
-            };
-            let base = style(DIM).add_modifier(Modifier::ITALIC);
-            let mut lines = Vec::new();
-            for (index, raw) in body.lines().enumerate() {
-                let (first, cont) = if index == 0 {
-                    ("· ", "  ")
-                } else {
-                    ("  ", "  ")
-                };
-                lines.extend(flow(
-                    vec![Span::styled(raw.to_string(), base)],
-                    (first, style(FAINT)),
-                    (cont, style(FAINT)),
-                    width,
-                ));
-            }
-            lines
-        }
-        EntryKind::Tool => tool_lines(entry, app.tools_open, width),
+        EntryKind::Reasoning => reasoning_lines(entry, width),
+        EntryKind::Tool => tool_lines(entry, width),
         EntryKind::Notice => {
             let mut lines = Vec::new();
             if entry.title.is_empty() {
@@ -478,31 +458,7 @@ fn entry_lines(entry: &Entry, app: &App, width: usize) -> Vec<Line<'static>> {
     }
 }
 
-fn welcome_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("RustedHarness", style(TEXT).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", entry.title), style(FAINT)),
-        ]),
-        Line::from(vec![
-            Span::styled(shorten_path(&entry.body, 56), style(MUTED)),
-            Span::styled("  ·  ", style(FAINT)),
-            Span::styled(entry.arg.clone(), style(BLUE)),
-        ]),
-        Line::from(Span::styled("─".repeat(width.min(120)), style(BORDER_DIM))),
-    ];
-    lines.push(Line::from(vec![
-        Span::styled("/help", style(DIM)),
-        Span::styled("  commands   ", style(FAINT)),
-        Span::styled("ctrl+o", style(DIM)),
-        Span::styled("  tool output   ", style(FAINT)),
-        Span::styled("ctrl+t", style(DIM)),
-        Span::styled("  thinking", style(FAINT)),
-    ]));
-    lines
-}
-
-fn tool_lines(entry: &Entry, tools_open: bool, width: usize) -> Vec<Line<'static>> {
+fn tool_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
     let (glyph, color) = match entry.ok {
         Some(true) => ("●", GREEN),
         Some(false) => ("×", RED),
@@ -519,14 +475,17 @@ fn tool_lines(entry: &Entry, tools_open: bool, width: usize) -> Vec<Line<'static
     let mut lines = vec![Line::from(spans)];
 
     let body = entry.body.trim_end();
-    if entry.visible_body(tools_open) {
+    if body.is_empty() {
+        return lines;
+    }
+    let body_style = style(if entry.ok == Some(false) { RED } else { DIM });
+    if entry.expanded {
         let shown = if body.chars().count() > 4_000 {
             format!("{}...", body.chars().take(4_000).collect::<String>())
         } else {
             body.to_string()
         };
         for raw in shown.lines() {
-            let body_style = style(if entry.ok == Some(false) { RED } else { DIM });
             lines.extend(flow(
                 vec![Span::styled(raw.to_string(), body_style)],
                 ("    ", body_style),
@@ -534,23 +493,60 @@ fn tool_lines(entry: &Entry, tools_open: bool, width: usize) -> Vec<Line<'static
                 width,
             ));
         }
-    } else if !body.is_empty() {
+    } else {
+        // Folded: one peek line under a stub, so the row still says what the
+        // tool returned without spending the whole screen on it.
         let total = body.lines().count();
         let preview = body
             .lines()
             .find(|line| !line.trim().is_empty())
             .unwrap_or_default();
-        let mut spans = vec![
-            Span::styled("    ", style(FAINT)),
+        let mut peek = vec![
+            Span::styled("    └ ", style(FAINT)),
             Span::styled(
-                clip(preview.trim_end(), width.saturating_sub(10)),
-                style(DIM),
+                clip(preview.trim_end(), width.saturating_sub(12)),
+                body_style,
             ),
         ];
         if total > 1 {
-            spans.push(Span::styled(format!("  +{}", total - 1), style(FAINT)));
+            peek.push(Span::styled(format!("  +{}", total - 1), style(FAINT)));
         }
-        lines.push(Line::from(spans));
+        lines.push(Line::from(peek));
+    }
+    lines
+}
+
+/// Thinking block: open while it streams, folded to a single line afterwards.
+fn reasoning_lines(entry: &Entry, width: usize) -> Vec<Line<'static>> {
+    let base = style(DIM).add_modifier(Modifier::ITALIC);
+    let marker = if entry.expanded { "▼" } else { "►" };
+    let mut head = vec![
+        Span::styled(format!("{marker} "), style(FAINT)),
+        Span::styled("thinking", style(DIM)),
+    ];
+    if !entry.expanded {
+        let count = entry.body.lines().count();
+        head.push(Span::styled(
+            format!("  {count} line{}", if count == 1 { "" } else { "s" }),
+            style(FAINT),
+        ));
+        return vec![Line::from(head)];
+    }
+
+    let mut lines = vec![Line::from(head)];
+    let body = if entry.body.chars().count() > 700 {
+        let head: String = entry.body.chars().take(700).collect();
+        format!("{head}...")
+    } else {
+        entry.body.clone()
+    };
+    for raw in body.lines() {
+        lines.extend(flow(
+            vec![Span::styled(raw.to_string(), base)],
+            ("  ", style(FAINT)),
+            ("  ", style(FAINT)),
+            width,
+        ));
     }
     lines
 }
@@ -562,7 +558,9 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
     {
         let mut cache = app.lines_cache.borrow_mut();
         if app.lines_sig != (width, sig) {
-            *cache = transcript_lines(app, width);
+            let (lines, owners) = transcript_lines(app, width);
+            *cache = lines;
+            *app.owner_cache.borrow_mut() = owners;
             app.lines_sig = (width, sig);
         }
     }
@@ -691,7 +689,7 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
     };
     let ctx_str = format!("ctx {:.1}%/{}", ctx_pct, human_count(app.context_limit));
 
-    let build = |cwd: usize, compact: bool, cache: bool, cost: bool| {
+    let build = |cwd: usize, compact: bool, cache: bool, cost: bool, tokens: bool| {
         let mut spans: Vec<Span<'static>> = Vec::new();
         if app.busy {
             spans.push(Span::styled(
@@ -718,15 +716,17 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
         }
         spans.push(Span::styled("|", style(FAINT)));
         spans.push(Span::styled(ctx_str.clone(), style(ctx_color)));
-        spans.push(Span::styled("|", style(FAINT)));
-        spans.push(Span::styled(
-            format!(
-                "in {}|out {}",
-                human_count(app.input_tokens),
-                human_count(app.output_tokens)
-            ),
-            style(DIM),
-        ));
+        if tokens {
+            spans.push(Span::styled("|", style(FAINT)));
+            spans.push(Span::styled(
+                format!(
+                    "in {}|out {}",
+                    human_count(app.input_tokens),
+                    human_count(app.output_tokens)
+                ),
+                style(DIM),
+            ));
+        }
         if cache {
             if let Some(pct) = app.cache_hit_pct {
                 spans.push(Span::styled("|", style(FAINT)));
@@ -752,24 +752,25 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
     };
 
     let layouts = [
-        (40usize, true, true, true),
-        (24, true, true, true),
-        (24, true, false, true),
-        (24, true, false, false),
-        (16, true, false, false),
-        (16, false, false, false),
-        (10, false, false, false),
+        (40usize, true, true, true, true),
+        (24, true, true, true, true),
+        (24, true, false, true, true),
+        (24, true, false, false, true),
+        (16, true, false, false, true),
+        (16, false, false, false, true),
+        (10, false, false, false, true),
+        (8, false, false, false, false),
     ];
     let mut last = None;
-    for (cwd, compact, cache, cost) in layouts {
-        let line = build(cwd, compact, cache, cost);
+    for (cwd, compact, cache, cost, tokens) in layouts {
+        let line = build(cwd, compact, cache, cost, tokens);
         if line.width() <= width {
             return line;
         }
         last = Some(line);
     }
     clip_line(
-        last.unwrap_or_else(|| build(10, false, false, false)),
+        last.unwrap_or_else(|| build(8, false, false, false, false)),
         width as u16,
     )
 }

@@ -26,8 +26,6 @@ pub const YELLOW: Color = Color::Rgb(0xdf, 0xb8, 0x77);
 
 /// Frame colour for the editor box, overlays and cards.
 pub const BORDER: Color = Color::Rgb(0x3d, 0x40, 0x49);
-/// Frame colour when the surface is not focused.
-pub const BORDER_DIM: Color = Color::Rgb(0x2e, 0x31, 0x38);
 
 /// Band behind the echoed user message.
 pub const USER_BG: Color = Color::Rgb(0x26, 0x28, 0x2f);

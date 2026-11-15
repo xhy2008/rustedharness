@@ -1,5 +1,21 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：思考 / 工具折叠交互（2026-11-15 第二轮）
+
+用户需求：**取消顶部栏；思考输出过程中展开、结束自动折叠、鼠标点击切换折叠；工具输出同理。**
+
+1. **顶部栏删除**：`EntryKind::Welcome`、`App::push_welcome`、`render::welcome_lines` 一并删掉（第一版加的 masthead 整体作废），`theme::BORDER_DIM` 也随之无用而删除。转录第一行就是对话本身。
+2. **折叠状态只有一个来源**：`Entry.expanded`。删掉 `App.tools_open` / `App.show_thinking` 两个全局开关，`Entry::visible_body(tools_open)` 换成 `Entry::foldable()`（工具或思考且正文非空）。
+3. **自动展开 / 折叠时序**：
+   - 思考：首个 `AssistantReasoning` 分片建条目并 `expanded = true`，边流边看；`App::end_reasoning()` 在「正文开始 / 工具调用 / 回合结束」时把它折叠并清空 `reasoning_at`。原先散落的四处 `reasoning_at = None` 全部改为调用它。
+   - 工具：`ToolCall` 建条目时展开（看实时输出），`ToolResult` 到达时折叠。
+   - 会话重放（`push_message`）一律折叠，回看历史不会满屏输出。
+4. **鼠标点击**：`render::transcript_lines` 现在同时产出 `owner_cache`（每行属于哪个 entry，分隔行 `usize::MAX`）。`finish_selection` 在「按下即抬起」的单击情况下改调 `App::toggle_row()`，拖动仍然复制文本；点击只对 `foldable()` 的条目生效。
+5. **键盘**：Ctrl+O / Ctrl+T 从「总开关」改为「全部展开 / 全部折叠」（只要有一个是开的就全关，否则全开）。
+6. **视觉**：折叠的思考是 `► thinking  3 lines`，展开是 `▼ thinking` + 缩进正文；折叠的工具在标题下给 `└ 首行输出  +N`，展开是 4 空格缩进的全文。
+7. **测试**（都在 `preview` 模块，正常跑不 ignore）：`clicking_a_row_folds_the_entry_that_owns_it`（owner 映射 / 点击 / 分隔行空转）、`streaming_blocks_open_themselves_and_fold_on_completion`（推理与工具的展开→折叠时序）。
+8. 顺带：状态栏降级多一档——空间极窄时整块丢弃 `in/out`，避免出现 `out ...` 这种截断值；压缩提示里的 `⇣`（非 WGL4 字形）去掉。
+
 ## 已完成：TUI 视觉重做（2026-11-15）
 
 用户需求：**当前 TUI 很难看，按 pi agent 的样式重做。**
@@ -14,7 +30,7 @@
 4. 思考：`·` + DIM 斜体；超 700 字截断。
 5. 工具调用：单行 `● [name] 参数摘要`（`●` 绿=成功 / `×` 红=失败 / `○` 黄=运行中）。折叠时下面补一行首行输出的 DIM 预览 + `+N`；`Ctrl+O` 展开为 4 空格缩进的整段输出（失败时整段红色）。
 6. 通知 `·`、错误 `×`、压缩 `── 标题 ──────`（铺满内容宽度）。
-7. 顶部 masthead（`EntryKind::Welcome`）：`RustedHarness 0.1.0` / `cwd · model` / 一条 `BORDER_DIM` 分隔线 / 三个快捷键提示。新建会话与切换会话都会重新插入。
+7. 顶部没有独立 header：转录第一行就是对话（第一版的 masthead 已在第二轮按用户要求删除）。
 8. 编辑器：圆角框，`›` 强调色提示符，竖线光标；忙碌时边框转强调色；空输入时只显示 FAINT 斜体占位符（不画光标——`› │` 两竖挨着会被读成分隔线）。
 9. 状态栏：字段与顺序保持不变（`cwd|model|compact|ctx|in/out|CacheHit|¥cost`），但空间不足时按 **路径长度 → CacheHit → cost → compact model** 逐级隐藏，只有实在放不下才截断；同一行绝不换行（换行会把编辑器顶掉）。`working` 后跟等宽三点动画，排队时显示 `N queued`。
 10. 覆盖层：全部改成圆角 + 不透明底 `BG_BASE` + 左右各 1 列内边距；标题写在左上边框、`n of m` 写在右上边框；列表按最长 label 自适应两列；pick 面板与编辑器之间留 1 行空隙。

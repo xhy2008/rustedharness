@@ -2,8 +2,6 @@
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
-    /// Startup block: name, version, workspace, model.
-    Welcome,
     User,
     Assistant,
     Reasoning,
@@ -21,7 +19,8 @@ pub struct Entry {
     pub arg: String,
     /// Wrapped body. Tool bodies stay collapsed unless expanded.
     pub body: String,
-    /// Per-tool expand state; also read by the global Ctrl+O toggle.
+    /// Body visibility for foldable entries (tool output, thinking). Clicking
+    /// the row or Ctrl+O / Ctrl+T flips it.
     pub expanded: bool,
     /// Tool completion status: None = running, Some(true/false).
     pub ok: Option<bool>,
@@ -44,11 +43,9 @@ impl Entry {
         self
     }
 
-    pub fn visible_body(&self, tools_open: bool) -> bool {
-        match self.kind {
-            EntryKind::Tool => self.expanded && tools_open && !self.body.trim().is_empty(),
-            _ => true,
-        }
+    /// Whether this entry can be folded at all.
+    pub fn foldable(&self) -> bool {
+        matches!(self.kind, EntryKind::Tool | EntryKind::Reasoning) && !self.body.trim().is_empty()
     }
 }
 

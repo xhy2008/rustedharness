@@ -147,10 +147,10 @@ pub struct App {
     pub selection: Option<((u16, u16), (u16, u16))>,
     pub mouse_area: Rect,
     pub lines_cache: RefCell<Vec<Line<'static>>>,
+    /// Entry index owning each cached transcript line, for click-to-fold.
+    pub owner_cache: RefCell<Vec<usize>>,
     pub lines_sig: (usize, u64),
     pub slash_dismissed: bool,
-    pub tools_open: bool,
-    pub show_thinking: bool,
     pub streaming: Option<usize>,
     pub reasoning_at: Option<usize>,
     pub live_tool: Option<(String, usize)>,
@@ -223,10 +223,9 @@ impl App {
             selection: None,
             mouse_area: Rect::ZERO,
             lines_cache: RefCell::new(Vec::new()),
+            owner_cache: RefCell::new(Vec::new()),
             lines_sig: (0, 0),
             slash_dismissed: false,
-            tools_open: true,
-            show_thinking: true,
             streaming: None,
             reasoning_at: None,
             live_tool: None,
@@ -235,7 +234,6 @@ impl App {
             pending: None,
         };
         app.populate(app.agent.snapshot());
-        app.push_welcome();
         app
     }
 
@@ -265,18 +263,6 @@ impl App {
         self.selection = None;
         self.slash_dismissed = false;
         self.populate(snapshot);
-        self.push_welcome();
-    }
-
-    /// Masthead at the top of a session: name, version, workspace, model.
-    fn push_welcome(&mut self) {
-        let entry = Entry::new(
-            EntryKind::Welcome,
-            env!("CARGO_PKG_VERSION"),
-            self.cwd.clone(),
-        )
-        .with_arg(self.agent_model.clone());
-        self.push_entry(entry);
     }
 
     pub fn populate(&mut self, snapshot: SessionSnapshot) {
@@ -314,10 +300,8 @@ impl App {
                 if let Some(calls) = message.tool_calls {
                     for call in calls {
                         let args = call.function.arguments.clone();
-                        let mut entry =
-                            Entry::new(EntryKind::Tool, call.function.name.as_str(), "")
-                                .with_arg(tool_summary(&call.function.name, &args));
-                        entry.expanded = self.tools_open;
+                        let entry = Entry::new(EntryKind::Tool, call.function.name.as_str(), "")
+                            .with_arg(tool_summary(&call.function.name, &args));
                         self.push_entry(entry);
                     }
                 }
@@ -329,6 +313,43 @@ impl App {
                     self.push_entry(entry);
                 }
             }
+        }
+    }
+
+    /// A reasoning block opens while it streams and folds itself away as soon
+    /// as the model moves on, so finished turns keep only one dim line.
+    fn end_reasoning(&mut self) {
+        if let Some(index) = self.reasoning_at.take() {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.expanded = false;
+            }
+        }
+    }
+
+    /// Ctrl+O / Ctrl+T: if anything of `kind` is open, close them all;
+    /// otherwise open them all.
+    fn toggle_all(&mut self, kind: EntryKind) {
+        let open = !self
+            .entries
+            .iter()
+            .any(|entry| entry.kind == kind && entry.expanded);
+        for entry in self.entries.iter_mut().filter(|e| e.kind == kind) {
+            entry.expanded = open;
+        }
+    }
+
+    /// Click on a transcript row: fold or unfold the entry that owns it.
+    pub(crate) fn toggle_row(&mut self, row: u16) {
+        let index = {
+            let owners = self.owner_cache.borrow();
+            owners.get(self.scroll + row as usize).copied()
+        };
+        let Some(index) = index else { return };
+        let Some(entry) = self.entries.get_mut(index) else {
+            return;
+        };
+        if entry.foldable() {
+            entry.expanded = !entry.expanded;
         }
     }
 
@@ -398,7 +419,7 @@ impl App {
                 }
                 self.push(EntryKind::Assistant, "", text);
                 self.streaming = Some(self.entries.len() - 1);
-                self.reasoning_at = None;
+                self.end_reasoning();
             }
             HarnessEvent::AssistantReasoning { text } => {
                 if let Some(index) = self.reasoning_at {
@@ -407,7 +428,9 @@ impl App {
                         return;
                     }
                 }
-                self.push(EntryKind::Reasoning, "thinking", text);
+                let mut entry = Entry::new(EntryKind::Reasoning, "thinking", text);
+                entry.expanded = true;
+                self.push_entry(entry);
                 self.reasoning_at = Some(self.entries.len() - 1);
             }
             HarnessEvent::AssistantMessage { content, reasoning } => {
@@ -420,7 +443,7 @@ impl App {
                     self.push(EntryKind::Assistant, "", content);
                 }
                 self.streaming = None;
-                self.reasoning_at = None;
+                self.end_reasoning();
             }
             HarnessEvent::ToolCall {
                 id,
@@ -430,11 +453,11 @@ impl App {
                 let args = arguments.to_string();
                 let mut entry = Entry::new(EntryKind::Tool, name.as_str(), "")
                     .with_arg(tool_summary(&name, &args));
-                entry.expanded = self.tools_open;
+                entry.expanded = true;
                 self.push_entry(entry);
                 self.live_tool = Some((id, self.entries.len() - 1));
                 self.streaming = None;
-                self.reasoning_at = None;
+                self.end_reasoning();
             }
             HarnessEvent::ToolOutput { name, text, .. } => {
                 if let Some((_, index)) = self.live_tool {
@@ -460,13 +483,13 @@ impl App {
                         if let Some(entry) = self.entries.get_mut(*index) {
                             entry.ok = Some(ok);
                             entry.body = body;
+                            entry.expanded = false;
                         }
                         self.live_tool = None;
                     }
                     _ => {
                         let mut entry = Entry::new(EntryKind::Tool, name.as_str(), body);
                         entry.ok = Some(ok);
-                        entry.expanded = self.tools_open;
                         self.push_entry(entry);
                     }
                 }
@@ -578,7 +601,7 @@ impl App {
             } => {
                 self.push(
                     EntryKind::Compaction,
-                    format!("⇣ compacted {dropped_messages} messages"),
+                    format!("compacted {dropped_messages} messages"),
                     summary,
                 );
             }
@@ -602,7 +625,7 @@ impl App {
                 self.busy = false;
                 self.last_stop = Some(stop_reason);
                 self.streaming = None;
-                self.reasoning_at = None;
+                self.end_reasoning();
                 self.live_tool = None;
                 if let Some(next) = self.queue.pop_front() {
                     let agent = self.agent.clone();
@@ -764,16 +787,11 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('o') => {
-                    self.tools_open = !self.tools_open;
-                    for entry in &mut self.entries {
-                        if entry.kind == EntryKind::Tool {
-                            entry.expanded = self.tools_open;
-                        }
-                    }
+                    self.toggle_all(EntryKind::Tool);
                     return Ok(());
                 }
                 KeyCode::Char('t') => {
-                    self.show_thinking = !self.show_thinking;
+                    self.toggle_all(EntryKind::Reasoning);
                     return Ok(());
                 }
                 KeyCode::Char('l') => {
@@ -1048,6 +1066,7 @@ impl App {
         };
         if c1 == c2 && r1 == r2 {
             self.selection = None;
+            self.toggle_row(r1);
             return;
         }
         let (top, bottom) = (r1.min(r2), r1.max(r2));
