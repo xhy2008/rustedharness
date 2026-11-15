@@ -1,11 +1,47 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：会话存储严格换成 pi v3 格式（2026-11-15 第十六轮）
+
+要求：照搬 pi 的上下文存储、能无损迁移 pi 会话、不要旧格式兼容。按
+`pi/packages/coding-agent/docs/session-format.md` 与 `session-manager.ts` / `ai/src/types.ts`
+的类型定义实现。
+
+**磁盘布局**：`<sessions>/<project-id>/<session-id>.jsonl`
+- project-id = cwd 去掉开头的分隔符，再把 `/` `\` `:` 换成 `-`（`C:\work\app` →
+  `C--work-app`），与 pi 完全一致；
+- session-id = UUID v4；文件名即 id。
+
+**文件内容**：首行 `{"type":"session","version":3,"id","timestamp","cwd"}`，其后每行一个
+条目，全部带 `id`（8 位 hex）/`parentId`/`timestamp`（ISO），`type` 区分：
+`message`（role 为 `user`/`assistant`/`toolResult`/`system`，内容块是
+`text`/`thinking`/`toolCall`/`image`）、`model_change`、`usage`、`compaction`、
+`custom`、`custom_message`、`branch_summary`、`context_edit`、`label`、`session_info`、
+`thinking_level_change`。
+
+**读取**（`session.rs::replay`）：从最后一条沿 `parentId` 回溯得到活跃分支 → 取最新的
+`compaction`，窗口 = [compaction] + `firstKeptEntryId..compaction` + 之后全部 → 应用
+`context_edit`（`replacement:null` 表示移出上下文）→ 转成我们的 `ChatMessage`。
+`model_change`/`session_info`/`usage` 按文件顺序取最后一个。
+
+**我们自己的东西**放在 `custom` 条目里（pi 会保留但不进模型上下文）：
+`customType` = `rustedharness.todos` / `rustedharness.compact_model`。其余一律是 pi 原生
+条目，所以两边可以互相打开。
+
+**不再兼容旧格式**：旧版扁平的 `<sessions>/<id>.jsonl`（`kind` 字段）不再被读取，也不会
+出现在 `sessions list` 里（新格式在子目录下）。
+
+**其他**：`Agent::build` 遇到空的 `agent_model`/`compact_model`（pi 会话可能没有）会回退到
+配置值；`SessionWriter::resume` 从文件里重建 `last_id` 与 message id 序列，追加时链条不断。
+
+测试（core 6 条）：写出的头部/条目形状、消息+todo 往返、直接导入 pi 样例文件（thinking +
+toolCall + usage + model_change）、compaction 窗口、usage 往返、project 目录命名。
+
 ## 已完成：恢复会话的统计归零 + 启动慢的真凶（2026-11-15 第十五轮）
 
 **统计归零**：footer 的数字全部来自 provider 的 `usage` 回报，恢复会话时没有任何一次
 请求，于是 `UsageTracker` 是空的 -> ctx/in/out/cache/cost 全 0。
 
-- `SessionRecord::Usage { usage, cost_usd }`：每次拿到 usage 就追加一行（约 100 字节/轮），
+- `usage` 条目（pi `UsageEntry`）：每次拿到 usage 就追加一行（约 200 字节/轮），
   加载时保留最后一条。`UsageTracker::restore()` 在 `Agent::build` 里回填，`snapshot()`
   带上 `usage` + `cost_usd`，TUI 的 `populate` 据此填 footer。
 - `Usage::cache_hit_pct()/context_tokens()` 提到 provider 层，tracker 与快照共用。
@@ -25,7 +61,7 @@
 
 **二进制存储：不做**（数据见 `storage_benchmark`）：release 下 0.3 MiB 会话 load 3.86 ms，
 其中 JSON 解析 3.22 ms；load 只占 resume 的 12%，即使解码免费也只省 ~9%。而且
-`SessionRecord` 是 internally-tagged 枚举 + 大量 `skip_serializing_if`，bincode 直接反序列化
+条目是 internally-tagged 枚举 + 大量 `skip_serializing_if`，bincode 直接反序列化
 会 `InvalidTagEncoding` / `DeserializeAnyNotSupported`（实测），要做二进制得另立一套 schema，
 丢掉 JSONL 的追加写、截断恢复和可 grep。下一个值得动的是那 70 ms 的 `CodeIndex::new`
 （可以懒加载）。
@@ -335,7 +371,7 @@ cargo test -p rustedharness-tui -- --ignored preview_picker|preview_panel|previe
 
 实现方式（`crates/core/src/session.rs`）：
 
-1. `SessionWriter::create()` 只生成 id/path 并 `create_dir_all`；Meta 记录暂存在 `header: Vec<SessionRecord>`，不打开文件、不写盘、不 prune。
+1. `SessionWriter::create()` 只生成 id/path 并 `create_dir_all`；Meta 记录暂存在 `pending: Vec<Entry>`，不打开文件、不写盘、不 prune。
 2. 首个 `Message` 记录到达时 `open()`：创建文件 → 按序写入 header → `prune(max_saved)` → 写本条。首条消息之前到达的其他记录（`/model` 的 `Models`）只进 header。
 3. `resume()` 直接 `file = Some(..)`、`header` 空。
 4. 后续清理（同一轮规范扫描）删除了此前为“空会话”加的全部补偿逻辑：`shutdown` 删文件、prune 空文件探测、`SessionStore::list` 空会话过滤，以及未使用的 `SessionWriter::summary` / `process` / `notice` 和对应记录变体。

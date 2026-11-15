@@ -108,13 +108,18 @@ impl Agent {
             )));
         }
         let config = Arc::new(config);
+        // A pi session may not name a model at all (no `model_change`, no
+        // assistant message yet), and pi has no compact model of its own:
+        // fall back to the configured ones rather than run with empty strings.
         let agent_model = resume
             .as_ref()
             .map(|r| r.meta.agent_model.clone())
+            .filter(|model| !model.is_empty())
             .unwrap_or_else(|| config.model.clone());
         let compact_model = resume
             .as_ref()
             .map(|r| r.meta.compact_model.clone())
+            .filter(|model| !model.is_empty())
             .unwrap_or_else(|| config.compact_model.clone());
         let todos = Arc::new(TodoStore::new(
             resume
@@ -124,7 +129,8 @@ impl Agent {
         ));
 
         let (session, messages) = if let Some(resume) = resume.as_ref() {
-            let writer = SessionWriter::resume(&resume.path, resume.meta.id.clone())?;
+            let writer =
+                SessionWriter::resume(&resume.path, &resume.meta.id, &resume.meta.agent_model)?;
             (writer, resume.loaded.messages.clone())
         } else {
             let writer =
