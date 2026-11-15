@@ -8,7 +8,7 @@
 //! consent, token/context stats, clipboard copy.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -153,7 +153,11 @@ pub struct App {
     pub slash_dismissed: bool,
     pub streaming: Option<usize>,
     pub reasoning_at: Option<usize>,
-    pub live_tool: Option<(String, usize)>,
+    /// Entry index of every tool call, keyed by call id. Tool results arrive
+    /// out of order (a turn can issue several calls in parallel) and may even
+    /// be replayed from a session, so the id is the only reliable link back to
+    /// the row that asked for the work.
+    pub tool_slots: HashMap<String, usize>,
     pub tick: u64,
     /// Transient status message (copy confirmations), shown in the footer for
     /// a couple of seconds instead of pushing a transcript entry.
@@ -233,7 +237,7 @@ impl App {
             slash_dismissed: false,
             streaming: None,
             reasoning_at: None,
-            live_tool: None,
+            tool_slots: HashMap::new(),
             tick: 0,
             toast: None,
             needs_repaint: false,
@@ -257,7 +261,7 @@ impl App {
         self.queue.clear();
         self.streaming = None;
         self.reasoning_at = None;
-        self.live_tool = None;
+        self.tool_slots.clear();
         self.scroll = 0;
         self.follow = true;
         self.busy = false;
@@ -275,6 +279,7 @@ impl App {
     }
 
     pub fn populate(&mut self, snapshot: SessionSnapshot) {
+        self.tool_slots.clear();
         self.session_id = snapshot.session_id;
         self.cwd = snapshot.cwd;
         self.agent_model = snapshot.agent_model;
@@ -312,17 +317,51 @@ impl App {
                         let entry = Entry::new(EntryKind::Tool, call.function.name.as_str(), "")
                             .with_arg(tool_summary(&call.function.name, &args));
                         self.push_entry(entry);
+                        self.tool_slots
+                            .insert(call.id.clone(), self.entries.len() - 1);
                     }
                 }
             }
             Role::Tool => {
-                if let Some(text) = message.content {
-                    let mut entry = Entry::new(EntryKind::Tool, "tool result", text);
-                    entry.ok = Some(true);
-                    self.push_entry(entry);
+                let ChatMessage {
+                    content,
+                    tool_call_id,
+                    name,
+                    ..
+                } = message;
+                if let Some(text) = content {
+                    let body = text.trim().to_string();
+                    let id = tool_call_id.unwrap_or_default();
+                    // The session stores the result as its own message; the
+                    // transcript shows it under the call that produced it, so a
+                    // restored conversation looks exactly like a live one.
+                    if !self.attach_tool_result(&id, true, body.clone()) {
+                        let title = name.unwrap_or_else(|| "tool".to_string());
+                        let mut entry = Entry::new(EntryKind::Tool, title, body);
+                        entry.ok = Some(true);
+                        self.push_entry(entry);
+                    }
                 }
             }
         }
+    }
+
+    /// Bind a tool's output to the row of the call that produced it.
+    ///
+    /// Returns false when no call with that id is in the transcript, in which
+    /// case the caller has to decide where the output goes. The slot is kept
+    /// after a match so a duplicated result overwrites instead of appending.
+    fn attach_tool_result(&mut self, id: &str, ok: bool, body: String) -> bool {
+        let Some(index) = self.tool_slots.get(id).copied() else {
+            return false;
+        };
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.ok = Some(ok);
+            entry.body = body;
+            entry.expanded = false;
+            return true;
+        }
+        false
     }
 
     /// A reasoning block opens while it streams and folds itself away as soon
@@ -484,14 +523,13 @@ impl App {
                     .with_arg(tool_summary(&name, &args));
                 entry.expanded = true;
                 self.push_entry(entry);
-                self.live_tool = Some((id, self.entries.len() - 1));
+                self.tool_slots.insert(id, self.entries.len() - 1);
                 self.streaming = None;
                 self.end_reasoning();
             }
-            HarnessEvent::ToolOutput { name, text, .. } => {
-                if let Some((_, index)) = self.live_tool {
+            HarnessEvent::ToolOutput { id, text, .. } => {
+                if let Some(index) = self.tool_slots.get(&id).copied() {
                     if let Some(entry) = self.entries.get_mut(index) {
-                        let _ = name;
                         entry.body = tail_lines(&text, 20);
                     }
                 }
@@ -507,20 +545,14 @@ impl App {
                 if body.chars().count() > 4_000 {
                     body = format!("{}...", body.chars().take(4_000).collect::<String>());
                 }
-                match &self.live_tool {
-                    Some((live_id, index)) if live_id == &id => {
-                        if let Some(entry) = self.entries.get_mut(*index) {
-                            entry.ok = Some(ok);
-                            entry.body = body;
-                            entry.expanded = false;
-                        }
-                        self.live_tool = None;
-                    }
-                    _ => {
-                        let mut entry = Entry::new(EntryKind::Tool, name.as_str(), body);
-                        entry.ok = Some(ok);
-                        self.push_entry(entry);
-                    }
+                if !self.attach_tool_result(&id, ok, body.clone()) {
+                    // A result whose call is not in this transcript (an older
+                    // session that was compacted, a dropped event). Keep the
+                    // output visible under the tool's own name instead of
+                    // inventing a "tool result" row.
+                    let mut entry = Entry::new(EntryKind::Tool, name.as_str(), body);
+                    entry.ok = Some(ok);
+                    self.push_entry(entry);
                 }
             }
             HarnessEvent::TodoUpdated { items } => self.todo = items,
@@ -655,7 +687,6 @@ impl App {
                 self.last_stop = Some(stop_reason);
                 self.streaming = None;
                 self.end_reasoning();
-                self.live_tool = None;
                 if let Some(next) = self.queue.pop_front() {
                     let agent = self.agent.clone();
                     self.busy = true;

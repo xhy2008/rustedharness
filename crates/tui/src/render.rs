@@ -516,17 +516,15 @@ fn transcript_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<usize>)
     let width = width.max(20);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut owners: Vec<usize> = Vec::new();
-    let mut prev: Option<EntryKind> = None;
-
     for (index, entry) in app.entries.iter().enumerate() {
-        if let Some(previous) = prev {
-            let tight = previous == EntryKind::Tool && entry.kind == EntryKind::Tool;
-            if !tight {
-                lines.push(Line::from(""));
-                owners.push(usize::MAX);
-            }
+        // Vertical rhythm: a tool call belongs to the block above it - the
+        // sentence that asked for it, the thinking that decided it, or the
+        // previous call - so it never gets a blank row of its own. Everything
+        // else keeps one line of air.
+        if index > 0 && entry.kind != EntryKind::Tool {
+            lines.push(Line::from(""));
+            owners.push(usize::MAX);
         }
-        prev = Some(entry.kind);
         let start = lines.len();
         lines.extend(entry_lines(entry, width));
         owners.extend(std::iter::repeat_n(index, lines.len() - start));

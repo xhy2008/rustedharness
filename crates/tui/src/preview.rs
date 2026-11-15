@@ -663,3 +663,160 @@ fn ambiguous_glyphs_survive_when_the_console_draws_them_narrow() {
     // assumption even if the guard is dropped by a panic.
     crate::render::set_ambiguous_wide(true);
 }
+
+/// A turn can issue several tool calls at once and their results come back in
+/// whatever order the tools finish. Each result must land on the row of *its*
+/// call: a result that becomes a transcript entry of its own ("tool result")
+/// breaks the transcript into unreadable fragments.
+#[test]
+fn tool_results_attach_to_their_call_in_any_order() {
+    let mut app = demo_app();
+    app.entries.clear();
+
+    for (id, name, path) in [
+        ("c1", "read", "sandbox_test/dump.txt"),
+        ("c2", "grep", "alpha"),
+        ("c3", "lsp", "rename"),
+    ] {
+        app.on_harness_event(HarnessEvent::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::json!({ "path": path, "pattern": path }),
+        });
+    }
+    assert_eq!(app.entries.len(), 3);
+
+    app.on_harness_event(HarnessEvent::ToolResult {
+        id: "c3".into(),
+        name: "lsp".into(),
+        ok: true,
+        content: "rename preview: 3 files".into(),
+        metadata: None,
+    });
+    app.on_harness_event(HarnessEvent::ToolResult {
+        id: "c1".into(),
+        name: "read".into(),
+        ok: false,
+        content: "offset 99 is beyond the end of the file".into(),
+        metadata: None,
+    });
+    app.on_harness_event(HarnessEvent::ToolResult {
+        id: "c2".into(),
+        name: "grep".into(),
+        ok: true,
+        content: "dump.txt:1:alpha beta".into(),
+        metadata: None,
+    });
+
+    assert_eq!(app.entries.len(), 3, "results must not add rows");
+    assert!(
+        app.entries
+            .iter()
+            .all(|entry| entry.kind == EntryKind::Tool),
+        "only the calls themselves are in the transcript"
+    );
+    assert_eq!(app.entries[0].ok, Some(false), "read failed");
+    assert_eq!(
+        app.entries[0].body,
+        "offset 99 is beyond the end of the file"
+    );
+    assert_eq!(app.entries[1].ok, Some(true), "grep succeeded");
+    assert_eq!(app.entries[1].body, "dump.txt:1:alpha beta");
+    assert_eq!(app.entries[2].ok, Some(true), "lsp succeeded");
+    assert_eq!(app.entries[2].body, "rename preview: 3 files");
+    assert!(
+        app.entries.iter().all(|entry| !entry.expanded),
+        "a finished tool folds its output"
+    );
+}
+
+/// Restoring a session replays the stored messages, where a tool result is a
+/// message of its own. It has to be folded back into the call, so a restored
+/// conversation looks exactly like a live one.
+#[test]
+fn restored_session_shows_results_under_their_call() {
+    use rustedharness_core::provider::{ChatMessage, FunctionCall, Role, ToolCall};
+
+    let mut app = demo_app();
+    app.entries.clear();
+
+    let call = ChatMessage {
+        role: Role::Assistant,
+        tool_calls: Some(vec![ToolCall {
+            id: "call_7".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "read".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        }]),
+        ..ChatMessage::default()
+    };
+    let result = ChatMessage {
+        role: Role::Tool,
+        content: Some("  1  fn main() {}".into()),
+        tool_call_id: Some("call_7".into()),
+        name: Some("read".into()),
+        ..ChatMessage::default()
+    };
+    app.push_message(call);
+    app.push_message(result);
+
+    assert_eq!(app.entries.len(), 1, "the result joins its call");
+    let entry = &app.entries[0];
+    assert_eq!(entry.title, "read");
+    assert_eq!(entry.body, "1  fn main() {}");
+    assert_eq!(entry.ok, Some(true));
+    assert!(
+        app.entries.iter().all(|e| e.title != "tool result"),
+        "no free-floating result rows"
+    );
+}
+
+/// A tool call belongs to the text above it: no blank row between the sentence
+/// that asked for the work and the call itself, and none between calls.
+#[test]
+fn tool_rows_sit_tight_under_the_text_that_asked_for_them() {
+    let mut app = demo_app();
+    app.entries.clear();
+    app.push(EntryKind::User, "", "check the dump");
+    app.push(EntryKind::Assistant, "", "Reading it now.");
+    for (id, path) in [("a", "dump.txt"), ("b", "demo.rs")] {
+        app.on_harness_event(HarnessEvent::ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: serde_json::json!({ "path": path }),
+        });
+    }
+    app.push(EntryKind::Assistant, "", "Both parsed.");
+
+    dump(&mut app, 80, 30);
+    let rows: Vec<String> = app
+        .lines_cache
+        .borrow()
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let text_row = rows
+        .iter()
+        .position(|row| row.contains("Reading it now."))
+        .expect("prose row");
+    assert!(
+        rows[text_row + 1].starts_with("~ [read]"),
+        "the call must start on the very next row: {:?}",
+        &rows[text_row..=text_row + 2]
+    );
+    let tool_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("[read]"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(tool_rows.len(), 2);
+    // Second call follows the first call's peek line without an empty row.
+    assert!(
+        !rows[tool_rows[1] - 1].trim().is_empty() || rows[tool_rows[1] - 1].contains('└'),
+        "calls stay in one block: {:?}",
+        &rows[tool_rows[0]..=tool_rows[1]]
+    );
+}

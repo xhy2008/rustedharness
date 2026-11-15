@@ -1,5 +1,20 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：工具结果并入调用行 + 收紧工具块间距（2026-11-15 第十轮）
+
+问题：`ToolResult` 事件只要和"当前正在跑的那一个工具"对不上，就会新建一条
+`[tool result]` 条目；一轮里并行发多个工具调用时几乎必现，转录被切成碎片。
+恢复会话也走同样的坏路径（`push_message` 里 `Role::Tool` 直接推一条 `tool result`）。
+
+- 链接键改成调用 id：`App::tool_slots: HashMap<String, usize>`（id → 条目下标）。
+  ToolCall 登记、ToolResult/ToolOutput 按 id 回填，所以结果顺序无关、并行安全。
+  找不到 id 时才退化成一条以工具名命名的条目（老会话被压缩掉调用时仍能看到输出）。
+- 重放路径同样按 `tool_call_id` 回填（session 记录里带 id，`session.rs:463` 有断言守着），
+  恢复出来的会话与实时会话结构一致。
+- 间距规则：**只有工具条目前面不加空行**（`transcript_lines` 里 `index > 0 && kind != Tool`）。
+  工具调用属于它上面那段话/那段思考，正文与工具之间、工具与工具之间都紧贴；
+  段落之间、回合之间仍保留一行留白。
+
 ## 已完成：歧义宽度改为启动实测 + 可配置（2026-11-15 第九轮）
 
 结论：**没有**任何转义序列或注册表项能要求控制台把歧义宽度字符按 1 列画，那是终端
@@ -289,6 +304,7 @@ rm -rf target/debug/incremental                                       # 顺手�
 - 运行期必须保持 `DisableLineWrap`（`lib.rs` 里 `execute!` 打开、退出/panic 时恢复）：一旦允许自动换行，任何一行超出 1 列都会把整屏顶歪，之后全是悬空字符。
 - 渲染宽度：`draw()` 全局右留 1 列；UI 内已禁用东亚歧义宽度字符（· … ¥ 除外），新增 UI 字符串只用 ASCII 标点做分隔符/省略号。`¥` 允许保留（cost 字段）。
 - UI 字形规则：**ASCII + 框线（U+2500–257F）**，我们自己的字符串里别的一律不要（这样无论终端怎么量都安全）。正文里的歧义宽度字符由 `render::sanitize` 按实测模式决定是否折叠成 ASCII，见 `render::AMBIGUOUS_IS_WIDE`。几何符号（`● ○`）、箭头、通用标点（`· › …`）、Latin-1 歧义符号（`× ±`）在中文控制台会按 **2 列**渲染，而 unicode-width 算 1 列，行尾字符会被推到帧缓冲之外变成永久幽灵字符。`test/transcript_uses_only_single_width_glyphs` 在守这条线。
+- 工具输出**永远**挂在调用行下面（`└ 首行 +N`，Ctrl+O/点击展开），不要为结果再建条目；绑定键是 tool call id，不是"最近一个工具"。
 - 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。宽度不足时按 路径→CacheHit→cost→compact 顺序隐藏字段（见 `render::footer_line` 的 layouts 表），不要退回强制截断。
 - resize 防抖：lib.rs event_loop，Resize 风暴期间跳过 draw，静默 150ms 后 clear+强制重绘（RESIZE_SETTLE 常量）。
 - 工作区根锁死（target/debug 启动限制）是设计内行为，不要改。
