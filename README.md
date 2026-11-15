@@ -64,8 +64,8 @@ SHA-256).
 ## Configuration
 
 Configuration lives in `~/.rustedharness` by default. Override the directory
-with `RUSTEDHARNESS_DIR`. This keeps config, sessions, the code index and
-downloaded language servers together:
+with `RUSTEDHARNESS_DIR`, which keeps config, sessions and downloaded language
+servers together:
 
 | Path | Purpose |
 | --- | --- |
@@ -73,8 +73,12 @@ downloaded language servers together:
 | `models.json` | Providers, endpoints and their models (Pi-style) |
 | `mcp.json` | Optional MCP servers shared by every project |
 | `sessions/` | Append-only JSONL sessions |
-| `index/` | L0 tree-sitter index |
 | `lsp/` | Cached language-server installations |
+
+The L0 tree-sitter index is the one piece of state that belongs to a workspace
+rather than to the user: it lives in `<workspace>/.rustedharness/index.sqlite`
+and the directory writes its own `.gitignore` (`*`), so it never shows up in
+`git status`. A read-only workspace falls back to an in-memory index.
 
 `rustedharness config init` creates `config.json` and `models.json` without
 overwriting existing files. `config path` prints every path, `config show`
@@ -409,7 +413,8 @@ verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
 quota; it is never required for a normal install.
 
 Without a server, L0 provides definitions, references, and identifier lookup
-from a real tree-sitter parse indexed in SQLite. All 17 bundled grammars are
+from a real tree-sitter parse indexed in SQLite (stored per workspace under
+`.rustedharness/`). All 17 bundled grammars are
 available: Rust, C, C++, Go, TypeScript, TSX, JavaScript, Python, Java, Kotlin,
 C#, Ruby, PHP, Swift, Scala, Lua, and Elixir. L0 answers are labelled
 name-based and lower confidence than LSP results.

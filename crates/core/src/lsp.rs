@@ -3684,7 +3684,22 @@ mod tests {
     async fn install_waits_for_consent_and_reports_a_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let hub = LspHub::new(dir.path().to_path_buf(), &LspConfig::default(), Some(tx));
+        // Pin the version, URL and digest so the manifest needs no network: the
+        // point of this test is the consent handshake, not the download.
+        let mut config = LspConfig::default();
+        config.downloads.insert(
+            "lua-language-server".to_string(),
+            crate::config::LspDownload {
+                version: Some("3.19.2".to_string()),
+                url: Some(
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.19.2/lua-language-server-3.19.2-win32-x64.zip"
+                        .to_string(),
+                ),
+                sha256: Some("0".repeat(64)),
+                ..Default::default()
+            },
+        );
+        let hub = LspHub::new(dir.path().to_path_buf(), &config, Some(tx));
 
         let task = {
             let hub = hub.clone();

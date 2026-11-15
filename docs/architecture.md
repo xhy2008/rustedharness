@@ -142,7 +142,11 @@ appends to.
 `lsp.rs` speaks JSON-RPC over stdio to one server per language, with document
 sync, bounded restarts, idle shutdown, and ten operations. Positions are
 converted between UTF-16 (LSP) and byte offsets. `intel.rs` maintains the L0
-index in SQLite using real tree-sitter parses, with 17 bundled grammars
+index in SQLite using real tree-sitter parses, with 17 bundled grammars. The
+database lives in `<workspace>/.rustedharness/index.sqlite`: the index describes
+one workspace, so it is created, invalidated and deleted with it, and a
+`.gitignore` inside that directory keeps it out of version control. A workspace
+that cannot be written to falls back to an in-memory database.
 (Rust, C, C++, Go, TypeScript, TSX, JavaScript, Python, Java, Kotlin, C#, Ruby,
 PHP, Swift, Scala, Lua, Elixir). Definitions come from language-specific AST
 node kinds and references from identifier leaves, so comments, strings, and

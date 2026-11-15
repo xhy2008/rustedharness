@@ -1,5 +1,23 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：L0 索引挪到工作区的 .rustedharness/（2026-11-15 第二十四轮）
+
+要求：tree-sitter 的 L0 index 从配置目录挪到工作目录下的 `.rustedharness/`。
+
+- `intel.rs` 原来用 `Config::data_dir()/index/<xxh32(cwd)>/index.sqlite`，现在直接
+  `<workspace>/.rustedharness/index.sqlite`（`INDEX_DIR` 常量 + `CodeIndex::db_path()`）。
+  索引描述的就是这个工作区，跟着它一起失效、一起删除，不再留在用户目录里无限堆积。
+- `.rustedharness/.gitignore` 写入 `*`：不改用户的 `.gitignore`，目录从内部忽略自己，
+  `git status` 干净（`git check-ignore` 验证过）。
+- 扫描器的跳过列表加入 `INDEX_DIR`，避免把自己的 sqlite/-wal 当成源码走一遍。
+- 写不进去的工作区（只读/权限）仍然回退到 `open_in_memory()`。
+- 删掉了 `intel.rs` 里对 `Config` 的依赖。
+- 实测：`lsp list` 之后仓库里出现 `.rustedharness/{index.sqlite,.gitignore}`，
+  `git status` 无输出。新增测试 `the_index_lives_in_the_workspace`
+  （断言 db 路径、`.gitignore` 内容、且 `.rustedharness` 自身不被索引）。
+
+注：旧的 `~/.rustedharness/index/` 目录不再被读取，可以直接删除（本轮不做迁移）。
+
 ## 已完成：lsp 工具支持 install（需用户同意）与 restart（2026-11-15 第二十三轮）
 
 要求：在 agent 的 lsp 工具里增加安装（需要用户同意）和重启 LSP 的功能。

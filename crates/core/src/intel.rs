@@ -16,7 +16,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::config::Config;
 use crate::error::Result;
 use crate::lsp::LspOp;
 use crate::syntax;
@@ -41,19 +40,36 @@ pub struct CodeIndex {
     last_scan: Mutex<Option<Instant>>,
 }
 
+/// Directory holding the index inside the workspace.
+///
+/// The index describes this workspace: it goes stale with it and disappears
+/// with it, so it lives next to the code instead of in the config directory.
+pub const INDEX_DIR: &str = ".rustedharness";
+
+/// Open the workspace-local database, creating the directory. A read-only
+/// workspace falls back to an in-memory index at the call site.
+fn open_index(root: &Path) -> Result<Connection> {
+    let dir = root.join(INDEX_DIR);
+    std::fs::create_dir_all(&dir)?;
+    // The workspace's own `.gitignore` is not ours to edit, so keep this
+    // directory out of `git status` from the inside.
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(&ignore, "*\n");
+    }
+    let conn = Connection::open(dir.join("index.sqlite"))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;",
+    )?;
+    Ok(conn)
+}
+
 impl CodeIndex {
     pub fn new(root: &Path) -> Arc<Self> {
         let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let key = format!(
-            "{:08x}",
-            xxhash_rust::xxh32::xxh32(root.to_string_lossy().as_bytes(), 0)
-        );
-        let dir = Config::data_dir().join("index").join(key);
-        let db_path = dir.join("index.sqlite");
-        let conn = std::fs::create_dir_all(&dir)
-            .ok()
-            .and_then(|_| Connection::open(&db_path).ok())
-            .unwrap_or_else(|| Connection::open_in_memory().expect("in-memory SQLite"));
+        let conn = open_index(&root)
+            .unwrap_or_else(|_| Connection::open_in_memory().expect("in-memory SQLite"));
         let _ = conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
@@ -113,6 +129,11 @@ impl CodeIndex {
         &self.root
     }
 
+    /// Where the database lives for a workspace, for diagnostics.
+    pub fn db_path(root: &Path) -> PathBuf {
+        root.join(INDEX_DIR).join("index.sqlite")
+    }
+
     /// Mark a file stale after a write/edit. The next query re-parses it.
     pub fn invalidate(&self, path: &Path) {
         if let Ok(conn) = self.db.lock() {
@@ -168,6 +189,7 @@ impl CodeIndex {
                         | "__pycache__"
                         | ".idea"
                         | ".cache"
+                        | INDEX_DIR
                 )
             })
             .build();
@@ -644,6 +666,31 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    /// The index belongs to the workspace it describes: it is created inside
+    /// it, ignores itself, and never grows into the config directory.
+    #[test]
+    fn the_index_lives_in_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "pub fn alpha() {}
+",
+        );
+        let index = CodeIndex::new(dir.path());
+        index.refresh().unwrap();
+
+        let db = dir.path().join(INDEX_DIR).join("index.sqlite");
+        assert!(db.is_file(), "{} was not created", db.display());
+        assert_eq!(CodeIndex::db_path(dir.path()), db);
+        let ignore = std::fs::read_to_string(dir.path().join(INDEX_DIR).join(".gitignore"));
+        assert_eq!(ignore.unwrap().trim(), "*", "the directory ignores itself");
+
+        // Its own files must not be walked into the index.
+        let counts = index.language_counts();
+        assert_eq!(counts.iter().map(|(_, n)| n).sum::<u64>(), 1, "{counts:?}");
     }
 
     #[test]
