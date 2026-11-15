@@ -176,7 +176,7 @@ enabled. Rejected knobs are retried one at a time.
 {
   "model": "openai/gpt-4o",
   "compactModel": "openai/gpt-4o-mini",
-  "compactWithMainModel": false,
+  "anotherModelForCompact": true,
   "contextWindow": 128000,
   "agent": {
     "maxTurns": 100,
@@ -247,11 +247,12 @@ appended to the tool result.
 
 - **Model routing**: `model` drives the loop; `compactModel` is used only for
   summaries. Each request is routed to the provider that owns its model, so the
-  two roles can live on different providers. Setting `compactWithMainModel` to
-  `true` drops the second model and summarises with `model`: the main model's
-  prompt cache is already warm, while a separate summary model starts cold and
-  the measured savings do not cover that. The status line then stops showing a
-  `compact` column, since there is nothing distinct to show.
+  two roles can live on different providers. Setting `anotherModelForCompact`
+  to `false` drops the second model and summarises with `model`: the main
+  model's prompt cache is already warm, while a separate summary model starts
+  cold and the measured savings do not cover that. `/settings` toggles it for
+  the running session and writes the choice to `config.json`; the status line
+  stops showing a `compact` column, since there is nothing distinct to show.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).

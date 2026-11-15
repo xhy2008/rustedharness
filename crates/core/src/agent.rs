@@ -38,6 +38,9 @@ pub struct Agent {
     events: UnboundedSender<HarnessEvent>,
     agent_model: RwLock<String>,
     compact_model: RwLock<String>,
+    /// Whether compaction uses its own model. Off means the main model writes
+    /// the summary, which is usually cheaper: its prompt cache is already warm.
+    another_model_for_compact: AtomicBool,
     cancel_token: Mutex<CancellationToken>,
     busy: AtomicBool,
 }
@@ -109,6 +112,7 @@ impl Agent {
                 cwd.display()
             )));
         }
+        let another_model_for_compact = config.another_model_for_compact;
         let config = Arc::new(config);
         // A pi session may not name a model at all (no `model_change`, no
         // assistant message yet), and pi has no compact model of its own:
@@ -122,7 +126,7 @@ impl Agent {
             .as_ref()
             .map(|r| r.meta.compact_model.clone())
             .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| config.compact_model.clone());
+            .unwrap_or_else(|| config.compaction_model().to_string());
         let todos = Arc::new(TodoStore::new(
             resume
                 .as_ref()
@@ -174,6 +178,7 @@ impl Agent {
             events: events.clone(),
             agent_model: RwLock::new(agent_model),
             compact_model: RwLock::new(compact_model),
+            another_model_for_compact: AtomicBool::new(another_model_for_compact),
             cancel_token: Mutex::new(CancellationToken::new()),
             busy: AtomicBool::new(false),
         });
@@ -254,6 +259,31 @@ impl Agent {
 
     pub fn compact_model(&self) -> String {
         self.compact_model.read().unwrap().clone()
+    }
+
+    pub fn another_model_for_compact(&self) -> bool {
+        self.another_model_for_compact.load(Ordering::Relaxed)
+    }
+
+    /// Turn the separate compaction model on or off. The choice is written to
+    /// `config.json`, so it survives the session, and the summary model takes
+    /// effect immediately.
+    pub fn set_another_model_for_compact(&self, on: bool) -> Result<()> {
+        self.another_model_for_compact.store(on, Ordering::Relaxed);
+        let agent = self.agent_model.read().unwrap().clone();
+        let compact = if on {
+            self.config.compact_model.clone()
+        } else {
+            agent.clone()
+        };
+        *self.compact_model.write().unwrap() = compact.clone();
+        if let Ok(mut ctx) = self.ctx.write() {
+            ctx.compact_model = compact.clone();
+        }
+        self.session.lock().unwrap().models(&agent, &compact)?;
+        self.config
+            .save_setting("anotherModelForCompact", json!(on))?;
+        Ok(())
     }
 
     fn context_limit(&self) -> u64 {

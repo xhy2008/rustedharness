@@ -33,13 +33,18 @@ impl Backend for Stub {
 }
 
 pub(crate) fn demo_app() -> App {
+    // Everything this harness writes while a preview runs - sessions, and any
+    // setting a test toggles - has to land in the temp directory, never in the
+    // real one.
+    let scratch = std::env::temp_dir().join("rustedharness-ui-preview");
     let config = Config {
         model: "anthropic/claude-sonnet-4.5".into(),
         compact_model: "anthropic/claude-haiku-4.5".into(),
         session: rustedharness_core::config::SessionConfig {
-            dir: Some(std::env::temp_dir().join("rustedharness-ui-preview")),
+            dir: Some(scratch.join("sessions")),
             max_saved_sessions: 1,
         },
+        source: Some(scratch),
         ..Config::default()
     };
 
@@ -472,6 +477,21 @@ fn the_compact_column_disappears_when_it_is_the_same_model() {
         "{}",
         row_text(&json, 19)
     );
+}
+
+/// The settings panel: one toggle for the compaction model.
+#[test]
+#[ignore = "writes target/ui-preview-settings.json; run on demand"]
+fn preview_settings() {
+    let mut app = demo_app();
+    app.overlay = Overlay::Settings { sel: 0 };
+    parent_dump(&mut app, "ui-preview-settings.json", 100, 20);
+
+    let mut app = demo_app();
+    app.another_model_for_compact = false;
+    app.compact_model = app.agent_model.clone();
+    app.overlay = Overlay::Settings { sel: 0 };
+    parent_dump(&mut app, "ui-preview-settings-off.json", 100, 20);
 }
 
 /// The `/lsp` panel: installed version, live state, and the subcommands that

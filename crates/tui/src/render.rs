@@ -1037,6 +1037,18 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 area,
             );
         }
+        Overlay::Settings { sel } => {
+            let item = PickerItem {
+                label: "another model for compact".to_string(),
+                detail: if app.another_model_for_compact {
+                    format!("on - summaries use {}", app.compact_model)
+                } else {
+                    "off - summaries use the main model".to_string()
+                },
+                value: String::new(),
+            };
+            draw_picker(frame, body, "settings", &[item], *sel, "");
+        }
         Overlay::Hotkeys => {
             let lines = vec![
                 panel_title("keys"),
@@ -1047,7 +1059,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 kv("ctrl+c", "clear editor, quit when empty"),
                 kv("ctrl+d", "quit"),
                 kv("ctrl+o", "expand/collapse all tool output"),
-                kv("ctrl+t", "expand/collapse all thinking"),
+                kv("ctrl+t", "show/hide the todo list"),
                 kv("ctrl+f", "file browser"),
                 kv("ctrl+m", "toggle mouse capture (off = native select)"),
                 kv("click", "fold/unfold a tool or thinking block"),

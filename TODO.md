@@ -1,5 +1,30 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：ctrl+t 管 todo、/settings 回归、二进制文件不退出（2026-11-15 第二十六轮）
+
+上一轮把 `/settings` 整个删掉是错的：用户要的是把那四行只读信息删掉，把"主模型压缩"开关放进去。
+本轮补齐并修正命名：
+
+1. **`anotherModelForCompact`**（默认 `true`）取代上一轮的 `compactWithMainModel`（语义相反）：
+   `true` = 用 `compactModel` 写摘要，`false` = 用主模型。`Config::compaction_model()` 决定实际用哪个，
+   **`compact_model` 不再被 normalize 覆写**，所以关掉再打开能恢复用户原来配置的小模型。
+2. **`/settings` 回归**，只有一行：`another model for compact  on/off`，Enter 切换。
+   `Agent::set_another_model_for_compact()` 立刻改 `ctx.compact_model`、写一条 `models` 会话记录，
+   并通过 `Config::save_setting()` 落盘 —— 只改 `config.json` 里的这一个键，其余（包括我们不认识的键）
+   原样保留。
+3. **ctrl+t 改为开关 todo 面板**（原来只管思考块展开），`/todo` 命令取消；思考块的批量展开失去快捷键。
+4. **删掉 `/clear`**。
+5. **二进制文件不再退出**：提示 `binary file, not shown` 后回到所在目录的列表、光标停在该文件上
+   （新增 `back_to_browser()`，与 Esc 共用同一段逻辑）。
+
+测试：`ctrl_t_toggles_todos_and_settings_toggles_the_compact_model`（ctrl+t 开/合、Enter 切换设置、
+`app.compact_model` 跟随 agent）、`the_menu_carries_no_redundant_entries`（`/clear`、`/todo` 不得回归，
+`/settings` 必须存在）、`another_model_for_compact_decides_which_model_summarises`、
+`saving_a_setting_edits_only_that_key`（只写一个键，其他键保留）。
+
+顺带修了一处测试污染：`demo_app()` 的 `Config` 没有 `source`，导致设置开关的测试真的写进了
+`~/.rustedharness/config.json`。现在 preview 的 `source` 指向临时目录，并已把误写进去的那个键删除。
+
 ## 已完成：TUI 精简 + 全屏文件浏览器 + 可选的主模型压缩（2026-11-15 第二十五轮）
 
 要求（五条）：

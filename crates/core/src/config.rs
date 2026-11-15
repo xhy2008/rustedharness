@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::{HarnessError, Result};
 
@@ -14,6 +15,11 @@ use crate::error::{HarnessError, Result};
 /// `Config` is the merged runtime view. `providers` is normally loaded from
 /// `models.json`; keeping it on the struct also lets a single JSON file
 /// describe everything, which is convenient for tests and `--config`.
+/// Serde default for settings that are on unless the user turns them off.
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -24,11 +30,11 @@ pub struct Config {
     /// Model used for compaction summaries; falls back to `model`.
     #[serde(default)]
     pub compact_model: String,
-    /// Compact with `model` instead of `compactModel`. A second model rarely
-    /// pays off once prompt-cache hits are counted: the main model's cache is
-    /// already warm, while the summary model starts cold.
-    #[serde(default)]
-    pub compact_with_main_model: bool,
+    /// Compact with `compactModel`. Turning it off summarises with `model`
+    /// instead: the main model's prompt cache is already warm, while a second
+    /// model starts cold and rarely pays for itself.
+    #[serde(default = "yes")]
+    pub another_model_for_compact: bool,
     /// Fallback context window for models that do not declare one.
     #[serde(default)]
     pub context_window: u64,
@@ -66,7 +72,7 @@ impl Default for Config {
         Self {
             model: "openai/gpt-4o".to_string(),
             compact_model: "openai/gpt-4o-mini".to_string(),
-            compact_with_main_model: false,
+            another_model_for_compact: true,
             context_window: 128_000,
             provider: "openai".to_string(),
             providers,
@@ -722,11 +728,34 @@ impl Config {
         if let Ok(spec) = self.resolve_model(&self.compact_model) {
             self.compact_model = spec.reference();
         }
-        if self.compact_with_main_model {
-            // One model, one cache: the summary runs on the model that already
-            // has the conversation cached.
-            self.compact_model = self.model.clone();
+    }
+
+    /// Model that writes compaction summaries. `compactModel` is kept as
+    /// configured so the choice survives toggling the setting off and on.
+    pub fn compaction_model(&self) -> &str {
+        if self.another_model_for_compact {
+            &self.compact_model
+        } else {
+            &self.model
         }
+    }
+
+    /// Persist one top-level setting into `config.json`, leaving every other
+    /// key (including ones this version does not model) untouched.
+    pub fn save_setting(&self, key: &str, value: Value) -> Result<()> {
+        let dir = self.source_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("config.json");
+        let mut root: Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&strip_trailing_commas(&raw)).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        root[key] = value;
+        let mut text = serde_json::to_string_pretty(&root)?;
+        text.push('\n');
+        std::fs::write(&path, text)?;
+        Ok(())
     }
 
     fn merge_models(&mut self, file: ModelsFile) {
@@ -1163,19 +1192,49 @@ mod tests {
         std::env::remove_var("RUSTEDHARNESS_TEST_KEY");
     }
 
-    /// Compaction can run on the main model, and then there is exactly one
-    /// model to report.
+    /// Compaction can run on the main model, and the configured summary model
+    /// is kept so the setting can be turned back on.
     #[test]
-    fn compacting_with_the_main_model_drops_the_second_one() {
-        let raw = r#"{"model":"amd/big","compactModel":"amd/small","compactWithMainModel":true}"#;
+    fn another_model_for_compact_decides_which_model_summarises() {
+        let raw =
+            r#"{"model":"amd/big","compactModel":"amd/small","anotherModelForCompact":false}"#;
         let mut cfg: Config = serde_json::from_str(raw).unwrap();
         cfg.normalize();
-        assert!(cfg.compact_with_main_model);
-        assert_eq!(cfg.compact_model, cfg.model);
+        assert!(!cfg.another_model_for_compact);
+        assert_eq!(cfg.compaction_model(), cfg.model);
+        assert_ne!(cfg.compact_model, cfg.model, "the choice is remembered");
 
-        let mut cfg: Config = serde_json::from_str(&raw.replace(":true", ":false")).unwrap();
+        let mut cfg: Config =
+            serde_json::from_str(r#"{"model":"amd/big","compactModel":"amd/small"}"#).unwrap();
         cfg.normalize();
-        assert_ne!(cfg.compact_model, cfg.model, "the default keeps them apart");
+        assert!(
+            cfg.another_model_for_compact,
+            "the default keeps them apart"
+        );
+        assert_eq!(cfg.compaction_model(), cfg.compact_model);
+    }
+
+    /// The toggle writes one key and leaves the rest of the file alone.
+    #[test]
+    fn saving_a_setting_edits_only_that_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"model":"m","denyTools":["bash"],"note":"keep me"}"#,
+        )
+        .unwrap();
+        let cfg = Config {
+            source: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
+        cfg.save_setting("anotherModelForCompact", serde_json::json!(false))
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["anotherModelForCompact"], serde_json::json!(false));
+        assert_eq!(saved["denyTools"][0], "bash");
+        assert_eq!(saved["note"], "keep me");
     }
 
     #[test]

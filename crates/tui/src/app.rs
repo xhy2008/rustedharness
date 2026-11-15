@@ -98,6 +98,10 @@ pub enum Overlay {
         scroll: usize,
         truncated: bool,
     },
+    /// One toggle, and the only setting that changes behaviour mid-session.
+    Settings {
+        sel: usize,
+    },
     Hotkeys,
     Todos,
     Processes,
@@ -142,6 +146,8 @@ pub struct App {
     pub cwd: String,
     pub agent_model: String,
     pub compact_model: String,
+    /// Mirrors `anotherModelForCompact`; the settings panel flips it.
+    pub another_model_for_compact: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub context_tokens: u64,
@@ -200,10 +206,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/new", "start a fresh session"),
     ("/resume", "pick a saved session"),
     ("/session", "show session id, models and context usage"),
-    ("/clear", "clear the transcript view"),
+    ("/settings", "another model for compaction"),
     ("/files", "browse the workspace file tree"),
     ("/view <path>", "open a file read-only"),
-    ("/todo", "show the todo list"),
     ("/lsp", "language server status"),
     ("/lsp install <id>", "download the newest release"),
     ("/lsp update <id>", "re-install from the newest release"),
@@ -271,6 +276,7 @@ impl App {
             cwd: String::new(),
             agent_model: String::new(),
             compact_model: String::new(),
+            another_model_for_compact: true,
             input_tokens: 0,
             output_tokens: 0,
             context_tokens: 0,
@@ -340,6 +346,7 @@ impl App {
         self.cwd = snapshot.cwd;
         self.agent_model = snapshot.agent_model;
         self.compact_model = snapshot.compact_model;
+        self.another_model_for_compact = self.agent.another_model_for_compact();
         self.context_tokens = snapshot.context_tokens;
         self.context_limit = snapshot.context_limit;
         // A resumed session shows the numbers the provider last reported, so
@@ -916,6 +923,7 @@ impl App {
             Overlay::Model { items, filter, .. } => model_filtered(items, filter).len(),
             Overlay::Session { items, filter, .. } => session_filtered(items, filter).len(),
             Overlay::FileBrowser { entries, .. } => entries.len(),
+            Overlay::Settings { .. } => 1,
             _ => 0,
         };
         if len == 0 {
@@ -925,7 +933,8 @@ impl App {
             Overlay::Slash { sel, .. }
             | Overlay::Model { sel, .. }
             | Overlay::Session { sel, .. }
-            | Overlay::FileBrowser { sel, .. } => sel,
+            | Overlay::FileBrowser { sel, .. }
+            | Overlay::Settings { sel } => sel,
             _ => return,
         };
         *sel = if down {
@@ -985,7 +994,12 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Char('t') => {
-                    self.toggle_all(EntryKind::Reasoning);
+                    // The todo list is the one panel worth a key of its own.
+                    self.overlay = if matches!(self.overlay, Overlay::Todos) {
+                        Overlay::None
+                    } else {
+                        Overlay::Todos
+                    };
                     return Ok(());
                 }
                 KeyCode::Char('f') => {
@@ -1143,11 +1157,8 @@ impl App {
                 // From a file back to the list it was opened from; the next
                 // Esc leaves the list.
                 if let Overlay::FileView { path, .. } = &self.overlay {
-                    let (dir, name) = match path.rsplit_once('/') {
-                        Some((dir, name)) => (dir.to_string(), Some(name.to_string())),
-                        None => (String::new(), Some(path.clone())),
-                    };
-                    self.open_file_browser_at(&dir, name.as_deref());
+                    let path = path.clone();
+                    self.back_to_browser(&path);
                     return Ok(());
                 }
                 let was_slash = matches!(self.overlay, Overlay::Slash { .. });
@@ -1241,10 +1252,11 @@ impl App {
             Overlay::Session { .. } => Some(3),
             Overlay::FileBrowser { .. } => Some(4),
             Overlay::FileView { .. } => Some(5),
-            Overlay::Hotkeys => Some(6),
-            Overlay::Todos => Some(7),
-            Overlay::Processes => Some(8),
-            Overlay::Lsp => Some(9),
+            Overlay::Settings { .. } => Some(6),
+            Overlay::Hotkeys => Some(7),
+            Overlay::Todos => Some(8),
+            Overlay::Processes => Some(9),
+            Overlay::Lsp => Some(10),
         }
     }
 
@@ -1444,6 +1456,25 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path, op_tx);
             }
+            Overlay::Settings { .. } => {
+                let on = !self.another_model_for_compact;
+                match self.agent.set_another_model_for_compact(on) {
+                    Ok(()) => {
+                        self.another_model_for_compact = on;
+                        self.compact_model = self.agent.compact_model();
+                        self.notice(if on {
+                            format!("compaction uses {} again", self.compact_model)
+                        } else {
+                            format!(
+                                "compaction uses {} (its prompt cache is already warm)",
+                                self.agent_model
+                            )
+                        });
+                        self.overlay = Overlay::Settings { sel: 0 };
+                    }
+                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                }
+            }
             other => self.overlay = other,
         }
         Ok(())
@@ -1493,15 +1524,11 @@ impl App {
                 );
                 self.push(EntryKind::Notice, "", detail);
             }
-            "/clear" => {
-                self.entries.clear();
-                self.scroll = 0;
-                self.follow = true;
-            }
+
             "/files" => self.open_file_browser(&arg),
             "/view" if arg.is_empty() => self.notice("usage: /view <path>"),
             "/view" => self.open_file(&arg, op_tx),
-            "/todo" => self.overlay = Overlay::Todos,
+            "/settings" => self.overlay = Overlay::Settings { sel: 0 },
             "/procs" => self.overlay = Overlay::Processes,
             "/lsp" => self.lsp_command(&arg, op_tx),
             "/copy" => self.copy_last_assistant(),
@@ -1589,6 +1616,7 @@ impl App {
             Ok(()) => {
                 self.agent_model = self.agent.agent_model();
                 self.compact_model = self.agent.compact_model();
+                self.another_model_for_compact = self.agent.another_model_for_compact();
                 let label = match target {
                     ModelTarget::Agent => "model",
                     ModelTarget::Compact => "compact model",
@@ -1664,6 +1692,16 @@ impl App {
         }
     }
 
+    /// Return to the directory listing that contains `rel`, with the cursor on
+    /// it. Esc uses this, and so does anything that cannot show the file.
+    fn back_to_browser(&mut self, rel: &str) {
+        let (dir, name) = match rel.rsplit_once('/') {
+            Some((dir, name)) => (dir.to_string(), Some(name.to_string())),
+            None => (String::new(), Some(rel.to_string())),
+        };
+        self.open_file_browser_at(&dir, name.as_deref());
+    }
+
     pub(crate) fn open_file_browser(&mut self, rel: &str) {
         self.open_file_browser_at(rel, None);
     }
@@ -1724,8 +1762,8 @@ impl App {
         match std::fs::read(&path) {
             Ok(bytes) => {
                 if bytes.iter().take(8_192).any(|b| *b == 0) {
-                    self.notice(format!("{rel}: binary file"));
-                    self.overlay = Overlay::None;
+                    self.notice(format!("{rel}: binary file, not shown"));
+                    self.back_to_browser(rel);
                     return;
                 }
                 let limit = 512 * 1024;
@@ -2177,9 +2215,32 @@ mod tests {
     #[test]
     fn the_menu_carries_no_redundant_entries() {
         for (command, _) in COMMANDS {
-            assert_ne!(*command, "/settings", "/settings was removed");
             assert_ne!(*command, "/model <name>", "the picker covers this");
+            assert_ne!(*command, "/clear", "/clear was removed");
+            assert_ne!(*command, "/todo", "ctrl+t shows the todo list");
         }
+        // The settings panel is back, and it holds exactly one toggle.
+        assert!(COMMANDS.iter().any(|(command, _)| *command == "/settings"));
+    }
+
+    /// One key for the todo panel, and the settings panel holds one toggle
+    /// that round-trips through the agent and the config file.
+    #[test]
+    fn ctrl_t_toggles_todos_and_settings_toggles_the_compact_model() {
+        let mut app = crate::preview::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
+        assert!(matches!(app.overlay, Overlay::Todos));
+        runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
+        assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
+
+        app.overlay = Overlay::Settings { sel: 0 };
+        let before = app.another_model_for_compact;
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.another_model_for_compact, !before);
+        assert_eq!(app.compact_model, app.agent.compact_model());
     }
 
     #[test]
