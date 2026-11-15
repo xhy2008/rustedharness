@@ -568,6 +568,16 @@ fn transcript_uses_only_single_width_glyphs() {
     }
 }
 
+/// Serialise the tests that change the ambiguous-width mode: it is process
+/// wide by design (the layout needs it everywhere), so two of them running in
+/// parallel would each see the other's setting.
+fn with_ambiguous_width(wide: bool) -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    crate::render::set_ambiguous_wide(wide);
+    guard
+}
+
 /// Content (not just our own UI strings) can carry East-Asian-ambiguous
 /// characters: the model writes `->` as `→`, tool output has em dashes and
 /// ellipses. In a CJK console those are two cells wide while every layout
@@ -575,6 +585,7 @@ fn transcript_uses_only_single_width_glyphs() {
 /// frame buffer and stays on screen. They are folded to ASCII on the way in.
 #[test]
 fn ambiguous_width_content_is_folded_before_layout() {
+    let _guard = with_ambiguous_width(true);
     let mut app = demo_app();
     app.entries.clear();
     let mut tool = Entry::new(EntryKind::Tool, "edit", "").with_arg(
@@ -606,4 +617,49 @@ fn ambiguous_width_content_is_folded_before_layout() {
         seen_arrow,
         "the arrow should be folded to ASCII, not dropped"
     );
+}
+
+/// The mirror image: a console that draws ambiguous glyphs in a single cell
+/// needs no folding at all. Forcing ASCII there would be a pointless loss of
+/// fidelity (`->` instead of `→`), so the measured mode is what decides.
+#[test]
+fn ambiguous_glyphs_survive_when_the_console_draws_them_narrow() {
+    let _guard = with_ambiguous_width(false);
+    let mut app = demo_app();
+    app.entries.clear();
+    app.push(
+        EntryKind::Assistant,
+        "",
+        "rename `norm` \u{2192} `length_squared` \u{2014} done",
+    );
+
+    dump(&mut app, 90, 12);
+    let text: String = app
+        .lines_cache
+        .borrow()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains('\u{2192}'),
+        "arrow should be kept, not folded: {text:?}"
+    );
+    assert!(
+        text.contains('\u{2014}'),
+        "em dash should be kept, not folded: {text:?}"
+    );
+    assert!(
+        !text.contains("->"),
+        "nothing should have been folded: {text:?}"
+    );
+
+    // Back to the default so a later test in this thread starts from the safe
+    // assumption even if the guard is dropped by a panic.
+    crate::render::set_ambiguous_wide(true);
 }

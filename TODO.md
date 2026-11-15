@@ -1,5 +1,25 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：歧义宽度改为启动实测 + 可配置（2026-11-15 第九轮）
+
+结论：**没有**任何转义序列或注册表项能要求控制台把歧义宽度字符按 1 列画，那是终端
+自己按字体/代码页决定的策略（同一台机器上 conhost 与 Windows Terminal 都可能不一致），
+所以改成「不猜，测」。
+
+实测方法（`lib::measure_ambiguous_width`，在 `ratatui::init()` 之后、首帧之前跑，屏幕
+还在备用屏里，不碰回滚缓冲）：
+1. `Clear(All)` + `MoveTo(0,0)`；
+2. `Print("→")`；
+3. `cursor::position()` —— Windows 走 `GetConsoleScreenBufferInfo`（真实格子坐标），
+   Unix 走 DSR `ESC[6n`；
+4. 列号 1 = 终端把它当普通字符，2 = 两列。失败时返回 `None`，调用方按「两列」处理（安全侧）。
+
+本机实测（winpty/conhost，中文 Windows）：`pos=Ok((2,0))` → 两列，所以当前的 ASCII 折叠
+是正确行为；换到把歧义宽度画成 1 列的终端时，`→ — …` 会原样保留，不再降级成 `->`。
+
+配置：`RH_AMBIWIDTH=single|double|auto`（默认 auto）。**强制 single 只在终端真的按 1 列
+渲染时安全**，否则幽灵字符会立刻回来。`Ctrl+H` 快捷键面板底部会显示实测结果。
+
 ## 已完成：悬空字符第三类来源 —— 正文里的歧义宽度字符（2026-11-15 第八轮）
 
 用户截图里那列 `3` 不是半个汉字，是**一次 `edit` 工具调用行尾的 `+3`**：
@@ -268,7 +288,7 @@ rm -rf target/debug/incremental                                       # 顺手�
 - TUI 是全屏 + 拖拽复制方案（用户否决过 inline viewport 方案，别再碰）。启动时**必须** `terminal.clear()`：ratatui 不会替你清屏，不清就会把上一次运行的画面留在空白格子里（悬空字符的真正来源）。选区必须是**线性**的（首行切锚点列、中间整行、末行切光标列），不要退回矩形框。
 - 运行期必须保持 `DisableLineWrap`（`lib.rs` 里 `execute!` 打开、退出/panic 时恢复）：一旦允许自动换行，任何一行超出 1 列都会把整屏顶歪，之后全是悬空字符。
 - 渲染宽度：`draw()` 全局右留 1 列；UI 内已禁用东亚歧义宽度字符（· … ¥ 除外），新增 UI 字符串只用 ASCII 标点做分隔符/省略号。`¥` 允许保留（cost 字段）。
-- UI 字形规则（2026-11-15 第六轮定稿）：**ASCII + 框线（U+2500–257F）+ CJK**，别的一律不要。几何符号（`● ○`）、箭头、通用标点（`· › …`）、Latin-1 歧义符号（`× ±`）在中文控制台会按 **2 列**渲染，而 unicode-width 算 1 列，行尾字符会被推到帧缓冲之外变成永久幽灵字符。`test/transcript_uses_only_single_width_glyphs` 在守这条线。
+- UI 字形规则：**ASCII + 框线（U+2500–257F）**，我们自己的字符串里别的一律不要（这样无论终端怎么量都安全）。正文里的歧义宽度字符由 `render::sanitize` 按实测模式决定是否折叠成 ASCII，见 `render::AMBIGUOUS_IS_WIDE`。几何符号（`● ○`）、箭头、通用标点（`· › …`）、Latin-1 歧义符号（`× ±`）在中文控制台会按 **2 列**渲染，而 unicode-width 算 1 列，行尾字符会被推到帧缓冲之外变成永久幽灵字符。`test/transcript_uses_only_single_width_glyphs` 在守这条线。
 - 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。宽度不足时按 路径→CacheHit→cost→compact 顺序隐藏字段（见 `render::footer_line` 的 layouts 表），不要退回强制截断。
 - resize 防抖：lib.rs event_loop，Resize 风暴期间跳过 draw，静默 150ms 后 clear+强制重绘（RESIZE_SETTLE 常量）。
 - 工作区根锁死（target/debug 启动限制）是设计内行为，不要改。

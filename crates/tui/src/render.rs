@@ -161,6 +161,24 @@ fn is_ambiguous(c: char) -> bool {
     c.width_cjk() != c.width()
 }
 
+/// Whether the terminal draws ambiguous-width glyphs in two cells.
+///
+/// There is no portable way to ask: the console decides, typically from its
+/// font and code page, and two consoles on the same machine can disagree. So
+/// the value is measured once at startup (see `lib::measure_ambiguous_width`)
+/// and every layout decision follows it. `true` is the safe default: a console
+/// that draws them wide will spill the tail of a row into cells the frame
+/// buffer thinks are blank, and those cells are never repainted.
+static AMBIGUOUS_IS_WIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_ambiguous_wide(wide: bool) {
+    AMBIGUOUS_IS_WIDE.store(wide, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ambiguous_is_wide() -> bool {
+    AMBIGUOUS_IS_WIDE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn narrow(c: char) -> Option<&'static str> {
     Some(match c {
         '\u{2190}' => "<-",
@@ -203,9 +221,10 @@ fn narrow(c: char) -> Option<&'static str> {
 /// blank, which is exactly how orphaned characters survive every repaint.
 /// Expand tabs, keep newlines, drop every other control character.
 fn sanitize(text: &str) -> Cow<'_, str> {
+    let fold = ambiguous_is_wide();
     if !text
         .chars()
-        .any(|c| (c.is_control() && c != '\n') || is_ambiguous(c))
+        .any(|c| (c.is_control() && c != '\n') || (fold && is_ambiguous(c)))
     {
         return Cow::Borrowed(text);
     }
@@ -225,7 +244,7 @@ fn sanitize(text: &str) -> Cow<'_, str> {
             | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}'
             | '\u{00ad}' => {}
-            c if is_ambiguous(c) => {
+            c if fold && is_ambiguous(c) => {
                 if let Some(narrow) = narrow(c) {
                     out.push_str(narrow);
                 }
@@ -1189,6 +1208,19 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 kv("pgup/pgdn", "scroll transcript"),
                 Line::from(""),
                 kv("/", "command list"),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("ambiguous width ", style(FAINT)),
+                    Span::styled(
+                        if ambiguous_is_wide() {
+                            "double - symbols folded to ascii"
+                        } else {
+                            "single - symbols kept as typed"
+                        },
+                        style(DIM),
+                    ),
+                    Span::styled("   RH_AMBIWIDTH", style(FAINT)),
+                ]),
             ];
             draw_info_block(frame, body, lines);
         }

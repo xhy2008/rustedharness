@@ -19,10 +19,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crossterm::cursor::{self, MoveTo};
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{
-    BeginSynchronizedUpdate, DisableLineWrap, EnableLineWrap, EndSynchronizedUpdate,
+    BeginSynchronizedUpdate, Clear, ClearType, DisableLineWrap, EnableLineWrap,
+    EndSynchronizedUpdate,
 };
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::Config;
@@ -53,6 +56,12 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
         let _ = execute!(std::io::stdout(), EnableLineWrap);
         previous_hook(info);
     }));
+    // Decide once, before the first frame, how this terminal draws
+    // ambiguous-width glyphs; every layout decision follows it.
+    let ambiguous_wide = ambiguous_setting();
+    render::set_ambiguous_wide(ambiguous_wide);
+    tracing::debug!(ambiguous_wide, "terminal ambiguous-width measurement");
+
     let stop = Arc::new(AtomicBool::new(false));
     let (key_tx, mut key_rx) = mpsc::unbounded_channel();
     let (op_tx, mut op_rx) = mpsc::unbounded_channel();
@@ -82,6 +91,42 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
     let _ = execute!(stdout, DisableMouseCapture, EnableLineWrap);
     ratatui::restore();
     result
+}
+
+/// How this terminal renders ambiguous-width glyphs.
+///
+/// Order of precedence: an explicit `RH_AMBIWIDTH` (single|double|auto), then
+/// measurement, then the conservative answer (wide, i.e. fold to ASCII).
+fn ambiguous_setting() -> bool {
+    let configured = std::env::var("RH_AMBIWIDTH")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase());
+    match configured.as_deref() {
+        Some("single" | "narrow" | "1" | "false" | "off") => false,
+        Some("double" | "wide" | "2" | "true" | "on") => true,
+        _ => measure_ambiguous_width().unwrap_or(true),
+    }
+}
+
+/// Ask the terminal how many cells it gives an ambiguous-width glyph.
+///
+/// No escape sequence and no registry key says "draw `→` in one cell" - the
+/// console picks, normally from its font and code page, and it can differ
+/// between two consoles on the same box. So park the cursor in a known column,
+/// print one ambiguous glyph and read the cursor back: one cell means the
+/// console treats them as ordinary characters and the transcript can keep
+/// them, two cells means they have to be folded to ASCII.
+///
+/// Runs inside the alternate screen before the first frame, so the probe
+/// never touches scrollback; `None` means the terminal would not answer and
+/// the caller should assume the wide (safe) behaviour.
+fn measure_ambiguous_width() -> Option<bool> {
+    const GLYPH: &str = "\u{2192}";
+    let mut stdout = std::io::stdout();
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0), Print(GLYPH)).ok()?;
+    std::io::Write::flush(&mut stdout).ok()?;
+    let (column, _) = cursor::position().ok()?;
+    Some(column >= 2)
 }
 
 /// Draw one frame.
