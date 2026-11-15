@@ -176,6 +176,7 @@ enabled. Rejected knobs are retried one at a time.
 {
   "model": "openai/gpt-4o",
   "compactModel": "openai/gpt-4o-mini",
+  "compactWithMainModel": false,
   "contextWindow": 128000,
   "agent": {
     "maxTurns": 100,
@@ -246,7 +247,11 @@ appended to the tool result.
 
 - **Model routing**: `model` drives the loop; `compactModel` is used only for
   summaries. Each request is routed to the provider that owns its model, so the
-  two roles can live on different providers.
+  two roles can live on different providers. Setting `compactWithMainModel` to
+  `true` drops the second model and summarises with `model`: the main model's
+  prompt cache is already warm, while a separate summary model starts cold and
+  the measured savings do not cover that. The status line then stops showing a
+  `compact` column, since there is nothing distinct to show.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).
@@ -269,8 +274,8 @@ appended to the tool result.
   both tools open the same files: `<dir>/--<encoded cwd>--/<timestamp>_<id>.jsonl`.
   What pi records as noise is deliberately left out - failed API calls (stored
   by pi as empty error messages), per-switch `model_change` history (we keep one
-  model snapshot), and frontend commands such as `/settings` or `/model x`
-  entered in the composer.
+  model snapshot), and frontend commands such as `/model x` entered in the
+  composer.
 - **Workspace anchoring (R1–R4)**: relative paths resolve against the session
   workspace; absolute paths outside it are rejected. Symlinks are resolved
   before the check. Every tool is auto-allowed except a would-be R4 escape.

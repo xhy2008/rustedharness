@@ -1,5 +1,29 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：TUI 精简 + 全屏文件浏览器 + 可选的主模型压缩（2026-11-15 第二十五轮）
+
+要求（五条）：
+1. 删掉 `/` 菜单里多余的 `/model <name>` 条目 —— 命令本身仍可直接输入，只是不再占菜单位；
+   `/model` 的 picker 才是主路径。
+2. 删掉 `ctrl+l` / `ctrl+r` / `ctrl+x` / `ctrl+g` 热键 —— 分别对应模型 picker、会话 picker、
+   复制最后回复、跟随末尾/重绘，全部随菜单一起去掉；`/hotkeys` 面板同步删掉这四行，
+   `ctrl+f`（文件浏览器）保留。
+3. **主模型压缩开关**：新增 `compactWithMainModel`（默认 `false`）。打开后 `normalize()` 里
+   `compact_model = model`，压缩走主模型 —— 主模型的 prompt cache 本来就是热的，另开一个小模型
+   反而要重新暖缓存。状态栏在 `compact_model == agent_model` 时不再显示 `compact` 那一栏。
+4. **`/files` 全屏 + 逐级 Esc**：文件列表从 12 行弹窗改成占满整屏的圆角框（自动滚动保持光标
+   可见，底部一行 `enter open   esc back`）。查看文件时按 Esc 回到**它所在目录的列表**并且光标
+   停在该文件上（新增 `open_file_browser_at(rel, focus)`），再按一次 Esc 才退出列表。
+   顺带修掉列表里目录名显示成 `src//` 的双斜杠。
+5. **删掉 `/settings`**：那四行（agent model / compact model / workspace / session）都是只读信息，
+   与 footer、`/session`、`/cwd` 重复，整个 overlay、命令、`SETTINGS_ROWS` 常量和渲染分支一并删除。
+
+测试：`the_removed_control_keys_do_nothing`（四组 ctrl 键不再开 overlay，ctrl+f 仍开）、
+`esc_walks_back_out_of_the_file_viewer`（Esc→列表并选中该文件，再 Esc→关闭）、
+`the_menu_carries_no_redundant_entries`（`/settings` 与 `/model <name>` 不得回归）、
+`the_compact_column_disappears_when_it_is_the_same_model`（渲染后读 footer 断言），
+以及预览 `preview_files_fullscreen`。
+
 ## 已完成：L0 索引挪到工作区的 .rustedharness/（2026-11-15 第二十四轮）
 
 要求：tree-sitter 的 L0 index 从配置目录挪到工作目录下的 `.rustedharness/`。

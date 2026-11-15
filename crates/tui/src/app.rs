@@ -3,9 +3,9 @@
 //! Layout (top to bottom, borderless like Pi):
 //!   transcript | [overlay] | editor rule | status line | footer
 //!
-//! Feature parity with the web GUI: sessions (list/resume/new), file tree and
-//! viewer, model picker, settings, todos, LSP status, processes, download
-//! consent, token/context stats, clipboard copy.
+//! Feature parity with the web GUI: sessions (list/resume/new), full-screen
+//! file browser and viewer, model picker, todos, LSP status, processes,
+//! download consent, token/context stats, clipboard copy.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -98,9 +98,6 @@ pub enum Overlay {
         scroll: usize,
         truncated: bool,
     },
-    Settings {
-        sel: usize,
-    },
     Hotkeys,
     Todos,
     Processes,
@@ -113,9 +110,6 @@ pub enum ModelTarget {
     Agent,
     Compact,
 }
-
-/// Selectable rows in the settings overlay.
-const SETTINGS_ROWS: &[&str] = &["agent model", "compact model", "workspace", "session"];
 
 pub struct ConsentCard {
     pub id: String,
@@ -201,9 +195,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this command list"),
     ("/hotkeys", "keyboard shortcut reference"),
     ("/model", "open the model picker"),
-    ("/model <name>", "switch the agent model directly"),
     ("/compact-model", "switch the compaction model"),
-    ("/settings", "model, compact model, workspace, session"),
     ("/cwd <dir>", "move the workspace root"),
     ("/new", "start a fresh session"),
     ("/resume", "pick a saved session"),
@@ -924,7 +916,6 @@ impl App {
             Overlay::Model { items, filter, .. } => model_filtered(items, filter).len(),
             Overlay::Session { items, filter, .. } => session_filtered(items, filter).len(),
             Overlay::FileBrowser { entries, .. } => entries.len(),
-            Overlay::Settings { .. } => SETTINGS_ROWS.len(),
             _ => 0,
         };
         if len == 0 {
@@ -934,8 +925,7 @@ impl App {
             Overlay::Slash { sel, .. }
             | Overlay::Model { sel, .. }
             | Overlay::Session { sel, .. }
-            | Overlay::FileBrowser { sel, .. }
-            | Overlay::Settings { sel } => sel,
+            | Overlay::FileBrowser { sel, .. } => sel,
             _ => return,
         };
         *sel = if down {
@@ -998,28 +988,8 @@ impl App {
                     self.toggle_all(EntryKind::Reasoning);
                     return Ok(());
                 }
-                KeyCode::Char('l') => {
-                    self.open_model_picker(ModelTarget::Agent);
-                    return Ok(());
-                }
-                KeyCode::Char('r') => {
-                    self.open_session_picker();
-                    return Ok(());
-                }
                 KeyCode::Char('f') => {
                     self.open_file_browser("");
-                    return Ok(());
-                }
-                KeyCode::Char('x') => {
-                    self.copy_last_assistant();
-                    return Ok(());
-                }
-                KeyCode::Char('g') => {
-                    // Also doubles as "fix my screen": a full repaint clears
-                    // anything the terminal left behind after an external
-                    // scroll or a mode switch.
-                    self.follow = true;
-                    self.needs_repaint = true;
                     return Ok(());
                 }
                 KeyCode::Char('m') => {
@@ -1170,6 +1140,16 @@ impl App {
     ) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
+                // From a file back to the list it was opened from; the next
+                // Esc leaves the list.
+                if let Overlay::FileView { path, .. } = &self.overlay {
+                    let (dir, name) = match path.rsplit_once('/') {
+                        Some((dir, name)) => (dir.to_string(), Some(name.to_string())),
+                        None => (String::new(), Some(path.clone())),
+                    };
+                    self.open_file_browser_at(&dir, name.as_deref());
+                    return Ok(());
+                }
                 let was_slash = matches!(self.overlay, Overlay::Slash { .. });
                 self.overlay = Overlay::None;
                 if was_slash {
@@ -1261,11 +1241,10 @@ impl App {
             Overlay::Session { .. } => Some(3),
             Overlay::FileBrowser { .. } => Some(4),
             Overlay::FileView { .. } => Some(5),
-            Overlay::Settings { .. } => Some(6),
-            Overlay::Hotkeys => Some(7),
-            Overlay::Todos => Some(8),
-            Overlay::Processes => Some(9),
-            Overlay::Lsp => Some(10),
+            Overlay::Hotkeys => Some(6),
+            Overlay::Todos => Some(7),
+            Overlay::Processes => Some(8),
+            Overlay::Lsp => Some(9),
         }
     }
 
@@ -1465,36 +1444,6 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path, op_tx);
             }
-            Overlay::Settings { sel } => match sel {
-                0 => self.open_model_picker(ModelTarget::Agent),
-                1 => self.open_model_picker(ModelTarget::Compact),
-                2 => self.notice(format!(
-                    "workspace is {} — change it with /cwd <dir>",
-                    self.cwd
-                )),
-                _ => {
-                    let cost = self
-                        .cost_usd
-                        .map(|c| format!("{c:.4}"))
-                        .unwrap_or_else(|| "n/a".into());
-                    self.push(
-                        EntryKind::Notice,
-                        "",
-                        format!(
-                            "session {}\n  cwd {}\n  model {} | compact {}\n  ctx {}/{} | in {} | out {} | cost {}",
-                            self.session_id,
-                            self.cwd,
-                            self.agent_model,
-                            self.compact_model,
-                            self.context_tokens,
-                            self.context_limit,
-                            self.input_tokens,
-                            self.output_tokens,
-                            cost
-                        ),
-                    );
-                }
-            },
             other => self.overlay = other,
         }
         Ok(())
@@ -1517,7 +1466,6 @@ impl App {
             "/model" => self.set_model(&arg, ModelTarget::Agent),
             "/compact-model" if arg.is_empty() => self.open_model_picker(ModelTarget::Compact),
             "/compact-model" => self.set_model(&arg, ModelTarget::Compact),
-            "/settings" => self.overlay = Overlay::Settings { sel: 0 },
             "/cwd" if arg.is_empty() => self.notice(format!("cwd: {}", self.cwd)),
             "/cwd" => match self.agent.set_cwd(Path::new(&arg)).await {
                 Ok(()) => {
@@ -1716,7 +1664,13 @@ impl App {
         }
     }
 
-    fn open_file_browser(&mut self, rel: &str) {
+    pub(crate) fn open_file_browser(&mut self, rel: &str) {
+        self.open_file_browser_at(rel, None);
+    }
+
+    /// Open the list at `rel` with the cursor on `focus`, so leaving a file
+    /// lands where the user was instead of at the top of the directory.
+    fn open_file_browser_at(&mut self, rel: &str, focus: Option<&str>) {
         let rel = rel.trim_matches('/').to_string();
         let root = self.agent.cwd();
         let dir = if rel.is_empty() {
@@ -1752,8 +1706,11 @@ impl App {
             self.overlay = Overlay::None;
             return;
         }
+        let focus = focus
+            .and_then(|name| entries.iter().position(|(entry, _)| entry == name))
+            .unwrap_or(if rel.is_empty() { 0 } else { 1 });
         self.overlay = Overlay::FileBrowser {
-            sel: if rel.is_empty() { 0 } else { 1 },
+            sel: focus,
             rel,
             entries,
         };
@@ -2084,6 +2041,60 @@ mod tests {
         assert!(app.lsp_summary().is_none());
     }
 
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn the_removed_control_keys_do_nothing() {
+        let mut app = crate::preview::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for key in [ctrl('l'), ctrl('r'), ctrl('x'), ctrl('g')] {
+            runtime.block_on(app.handle_key(key, &tx)).unwrap();
+            assert!(
+                matches!(app.overlay, Overlay::None),
+                "{:?} still opens an overlay",
+                key.code
+            );
+        }
+        // ctrl+f is the one that stayed.
+        runtime.block_on(app.handle_key(ctrl('f'), &tx)).unwrap();
+        assert!(matches!(app.overlay, Overlay::FileBrowser { .. }));
+    }
+
+    /// Esc leaves the viewer for the list it came from, and only the second Esc
+    /// leaves the list.
+    #[test]
+    fn esc_walks_back_out_of_the_file_viewer() {
+        let mut app = crate::preview::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        app.overlay = Overlay::FileView {
+            path: "Cargo.toml".into(),
+            lines: vec![Line::from("x")],
+            scroll: 0,
+            truncated: false,
+        };
+        runtime
+            .block_on(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx))
+            .unwrap();
+        let Overlay::FileBrowser { rel, entries, sel } = &app.overlay else {
+            panic!("esc from the viewer must land in the browser");
+        };
+        assert_eq!(rel, "", "the file sits in the workspace root");
+        assert_eq!(
+            entries.get(*sel).map(|(name, _)| name.as_str()),
+            Some("Cargo.toml"),
+            "and the cursor is on it"
+        );
+
+        runtime
+            .block_on(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx))
+            .unwrap();
+        assert!(matches!(app.overlay, Overlay::None), "second esc leaves");
+    }
+
     #[test]
     fn lsp_id_query_splits_verb_and_partial() {
         assert_eq!(
@@ -2161,6 +2172,14 @@ mod tests {
             matches!(app.overlay, Overlay::None),
             "no id completion for /model"
         );
+    }
+
+    #[test]
+    fn the_menu_carries_no_redundant_entries() {
+        for (command, _) in COMMANDS {
+            assert_ne!(*command, "/settings", "/settings was removed");
+            assert_ne!(*command, "/model <name>", "the picker covers this");
+        }
     }
 
     #[test]

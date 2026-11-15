@@ -138,8 +138,8 @@ fn measure_ambiguous_width() -> Option<bool> {
 /// as a black flash.
 ///
 /// `force_clear` is only for the cases where the terminal's cells can no
-/// longer be trusted to match the frame buffer: resize, overlay change,
-/// session switch, or an explicit Ctrl+G.
+/// longer be trusted to match the frame buffer: resize, overlay change or a
+/// session switch.
 fn paint(terminal: &mut ratatui::DefaultTerminal, app: &mut App, force_clear: bool) -> Result<()> {
     let mut stdout = std::io::stdout();
     let _ = execute!(stdout, BeginSynchronizedUpdate);

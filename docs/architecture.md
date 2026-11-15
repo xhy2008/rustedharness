@@ -125,7 +125,7 @@ including for pi file names where the id follows the last `_`.
 Two kinds of noise are filtered rather than carried forward. On load, a message
 whose content is empty is dropped (pi stores every failed API call as an
 assistant message with `stopReason: "error"` and no content), as is a user line
-that is a frontend command (`/settings`, `/model x`, ...); roles we do not model
+that is a frontend command (`/model x`, `/view ...`); roles we do not model
 (`bashExecution`, `custom`, future ones) are converted like pi converts them or
 skipped, never treated as a torn line. On write, the same two shapes are never
 produced, and the model is kept as a single `custom` snapshot entry that is

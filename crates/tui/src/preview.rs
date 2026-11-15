@@ -445,6 +445,35 @@ fn preview_selection() {
     parent_dump(&mut app, "ui-preview-selection.json", 108, 26);
 }
 
+/// The file browser takes the whole screen instead of a 12-row popup.
+#[test]
+#[ignore = "writes target/ui-preview-files.json; run on demand"]
+fn preview_files_fullscreen() {
+    let mut app = demo_app();
+    app.open_file_browser("");
+    parent_dump(&mut app, "ui-preview-files.json", 100, 24);
+}
+
+/// With compaction on the main model there is no second column to show.
+#[test]
+fn the_compact_column_disappears_when_it_is_the_same_model() {
+    let mut app = demo_app();
+    app.agent_model = "claude-sonnet-4.5".into();
+    app.compact_model = "claude-haiku-4.5".into();
+    let json = dump(&mut app, 140, 20);
+    assert!(row_text(&json, 19).contains("compact claude-haiku-4.5"));
+
+    let mut app = demo_app();
+    app.agent_model = "claude-sonnet-4.5".into();
+    app.compact_model = "claude-sonnet-4.5".into();
+    let json = dump(&mut app, 140, 20);
+    assert!(
+        !row_text(&json, 19).contains("compact"),
+        "{}",
+        row_text(&json, 19)
+    );
+}
+
 /// The `/lsp` panel: installed version, live state, and the subcommands that
 /// replaced `/install` and `/checksum`.
 #[test]

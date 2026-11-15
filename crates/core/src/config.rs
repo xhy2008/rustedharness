@@ -24,6 +24,11 @@ pub struct Config {
     /// Model used for compaction summaries; falls back to `model`.
     #[serde(default)]
     pub compact_model: String,
+    /// Compact with `model` instead of `compactModel`. A second model rarely
+    /// pays off once prompt-cache hits are counted: the main model's cache is
+    /// already warm, while the summary model starts cold.
+    #[serde(default)]
+    pub compact_with_main_model: bool,
     /// Fallback context window for models that do not declare one.
     #[serde(default)]
     pub context_window: u64,
@@ -61,6 +66,7 @@ impl Default for Config {
         Self {
             model: "openai/gpt-4o".to_string(),
             compact_model: "openai/gpt-4o-mini".to_string(),
+            compact_with_main_model: false,
             context_window: 128_000,
             provider: "openai".to_string(),
             providers,
@@ -716,6 +722,11 @@ impl Config {
         if let Ok(spec) = self.resolve_model(&self.compact_model) {
             self.compact_model = spec.reference();
         }
+        if self.compact_with_main_model {
+            // One model, one cache: the summary runs on the model that already
+            // has the conversation cached.
+            self.compact_model = self.model.clone();
+        }
     }
 
     fn merge_models(&mut self, file: ModelsFile) {
@@ -1150,6 +1161,21 @@ mod tests {
         assert_eq!(resolve_config_value("$$literal"), "$literal");
         assert_eq!(resolve_config_value("$!literal"), "!literal");
         std::env::remove_var("RUSTEDHARNESS_TEST_KEY");
+    }
+
+    /// Compaction can run on the main model, and then there is exactly one
+    /// model to report.
+    #[test]
+    fn compacting_with_the_main_model_drops_the_second_one() {
+        let raw = r#"{"model":"amd/big","compactModel":"amd/small","compactWithMainModel":true}"#;
+        let mut cfg: Config = serde_json::from_str(raw).unwrap();
+        cfg.normalize();
+        assert!(cfg.compact_with_main_model);
+        assert_eq!(cfg.compact_model, cfg.model);
+
+        let mut cfg: Config = serde_json::from_str(&raw.replace(":true", ":false")).unwrap();
+        cfg.normalize();
+        assert_ne!(cfg.compact_model, cfg.model, "the default keeps them apart");
     }
 
     #[test]

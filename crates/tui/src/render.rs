@@ -757,7 +757,8 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
             spans.push(Span::styled(shorten_path(&app.cwd, cwd), style(MUTED)));
             spans.push(Span::styled("|", style(FAINT)));
             spans.push(Span::styled(app.agent_model.clone(), style(BLUE)));
-            if compact {
+            // Only worth a column when compaction runs on a different model.
+            if compact && app.compact_model != app.agent_model {
                 spans.push(Span::styled("|", style(FAINT)));
                 spans.push(Span::styled(
                     format!("compact {}", app.compact_model),
@@ -979,24 +980,12 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             draw_picker(frame, body, "sessions", &shown, *sel, filter);
         }
         Overlay::FileBrowser { rel, entries, sel } => {
-            let items: Vec<PickerItem> = entries
-                .iter()
-                .map(|(name, dir)| PickerItem {
-                    label: if *dir {
-                        format!("{name}/")
-                    } else {
-                        name.clone()
-                    },
-                    detail: String::new(),
-                    value: name.clone(),
-                })
-                .collect();
             let title = if rel.is_empty() {
                 "files".to_string()
             } else {
                 format!("files  {rel}")
             };
-            draw_picker(frame, body, &title, &items, *sel, "");
+            draw_file_browser(frame, body, &title, entries, *sel);
         }
         Overlay::FileView {
             path,
@@ -1048,39 +1037,6 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 area,
             );
         }
-        Overlay::Settings { sel } => {
-            let ctx_pct = if app.context_limit > 0 {
-                (app.context_tokens as f64 * 100.0 / app.context_limit as f64) as usize
-            } else {
-                0
-            };
-            let rows = [
-                PickerItem {
-                    label: "agent model".to_string(),
-                    detail: app.agent_model.clone(),
-                    value: String::new(),
-                },
-                PickerItem {
-                    label: "compact model".to_string(),
-                    detail: app.compact_model.clone(),
-                    value: String::new(),
-                },
-                PickerItem {
-                    label: "workspace".to_string(),
-                    detail: app.cwd.clone(),
-                    value: String::new(),
-                },
-                PickerItem {
-                    label: "session".to_string(),
-                    detail: format!(
-                        "{}  ctx {ctx_pct}%",
-                        app.session_id.chars().take(8).collect::<String>()
-                    ),
-                    value: String::new(),
-                },
-            ];
-            draw_picker(frame, body, "settings", &rows, *sel, "");
-        }
         Overlay::Hotkeys => {
             let lines = vec![
                 panel_title("keys"),
@@ -1092,11 +1048,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 kv("ctrl+d", "quit"),
                 kv("ctrl+o", "expand/collapse all tool output"),
                 kv("ctrl+t", "expand/collapse all thinking"),
-                kv("ctrl+l", "model picker"),
-                kv("ctrl+r", "session picker"),
                 kv("ctrl+f", "file browser"),
-                kv("ctrl+x", "copy last reply"),
-                kv("ctrl+g", "follow end / repaint"),
                 kv("ctrl+m", "toggle mouse capture (off = native select)"),
                 kv("click", "fold/unfold a tool or thinking block"),
                 kv("drag", "linear selection, copied on release"),
@@ -1200,6 +1152,76 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             draw_info_block(frame, body, lines);
         }
     }
+}
+
+/// Full-screen directory list: browsing the workspace deserves the whole
+/// screen, and the cursor is kept in view while it moves.
+fn draw_file_browser(
+    frame: &mut Frame,
+    body: Rect,
+    title: &str,
+    entries: &[(String, bool)],
+    sel: usize,
+) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style(DIM))
+        .title(Span::styled(format!(" {title} "), style(ACCENT)));
+    let inner = block.inner(body);
+    frame.render_widget(Clear, body);
+    frame.render_widget(block, body);
+    // The last row inside the box is the key hint, the rest is the list.
+    let rows = inner.height.saturating_sub(1) as usize;
+    if rows == 0 {
+        return;
+    }
+    let offset = sel
+        .saturating_add(1)
+        .saturating_sub(rows)
+        .min(entries.len().saturating_sub(rows));
+    let shown: Vec<Line<'static>> = entries
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows)
+        .map(|(index, (name, dir))| {
+            let selected = index == sel;
+            let marker = if selected { ">" } else { " " };
+            Line::from(vec![
+                Span::styled(
+                    marker.to_string(),
+                    style(if selected { ACCENT } else { FAINT }),
+                ),
+                Span::styled(
+                    format!(" {name}"),
+                    style(if selected {
+                        if *dir {
+                            ACCENT
+                        } else {
+                            TEXT
+                        }
+                    } else if *dir {
+                        BLUE
+                    } else {
+                        DIM
+                    }),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(shown), inner);
+    let hint = Rect {
+        y: inner.bottom() - 1,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter open   esc back",
+            style(FAINT),
+        ))),
+        hint,
+    );
 }
 
 fn panel_title(title: &str) -> Line<'static> {
