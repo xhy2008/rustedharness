@@ -195,7 +195,7 @@ async fn event_loop(
     op_tx: &UnboundedSender<OpResult>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
-    let mut last_overlay = app.overlay_key();
+
     // Resize anti-flicker: dragging the terminal window fires a storm of
     // Resize events, and repainting at every intermediate size stacks a
     // full-buffer clear+redraw on top of conhost's own reflow — visible
@@ -211,18 +211,15 @@ async fn event_loop(
     let mut dirty = true;
     loop {
         let settling = resize_at.is_some_and(|t| t.elapsed() < RESIZE_SETTLE);
-        // Force a full repaint when the overlay changes (opens, closes, or
-        // switches to a different size/type). Incremental diffs can leave stale
-        // border glyphs in the blank transcript area on terminals that don't
-        // erase untouched cells (notably the Windows console).
-        let overlay = app.overlay_key();
-        let overlay_changed = overlay != last_overlay;
-        last_overlay = overlay;
-        if overlay_changed || resize_dirty || app.needs_repaint {
+        // ratatui resets the draw buffer every frame, so a panel that shrinks
+        // or closes is erased by the ordinary diff - no screen clear needed.
+        // Only a resize has to erase: the terminal reflowed on its own and
+        // every row may hold something we never drew.
+        if resize_dirty || app.needs_repaint {
             dirty = true;
         }
         if dirty && !settling {
-            paint(terminal, app, overlay_changed || resize_dirty)?;
+            paint(terminal, app, resize_dirty)?;
             resize_dirty = false;
             dirty = false;
         }

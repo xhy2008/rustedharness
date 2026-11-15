@@ -171,6 +171,8 @@ pub struct App {
     /// Scroll offset of the last painted frame; scrolling brings new rows on
     /// screen, which can expose the same wide-glyph residue.
     pub painted_scroll: usize,
+    /// Overlay kind of the last painted frame.
+    pub painted_overlay: Option<u8>,
     pub quit: bool,
     pub pending: Option<PendingSession>,
 }
@@ -250,6 +252,7 @@ impl App {
             needs_repaint: false,
             wide_rows_dirty: false,
             painted_scroll: 0,
+            painted_overlay: None,
             quit: false,
             pending: None,
         };
@@ -1122,24 +1125,28 @@ impl App {
         !matches!(self.overlay, Overlay::None)
     }
 
-    /// Identity of the current overlay for repaint-coalescing: `None` when no
-    /// overlay is shown, else a small (kind, size) tag. When this changes we
-    /// force a full repaint, because an overlay box of a different height or
-    /// type can leave stale border glyphs outside its new (often shorter)
-    /// area on terminals that do not erase them during an incremental redraw.
-    pub fn overlay_key(&self) -> Option<(u8, usize)> {
+    /// Identity of the current overlay: `None` when nothing is shown, else the
+    /// overlay kind. Only the *kind* is part of the key - not the number of
+    /// rows - because the row count changes on every keystroke while a picker
+    /// filter narrows, and reacting to that would repaint the screen on every
+    /// character typed.
+    ///
+    /// Opening, closing or switching overlays is what needs attention: the
+    /// panel may be smaller than the previous one, and a terminal keeps the
+    /// right half of a double-width glyph nobody writes over.
+    pub fn overlay_key(&self) -> Option<u8> {
         match &self.overlay {
             Overlay::None => None,
-            Overlay::Slash { items, .. } => Some((1, items.len())),
-            Overlay::Model { items, .. } => Some((2, items.len())),
-            Overlay::Session { items, .. } => Some((3, items.len())),
-            Overlay::FileBrowser { entries, .. } => Some((4, entries.len())),
-            Overlay::FileView { lines, .. } => Some((5, lines.len())),
-            Overlay::Settings { .. } => Some((6, SETTINGS_ROWS.len())),
-            Overlay::Hotkeys => Some((7, 1)),
-            Overlay::Todos => Some((8, self.todo.len())),
-            Overlay::Processes => Some((9, self.processes.len())),
-            Overlay::Lsp => Some((10, self.lsp.len())),
+            Overlay::Slash { .. } => Some(1),
+            Overlay::Model { .. } => Some(2),
+            Overlay::Session { .. } => Some(3),
+            Overlay::FileBrowser { .. } => Some(4),
+            Overlay::FileView { .. } => Some(5),
+            Overlay::Settings { .. } => Some(6),
+            Overlay::Hotkeys => Some(7),
+            Overlay::Todos => Some(8),
+            Overlay::Processes => Some(9),
+            Overlay::Lsp => Some(10),
         }
     }
 

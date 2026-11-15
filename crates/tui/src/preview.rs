@@ -859,3 +859,66 @@ fn the_caret_is_a_real_terminal_cursor_inside_the_composer() {
         "the cell under the caret must be empty"
     );
 }
+
+/// Opening, closing or shrinking a panel must not need a screen clear: ratatui
+/// resets the draw buffer each frame, so every cell the panel used to cover is
+/// diffed back to blank. Clearing the screen instead makes the whole window
+/// flash on every keystroke.
+#[test]
+fn closing_a_panel_leaves_no_ghost_rows() {
+    let mut app = demo_app();
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("terminal");
+
+    app.overlay = Overlay::Hotkeys;
+    terminal
+        .draw(|frame| crate::render::draw(&mut app, frame))
+        .expect("draw");
+    let with_panel = count_rows_with(&terminal, '╭');
+    assert_eq!(with_panel, 2, "panel border plus the composer");
+
+    app.overlay = Overlay::None;
+    terminal
+        .draw(|frame| crate::render::draw(&mut app, frame))
+        .expect("draw");
+    assert_eq!(
+        count_rows_with(&terminal, '╭'),
+        1,
+        "the closed panel must not leave its border behind"
+    );
+
+    fn count_rows_with(terminal: &Terminal<TestBackend>, glyph: char) -> usize {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .filter(|y| (0..buffer.area.width).any(|x| buffer[(x, *y)].symbol().contains(glyph)))
+            .count()
+    }
+}
+
+/// The panel identity must ignore how many rows the filter currently matches,
+/// otherwise every character typed into a picker reads as "the overlay
+/// changed" and triggers a repaint pass over the whole frame.
+#[test]
+fn narrowing_a_picker_filter_keeps_the_overlay_identity() {
+    let mut app = demo_app();
+    let item = |label: &str| PickerItem {
+        label: label.into(),
+        detail: String::new(),
+        value: label.into(),
+    };
+    app.overlay = Overlay::Slash {
+        items: vec![item("/help"), item("/model"), item("/sessions")],
+        sel: 0,
+    };
+    let wide = app.overlay_key();
+    app.overlay = Overlay::Slash {
+        items: vec![item("/model")],
+        sel: 0,
+    };
+    assert_eq!(
+        wide,
+        app.overlay_key(),
+        "typing must not change the identity"
+    );
+    app.overlay = Overlay::None;
+    assert_ne!(wide, app.overlay_key(), "closing is a change");
+}

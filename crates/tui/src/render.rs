@@ -49,6 +49,16 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     )
     .split(area);
 
+    // A panel that opens, closes or changes type can be smaller than the last
+    // one, so the rows it no longer covers may still hold a wide glyph's
+    // trailing cell. The diff rewrites those cells; the only thing it cannot
+    // fix is that half-glyph, which needs the whole row rewritten once.
+    let overlay = app.overlay_key();
+    if app.painted_overlay != overlay {
+        app.painted_overlay = overlay;
+        app.wide_rows_dirty = true;
+    }
+
     let content = Rect {
         x: chunks[0].x + PAD_LEFT,
         y: chunks[0].y + 1,
