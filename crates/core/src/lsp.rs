@@ -823,11 +823,24 @@ pub enum LspOp {
     CallHierarchy,
     Rename,
     Diagnostics,
+    /// `install`: download the newest release of a registry server. Needs the
+    /// user's consent, which the harness asks for while the call is running.
+    Install,
+    /// `restart`: stop the server, start it again, wait for it to be ready.
+    Restart,
 }
 
 impl LspOp {
+    /// True for the ops that act on a server rather than on a file: they take
+    /// a `server` id and need no path or position.
+    pub fn is_maintenance(&self) -> bool {
+        matches!(self, LspOp::Install | LspOp::Restart)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
+            LspOp::Install => "install",
+            LspOp::Restart => "restart",
             LspOp::Definition => "definition",
             LspOp::TypeDefinition => "type_definition",
             LspOp::Implementation => "implementation",
@@ -845,6 +858,8 @@ impl LspOp {
 #[derive(Debug, Clone)]
 pub struct LspQuery {
     pub op: LspOp,
+    /// Registry server id for `install`/`restart`; `None` otherwise.
+    pub server: Option<String>,
     /// Absolute, workspace-checked path.
     pub path: PathBuf,
     /// 1-based line (0 when omitted).
@@ -1855,6 +1870,26 @@ impl LspHub {
 
     /// Route an `lsp` tool call: precise server first, name index as fallback.
     pub async fn answer(&self, query: LspQuery) -> Result<LspAnswer> {
+        if query.op.is_maintenance() {
+            if !self.config.enabled {
+                return Err(HarnessError::tool(
+                    "E_LSP_DISABLED",
+                    "language servers are disabled (lsp.enabled=false)",
+                ));
+            }
+            let server = query.server.clone().unwrap_or_default();
+            let text = match query.op {
+                LspOp::Install => self.install_op(&server).await?,
+                _ => self.restart_op(&server).await?,
+            };
+            return Ok(LspAnswer {
+                match_kind: "lsp-maintenance",
+                text,
+                warmup_hint: None,
+                raw: json!({ "op": query.op.as_str(), "server": server }),
+                applied: Vec::new(),
+            });
+        }
         let limit = query.limit.clamp(1, 200);
         let language = language_for_path(&query.path);
         let mut warmup_hint = None;
@@ -1922,6 +1957,140 @@ impl LspHub {
         Ok(answer)
     }
 
+    /// `install`: download the newest release, asking for consent first. The
+    /// call waits for the consent card, because a download the user has not
+    /// approved must not be retried blindly by the next tool call.
+    async fn install_op(&self, server: &str) -> Result<String> {
+        let spec = spec_for_id(server).ok_or_else(|| {
+            HarnessError::tool(
+                "E_UNKNOWN_LSP_SERVER",
+                format!(
+                    "unknown language server `{server}`; known ids: {}",
+                    registry()
+                        .iter()
+                        .map(|spec| spec.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?;
+        if let Some(path) = self.resolve_command(spec) {
+            return Ok(format!(
+                "{} is already available at {}",
+                spec.id,
+                path.display()
+            ));
+        }
+        let path = match self.download_server(spec).await {
+            Ok(path) => path,
+            Err(err) if err.code() == "E_LSP_CONSENT_REQUIRED" => {
+                if !self.await_consent(spec.id, CONSENT_WAIT).await {
+                    return Err(HarnessError::tool(
+                        "E_LSP_CONSENT_DECLINED",
+                        format!(
+                            "the user did not approve downloading {}; ask before trying again",
+                            spec.id
+                        ),
+                    ));
+                }
+                self.download_server(spec).await?
+            }
+            Err(err) => return Err(err),
+        };
+        let version = installed(spec)
+            .map(|(version, _)| version)
+            .unwrap_or_else(|| "-".to_string());
+        if self.ensure_client(spec.language).await.is_none() {
+            return Err(HarnessError::tool(
+                "E_LSP_SPAWN",
+                format!(
+                    "installed {} {version} at {} but it did not start: {}",
+                    spec.id,
+                    path.display(),
+                    self.state_detail(spec.language)
+                ),
+            ));
+        }
+        Ok(format!(
+            "installed {} {version} at {}; the server is running",
+            spec.id,
+            path.display()
+        ))
+    }
+
+    /// `restart`: replace the live client with a fresh one and wait for it.
+    async fn restart_op(&self, server: &str) -> Result<String> {
+        let spec = spec_for_id(server).ok_or_else(|| {
+            HarnessError::tool(
+                "E_UNKNOWN_LSP_SERVER",
+                format!("unknown language server `{server}`"),
+            )
+        })?;
+        if self.resolve_command(spec).is_none() {
+            return Err(HarnessError::tool(
+                "E_LSP_NOT_INSTALLED",
+                format!(
+                    "{} is not installed; use op=\"install\" with server=\"{}\"",
+                    spec.id, spec.id
+                ),
+            ));
+        }
+        let previous = self.clients.lock().await.remove(spec.language);
+        let was_running = previous.is_some();
+        if let Some(client) = previous {
+            client.shutdown().await;
+        }
+        match self.ensure_client(spec.language).await {
+            Some(client) => Ok(format!(
+                "restarted {} (pid {}, {}); it is {}",
+                spec.id,
+                client.pid,
+                if was_running {
+                    "replaced the running server"
+                } else {
+                    "it was not running"
+                },
+                if client.is_warming() {
+                    "warming up"
+                } else {
+                    "ready"
+                }
+            )),
+            None => Err(HarnessError::tool(
+                "E_LSP_SPAWN",
+                format!(
+                    "{} did not start: {}",
+                    spec.id,
+                    self.state_detail(spec.language)
+                ),
+            )),
+        }
+    }
+
+    /// Wait for the consent card the download emitted. `false` means the user
+    /// declined, or never answered.
+    async fn await_consent(&self, server_id: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if let Some(allowed) = self.consent.lock().unwrap().get(server_id).copied() {
+                return allowed;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    fn state_detail(&self, language: &str) -> String {
+        self.states
+            .lock()
+            .unwrap()
+            .get(language)
+            .and_then(|state| state.detail.clone())
+            .unwrap_or_else(|| "no detail".to_string())
+    }
+
     /// Why L0 answered: only a server that failed to start says anything, so a
     /// broken install is visible instead of silently degrading.
     fn degraded_hint(&self, language: &str) -> Option<String> {
@@ -1981,6 +2150,12 @@ impl LspHub {
         client.touch();
 
         let (text, raw) = match query.op {
+            LspOp::Install | LspOp::Restart => {
+                return Err(HarnessError::tool(
+                    "E_LSP_INTERNAL",
+                    "server management reached the query path",
+                ))
+            }
             LspOp::Diagnostics => {
                 let items = client
                     .file_diagnostics(&query.path, language, timeout.as_millis() as u64)
@@ -2289,6 +2464,9 @@ const STDERR_TAIL: usize = 8;
 /// A progress window that never closes must not pin us to the name-based index
 /// forever.
 const WARMUP_CEILING: Duration = Duration::from_secs(180);
+
+/// How long `op = "install"` waits for the consent card before giving up.
+const CONSENT_WAIT: Duration = Duration::from_secs(120);
 
 struct DocState {
     version: i64,
@@ -3464,6 +3642,91 @@ fn make_executable(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// `install` and `restart` manage a server instead of querying code, so the
+    /// tool routes them to their own path and they must say so.
+    #[test]
+    fn server_management_ops_are_marked_as_such() {
+        assert!(LspOp::Install.is_maintenance());
+        assert!(LspOp::Restart.is_maintenance());
+        assert_eq!(LspOp::Install.as_str(), "install");
+        assert_eq!(LspOp::Restart.as_str(), "restart");
+        for op in [LspOp::Definition, LspOp::Diagnostics, LspOp::Rename] {
+            assert!(!op.is_maintenance(), "{}", op.as_str());
+        }
+    }
+
+    #[tokio::test]
+    async fn install_refuses_an_unknown_server_with_the_known_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = LspHub::new(dir.path().to_path_buf(), &LspConfig::default(), None);
+        let err = hub
+            .answer(LspQuery {
+                op: LspOp::Install,
+                server: Some("nope".into()),
+                path: PathBuf::new(),
+                line: 1,
+                column: 1,
+                symbol: None,
+                apply: false,
+                timeout_ms: 0,
+                limit: 1,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "E_UNKNOWN_LSP_SERVER");
+        assert!(err.to_string().contains("rust-analyzer"), "{err}");
+    }
+
+    /// The download asks for consent and the call waits for it. Declining ends
+    /// the call with a code the model can act on, and nothing is downloaded.
+    #[tokio::test]
+    async fn install_waits_for_consent_and_reports_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hub = LspHub::new(dir.path().to_path_buf(), &LspConfig::default(), Some(tx));
+
+        let task = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                hub.answer(LspQuery {
+                    op: LspOp::Install,
+                    server: Some("lua-language-server".into()),
+                    path: PathBuf::new(),
+                    line: 1,
+                    column: 1,
+                    symbol: None,
+                    apply: false,
+                    timeout_ms: 0,
+                    limit: 1,
+                })
+                .await
+            })
+        };
+
+        // The call is blocked on the consent card it just emitted.
+        let consent = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Some(HarnessEvent::DownloadConsent { server_id, .. }) => break server_id,
+                    Some(_) => continue,
+                    None => panic!("event channel closed"),
+                }
+            }
+        })
+        .await
+        .expect("no consent card was emitted");
+        assert_eq!(consent, "lua-language-server");
+        assert!(!task.is_finished(), "install must wait for the answer");
+
+        hub.grant_download(&consent, false);
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("install did not return after the answer")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code(), "E_LSP_CONSENT_DECLINED");
+    }
 
     #[test]
     fn registry_covers_common_languages() {

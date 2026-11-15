@@ -575,6 +575,13 @@ impl CodeIndex {
                     json!({ "match": "name-based", "diagnostics": [] }),
                 ));
             }
+            // Rejected above; listing them keeps the match exhaustive.
+            LspOp::Install | LspOp::Restart => {
+                return Err(crate::error::HarnessError::tool(
+                    "E_LSP_INTERNAL",
+                    "server management has no name-based equivalent",
+                ))
+            }
         };
 
         if hits.is_empty() {

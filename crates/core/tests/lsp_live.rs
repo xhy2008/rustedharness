@@ -48,6 +48,7 @@ async fn rust_analyzer_answers_a_definition() {
     // `helper()` on line 6, column 5 (1-based).
     let query = || LspQuery {
         op: LspOp::Definition,
+        server: None,
         path: lib.clone(),
         line: 6,
         column: 5,
@@ -138,6 +139,7 @@ async fn prewarm_takes_the_cold_start_off_the_critical_path() {
     let answer = hub
         .answer(LspQuery {
             op: LspOp::Definition,
+            server: None,
             path: lib,
             line: 6,
             column: 5,
@@ -155,5 +157,60 @@ async fn prewarm_takes_the_cold_start_off_the_critical_path() {
         elapsed < Duration::from_secs(2),
         "cold start is still on the critical path: {elapsed:?}"
     );
+    hub.shutdown_all().await;
+}
+
+/// `op = "restart"` replaces the live server and it answers again afterwards.
+#[tokio::test]
+#[ignore = "needs rust-analyzer on PATH; takes ~30s on purpose"]
+async fn restart_replaces_the_server_and_it_answers_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("probe");
+    let lib = project(&cwd);
+    let config = rustedharness_core::config::Config::default();
+    let hub = LspHub::new(cwd.clone(), &config.lsp, None);
+
+    let query = || LspQuery {
+        op: LspOp::Definition,
+        server: None,
+        path: lib.clone(),
+        line: 6,
+        column: 5,
+        symbol: None,
+        apply: false,
+        timeout_ms: 15_000,
+        limit: 20,
+    };
+    let wait_ready = || async {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(120) {
+            let answer = hub.answer(query()).await.unwrap();
+            if answer.match_kind == "lsp-precise" {
+                return started.elapsed();
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        panic!("server never became ready");
+    };
+    println!("first start: {:?}", wait_ready().await);
+
+    let restarted = hub
+        .answer(LspQuery {
+            op: LspOp::Restart,
+            server: Some("rust-analyzer".into()),
+            path: std::path::PathBuf::new(),
+            line: 1,
+            column: 1,
+            symbol: None,
+            apply: false,
+            timeout_ms: 0,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    println!("restart: {} ({})", restarted.text, restarted.match_kind);
+    assert_eq!(restarted.match_kind, "lsp-maintenance");
+    assert!(restarted.text.starts_with("restarted rust-analyzer"));
+    assert!(wait_ready().await < Duration::from_secs(120));
     hub.shutdown_all().await;
 }

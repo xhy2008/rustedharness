@@ -1,5 +1,32 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：lsp 工具支持 install（需用户同意）与 restart（2026-11-15 第二十三轮）
+
+要求：在 agent 的 lsp 工具里增加安装（需要用户同意）和重启 LSP 的功能。
+
+- `LspOp` 新增 `Install` / `Restart`，`is_maintenance()` 标记它们"作用于服务器而不是文件"。
+  `LspQuery` 新增 `server: Option<String>`；`answer()` 在这两个 op 上先分派，完全不走文件/位置校验。
+- **install**：注册表查 id（未知则报错并列出全部合法 id）→ 已在 PATH/缓存则直接返回路径 →
+  `download_server()` 首次会发 `DownloadConsent` 并返回 `E_LSP_CONSENT_REQUIRED` →
+  `await_consent()` 每 150ms 轮询 `consent`，**最多等 120s**（`CONSENT_WAIT`）→ 同意后重新下载 →
+  `ensure_client` 立刻拉起 → 返回 `installed <id> <version> at <path>; the server is running`。
+  拒绝或超时返回 `E_LSP_CONSENT_DECLINED`；装好但起不来返回 `E_LSP_SPAWN` 并带上 degraded 原因。
+- **restart**：先检查是否已安装（否则 `E_LSP_NOT_INSTALLED`，提示改用 install）→ 从 `clients`
+  里摘掉旧的并 `shutdown()` → `ensure_client` 重新 spawn → 返回
+  `restarted rust-analyzer (pid 8508, replaced the running server); it is warming up`。
+- 关闭 `lsp.enabled` 时两者都返回 `E_LSP_DISABLED`；`intel::query` 与 `execute_l1` 各有一条
+  防御分支，保证维护 op 不会走进查询/索引路径。
+- 工具侧：`path` 变为可选、新增 `server`，按 op 校验（维护 op 要 server，查询 op 要 path），
+  description 与 schema 都写清楚了两个新 op 和同意流程。
+
+测试：`server_management_ops_are_marked_as_such`、`install_refuses_an_unknown_server_with_the_known_ids`、
+`install_waits_for_consent_and_reports_a_refusal`（用事件通道断言"确实卡在同意上"：
+`!task.is_finished()`，然后拒绝 → `E_LSP_CONSENT_DECLINED`）、
+`the_schema_lists_server_management`（schema 里必须有 install/restart/server）。
+live 探针新增 `restart_replaces_the_server_and_it_answers_again`：实测
+`restarted rust-analyzer (pid 8508, replaced the running server); it is warming up`，
+重启后重新给出 precise 答案。
+
 ## 已完成：状态栏显示 LSP 与预热状态（2026-11-15 第二十二轮）
 
 要求：底部状态栏显示运行中的 lsp 名称和预热状态。

@@ -323,6 +323,17 @@ The `lsp` tool supports `definition`, `type_definition`, `implementation`,
 `call_hierarchy`, `rename`, and `diagnostics`. Servers are spawned lazily,
 restarted a bounded number of times, and shut down when idle.
 
+Two extra ops let the agent manage the server itself, taking `server` (the id)
+instead of `path`:
+
+| Op | Effect |
+| --- | --- |
+| `install` | download the newest release; the consent card is shown and the call waits for the answer (120s), then fails with `E_LSP_CONSENT_DECLINED` if refused |
+| `restart` | stop the server, start it again and wait until it is ready |
+
+Both are refused when `lsp.enabled` is false, and `install` reports an unknown
+id together with the ids the registry does have.
+
 When a server is missing and `lsp.autoDownload` is enabled (the default), the
 harness installs the newest release. The version is resolved from the
 `github.com/<owner>/<repo>/releases/latest` redirect - a plain HTTPS request

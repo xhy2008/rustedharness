@@ -13,8 +13,15 @@ use crate::tools::{parse_args, schema_of, Tool, ToolContext, ToolOutput};
 pub struct LspArgs {
     /// Operation to perform.
     pub op: LspOp,
-    /// Path relative to the workspace root (or absolute inside it).
-    pub path: String,
+    /// Server id for `install`/`restart`, e.g. rust-analyzer. `lsp` with
+    /// `op="install"` needs the user to approve the download; the call waits
+    /// for that answer.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Path relative to the workspace root (or absolute inside it). Required
+    /// for every op except `install` and `restart`.
+    #[serde(default)]
+    pub path: Option<String>,
     /// 1-based line. Required for position-based operations.
     #[serde(default)]
     pub line: Option<u32>,
@@ -58,7 +65,12 @@ impl Tool for LspTool {
          workspace_symbols, call_hierarchy, rename, diagnostics. Results are \
          annotated with match=\"lsp-precise\" or match=\"name-based\". Rename \
          is a dry-run preview unless apply=true. After edits, diagnostics are \
-         injected automatically by the edit/write tools."
+         injected automatically by the edit/write tools. Two more ops manage \
+         servers and take `server` instead of `path`: install downloads the \
+         newest release of a registry server (the user is asked to approve it \
+         and the call waits for the answer; it fails with \
+         E_LSP_CONSENT_DECLINED if refused), restart replaces a running server \
+         and waits for it to be ready."
             .to_string()
     }
 
@@ -68,7 +80,46 @@ impl Tool for LspTool {
 
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let args: LspArgs = parse_args(args)?;
-        let path = ctx.resolver.resolve_existing(&args.path)?;
+        if args.op.is_maintenance() {
+            let server = args.server.as_deref().unwrap_or("").trim();
+            if server.is_empty() {
+                return Err(HarnessError::tool(
+                    "E_INVALID_ARGUMENT",
+                    format!(
+                        "`{}` requires `server` (the language server id, e.g. rust-analyzer)",
+                        args.op.as_str()
+                    ),
+                ));
+            }
+            let answer = ctx
+                .lsp
+                .answer(LspQuery {
+                    op: args.op,
+                    server: Some(server.to_string()),
+                    path: std::path::PathBuf::new(),
+                    line: 1,
+                    column: 1,
+                    symbol: None,
+                    apply: false,
+                    timeout_ms: 0,
+                    limit: 1,
+                })
+                .await?;
+            let metadata = json!({
+                "op": args.op.as_str(),
+                "match": answer.match_kind,
+                "server": server,
+                "raw": answer.raw,
+            });
+            return Ok(ToolOutput::ok(answer.text).with_metadata(metadata));
+        }
+        let Some(requested) = args.path.as_deref() else {
+            return Err(HarnessError::tool(
+                "E_INVALID_ARGUMENT",
+                format!("`{}` requires `path`", args.op.as_str()),
+            ));
+        };
+        let path = ctx.resolver.resolve_existing(requested)?;
         if path.is_dir() {
             return Err(HarnessError::tool(
                 "E_INVALID_ARGUMENT",
@@ -100,6 +151,7 @@ impl Tool for LspTool {
 
         let query = LspQuery {
             op: args.op,
+            server: None,
             path: path.clone(),
             line: args.line.unwrap_or(1),
             column: args.column.unwrap_or(1),
@@ -129,5 +181,20 @@ impl Tool for LspTool {
             "raw": answer.raw,
         });
         Ok(ToolOutput::ok(text).with_metadata(metadata))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The model only learns the ops from the schema, so the two management
+    /// ops and their `server` argument have to be in it.
+    #[test]
+    fn the_schema_lists_server_management() {
+        let schema = LspTool::new(std::env::temp_dir()).schema().to_string();
+        for needle in ["install", "restart", "server"] {
+            assert!(schema.contains(needle), "missing {needle} in {schema}");
+        }
     }
 }
