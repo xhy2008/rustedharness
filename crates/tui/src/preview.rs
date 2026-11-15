@@ -567,3 +567,43 @@ fn transcript_uses_only_single_width_glyphs() {
         }
     }
 }
+
+/// Content (not just our own UI strings) can carry East-Asian-ambiguous
+/// characters: the model writes `->` as `→`, tool output has em dashes and
+/// ellipses. In a CJK console those are two cells wide while every layout
+/// library counts one, so the tail of the line lands one cell outside the
+/// frame buffer and stays on screen. They are folded to ASCII on the way in.
+#[test]
+fn ambiguous_width_content_is_folded_before_layout() {
+    let mut app = demo_app();
+    app.entries.clear();
+    let mut tool = Entry::new(EntryKind::Tool, "edit", "").with_arg(
+        "rename `norm` → `length_squared` preview (name-based only; install a language \
+         server to apply a precise workspace edit):",
+    );
+    tool.ok = Some(true);
+    tool.body = "preview — 3 hunks… “quoted” ×2".into();
+    app.entries.push(tool);
+
+    let width = 100u16;
+    dump(&mut app, width, 20);
+    let limit = (width - 3) as usize;
+    let mut seen_arrow = false;
+    for line in app.lines_cache.borrow().iter() {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for bad in ['→', '←', '—', '–', '…', '“', '”', '×', '¥'] {
+            assert!(
+                !text.contains(bad),
+                "ambiguous {bad:?} survived in {text:?}"
+            );
+        }
+        if text.contains("->") {
+            seen_arrow = true;
+        }
+        assert!(line.width() <= limit, "row too wide: {text:?}");
+    }
+    assert!(
+        seen_arrow,
+        "the arrow should be folded to ASCII, not dropped"
+    );
+}

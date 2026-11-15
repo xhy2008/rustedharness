@@ -63,6 +63,36 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
         draw_consent(app, frame, chunks[0]);
     }
     draw_overlay(app, frame, chunks[0]);
+    repaint_wide_rows(frame);
+}
+
+/// Rewrite whole rows that contain a double-width glyph.
+///
+/// ratatui only re-emits the trailing column of a wide glyph when the cell it
+/// replaced had a background colour or a visible modifier (see `BufferDiff`),
+/// because "terminals handle wide characters well". conhost does not: a CJK
+/// line replaced by shorter text can leave the right half of its last glyph on
+/// screen forever. Rows without wide glyphs keep the cheap incremental diff.
+fn repaint_wide_rows(frame: &mut Frame) {
+    use ratatui::buffer::CellDiffOption;
+    use ratatui::layout::Position;
+
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        let wide = (area.x..area.right()).any(|x| {
+            buffer
+                .cell(Position::new(x, y))
+                .is_some_and(|cell| cell.symbol().chars().any(|c| char_width(c) > 1))
+        });
+        if wide {
+            for x in area.x..area.right() {
+                if let Some(cell) = buffer.cell_mut(Position::new(x, y)) {
+                    cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                }
+            }
+        }
+    }
 }
 
 fn style(color: Color) -> Style {
@@ -119,6 +149,46 @@ fn fill(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
     line
 }
 
+/// East-Asian-"ambiguous" characters are one column to `unicode-width` and two
+/// columns to a console with a CJK font. Either way the terminal renders it
+/// differently from what the layout assumed, every following character on the
+/// row shifts, and the tail of the line lands outside the cells the frame
+/// buffer owns - where it stays forever. Tool output and model prose are full
+/// of them (`→`, em dashes, ellipses, curly quotes), so they are folded to
+/// ASCII before the layout ever sees them.
+fn is_ambiguous(c: char) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    c.width_cjk() != c.width()
+}
+
+fn narrow(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{2190}' => "<-",
+        '\u{2192}' => "->",
+        '\u{2194}' => "<->",
+        '\u{2191}' => "^",
+        '\u{2193}' => "v",
+        '\u{2013}' | '\u{2014}' | '\u{2015}' => "-",
+        '\u{2018}' | '\u{2019}' => "'",
+        '\u{201c}' | '\u{201d}' => "\"",
+        '\u{2026}' => "...",
+        '\u{2022}' => "*",
+        '\u{00b7}' => "-",
+        '\u{00d7}' => "x",
+        '\u{00f7}' => "/",
+        '\u{00b1}' => "+/-",
+        '\u{00a5}' => "CNY ",
+        '\u{20ac}' => "EUR ",
+        '\u{00a9}' => "(c)",
+        '\u{00ae}' => "(r)",
+        '\u{2122}' => "(TM)",
+        '\u{00b0}' => "deg",
+        '\u{00a7}' => "S",
+        '\u{00b6}' => "P",
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // text flow
 // ---------------------------------------------------------------------------
@@ -133,7 +203,10 @@ fn fill(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
 /// blank, which is exactly how orphaned characters survive every repaint.
 /// Expand tabs, keep newlines, drop every other control character.
 fn sanitize(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|c| c.is_control() && c != '\n') {
+    if !text
+        .chars()
+        .any(|c| (c.is_control() && c != '\n') || is_ambiguous(c))
+    {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 16);
@@ -152,6 +225,11 @@ fn sanitize(text: &str) -> Cow<'_, str> {
             | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}'
             | '\u{00ad}' => {}
+            c if is_ambiguous(c) => {
+                if let Some(narrow) = narrow(c) {
+                    out.push_str(narrow);
+                }
+            }
             c => out.push(c),
         }
     }
@@ -525,15 +603,18 @@ fn tool_lines(
         Some(false) => ("!", RED),
         None => ("~", YELLOW),
     };
-    let mut spans = vec![
+    let mut header = vec![
         Span::styled(format!("{glyph} "), style(color)),
         Span::styled(format!("[{title}]"), style(MUTED)),
     ];
     if !arg.is_empty() {
-        spans.push(Span::styled(" ", style(FAINT)));
-        spans.push(Span::styled(arg.to_string(), style(DIM)));
+        header.push(Span::styled(" ", style(FAINT)));
+        header.push(Span::styled(arg.to_string(), style(DIM)));
     }
-    let mut lines = vec![Line::from(spans)];
+    // A tool argument can be a whole shell command or a long path; wrap it on
+    // the same four-space indent as the output instead of letting it run off
+    // the right edge.
+    let mut lines = flow(header, ("", style(TEXT)), ("    ", style(FAINT)), width);
 
     let body = body.trim_end();
     if body.is_empty() {
