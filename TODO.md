@@ -1,5 +1,38 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：LSP 起不来时说明原因 + 端到端探针（2026-11-15 第二十轮）
+
+问题起因：问"lsp 能否被正确调用"。实测本机 `rust-analyzer` 是 rustup 的**代理 shim**，
+`~/.cargo/bin/rust-analyzer.exe` 存在但真跑起来立刻退出：
+
+```
+error: Unknown binary 'rust-analyzer.exe' in official toolchain 'stable-x86_64-pc-windows-msvc'.
+```
+
+`resolve_command` 只判断文件存在，于是 `lsp list` 显示 `available`；真正 spawn 时才失败，
+状态变成 `degraded`，工具静默回退到 L0 —— **用户看不到任何原因**，只写进了 `tracing::debug`。
+
+- `LspClient` 现在保留子进程 stderr 的最后 8 行（`STDERR_TAIL`），`initialize` 失败时错误里
+  带上 `(server said: ...)`；因为 stderr 读取是独立任务，失败路径先等 120ms 再读。
+- `degraded` 状态会把原因带进 L0 回答的 `warmup_hint`：`rust-analyzer is unavailable
+  (E_LSP_INIT: ... (server said: error: Unknown binary ...)); name-based results`。
+  原来只有 `warming` 才有提示，`degraded` 静默。
+- 新增端到端探针 `crates/core/tests/lsp_live.rs`（`#[ignore]`）：临时建一个 cargo 工程，
+  用 `LspHub::answer(definition)` 真跑一遍 spawn → initialize → didOpen → definition，
+  要求拿到 `lsp-precise` 且定位到 `src/lib.rs:1`。服务器还在加载时会返回 `no matches`，
+  探针会重试到 120s。
+
+修复环境（`rustup component add rust-analyzer`）后实测：
+
+```
+[  84ms] name-based  (still warming up)
+[ 2325ms] lsp-precise (no matches, 仍在加载)
+[ 7208ms] lsp-precise answer: src/lib.rs:1:8
+```
+
+结论：链路本身正确（spawn/initialize/sync/request/定位/格式化都通），此前的"不能用"是
+rustup 组件没装 + 错误不可见两个问题叠加。
+
 ## 已完成：lsp 服务器 id 的自动补全（2026-11-15 第十九轮）
 
 要求：给 lsp 的 id 加自动补全。

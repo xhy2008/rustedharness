@@ -668,6 +668,16 @@ async fn latest_tag(repo: &str) -> Result<String> {
 
 /// Render an error and its causes, since `reqwest` puts the interesting part
 /// of a transport failure in `source()`.
+/// ` (server said: ...)` when the child printed anything, else empty.
+fn detail_from_stderr(tail: &str) -> String {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" (server said: {tail})")
+    }
+}
+
 fn error_chain(err: &dyn std::error::Error) -> String {
     let mut out = err.to_string();
     let mut source = err.source();
@@ -1499,7 +1509,19 @@ impl LspHub {
             .request_with_timeout("initialize", params, init_timeout)
             .await
             .map_err(|e| {
-                HarnessError::tool("E_LSP_INIT", format!("{} initialize failed: {e}", spec.id))
+                // A shim that cannot start (rustup without the component) exits
+                // before answering; give the stderr reader a moment, then say
+                // what it printed.
+                std::thread::sleep(Duration::from_millis(120));
+                HarnessError::tool(
+                    "E_LSP_INIT",
+                    format!(
+                        "{} initialize failed: {}{}",
+                        spec.id,
+                        e,
+                        detail_from_stderr(&client.stderr_tail())
+                    ),
+                )
             })?;
         client.set_capabilities(result.get("capabilities").cloned().unwrap_or(Value::Null));
         client
@@ -1773,12 +1795,31 @@ impl LspHub {
                                 Some(format!("LSP request failed ({}); name-based fallback", err));
                         }
                     }
+                } else {
+                    warmup_hint = self.degraded_hint(language);
                 }
             }
         }
         let mut answer = self.execute_l0(&query, limit).await?;
         answer.warmup_hint = warmup_hint;
         Ok(answer)
+    }
+
+    /// Why L0 answered: only a server that failed to start says anything, so a
+    /// broken install is visible instead of silently degrading.
+    fn degraded_hint(&self, language: &str) -> Option<String> {
+        let states = self.states.lock().unwrap();
+        let state = states.get(language)?;
+        if state.state != "degraded" {
+            return None;
+        }
+        Some(format!(
+            "{} is unavailable ({}); name-based results",
+            spec_for_language(language)
+                .map(|spec| spec.id)
+                .unwrap_or(language),
+            state.detail.as_deref().unwrap_or("unknown error")
+        ))
     }
 
     async fn execute_l0(&self, query: &LspQuery, limit: usize) -> Result<LspAnswer> {
@@ -2117,7 +2158,13 @@ pub struct LspClient {
     spawned_at: Instant,
     ready_at: Instant,
     last_used: Mutex<Instant>,
+    /// Newest lines the server wrote to stderr. A rustup shim that refuses to
+    /// run says why here, and that is the only explanation the user gets.
+    stderr_tail: Arc<Mutex<Vec<String>>>,
 }
+
+/// How many stderr lines to keep for error messages.
+const STDERR_TAIL: usize = 8;
 
 struct DocState {
     version: i64,
@@ -2155,11 +2202,18 @@ impl LspClient {
             .stdout
             .take()
             .ok_or_else(|| HarnessError::tool("E_LSP_SPAWN", "server stdout unavailable"))?;
+        let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         if let Some(stderr) = child.stderr.take() {
+            let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!("[lsp] {line}");
+                    let mut tail = tail.lock().unwrap();
+                    if tail.len() == STDERR_TAIL {
+                        tail.remove(0);
+                    }
+                    tail.push(line);
                 }
             });
         }
@@ -2186,6 +2240,7 @@ impl LspClient {
             spawned_at: now,
             ready_at: now + Duration::from_secs(2),
             last_used: Mutex::new(now),
+            stderr_tail,
         });
 
         // Reader loop.
@@ -2209,6 +2264,11 @@ impl LspClient {
         });
 
         Ok(client)
+    }
+
+    /// What the server last complained about, for error messages.
+    pub fn stderr_tail(&self) -> String {
+        self.stderr_tail.lock().unwrap().join(" ")
     }
 
     pub fn is_warming(&self) -> bool {
