@@ -189,10 +189,21 @@ cargo test -p rustedharness-tui -- --ignored preview_picker|preview_panel|previe
 ```bash
 taskkill /F /IM rustedharness.exe   # 旧进程会锁二进制导致“拒绝访问 os error 5”
 cargo build -p rustedharness-cli    # gui 依赖由 web 编译错误间接覆盖
-cargo test --workspace              # 当前基线：10 套件全绿，core 142 项
+cargo test --workspace              # 当前基线：10 套件全绿，core 147 项
 git -C E:/rustedharness add -A && \
 git -C E:/rustedharness -c user.name="xhy37000616" -c user.email="xhy37000616@163.com" commit -m "..."
 ```
+
+### 关于 `error deleting lock file for incremental compilation session ...`
+
+这条**不是编译失败**，最后一行仍然是 `Finished dev profile`。它是 rustc 收尾时删不掉上一次增量编译 session 的 `.lock`（进程被强杀、或两个 cargo 同时跑撞在一起）而产生的告警。更坑的是 cargo 会把它记在 `target/debug/.fingerprint` 里，之后每次 `cargo build` 都当成“cached warning”原样重放——**哪怕那个目录早在几轮前就被删掉了**。
+
+处理：
+```bash
+cargo clean -p rustedharness-tui && cargo clean -p rustedharness-cli   # 清指纹，停止重放
+rm -rf target/debug/incremental                                       # 顺手回收（曾涨到 11G / 147 个 session）
+```
+另外不要并发跑两个 cargo（`build` 和 `clippy` 同时跑也会抢同一个 session 锁）。
 禁止修改 git 全局/本地配置，只用 -c 参数。提交历史最近几条：
 `5044382` 会话惰性创建 → `89f2ac5` fmt/clippy → `6671783` 删空会话补偿 → `e475b3a` 删配置兼容层 → `f4e56ed` 规范扫描 → 本次 LSP/429。
 
