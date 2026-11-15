@@ -58,6 +58,14 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
     let (op_tx, mut op_rx) = mpsc::unbounded_channel();
     spawn_key_reader(key_tx, stop.clone());
 
+    // ratatui only sizes its buffers; it never erases the screen. The first
+    // frame diffs against an empty buffer and therefore writes only the cells
+    // we actually paint - anything already on screen (typically the leftover
+    // alternate-screen content of a previous run) survives in every blank cell
+    // and no later frame will ever touch it. That is the fixed-column row of
+    // orphaned characters users kept seeing. Erase once, on the way in.
+    terminal.clear()?;
+
     let mut app = App::new(agent, config);
     let result = event_loop(
         &mut terminal,
