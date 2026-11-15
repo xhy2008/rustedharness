@@ -1,5 +1,34 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：输入法（IME）锚点 —— 光标必须是真实终端光标（2026-11-15 第十一轮）
+
+现象：中文输入时拼音串和候选框出现在输入框**上方**的转录区里。
+
+两个原因叠在一起：
+
+1. 编辑器光标是手绘的 `│` 字形，终端光标被 ratatui 隐藏、且停在上一帧最后一个写入
+   单元格。conhost 把 IME 组合串画在**控制台光标位置**、候选窗口也锚在它上面 →
+   拼音就落在光标残留的地方。
+2. 事件循环每 120ms 无条件重绘，ratatui 每次 `draw` 结束都会重设一次光标位置。就算
+   把光标放到 caret，这也会在组合过程中把 IME 自己移动的光标拽回去、把组合串擦掉。
+
+修法：
+
+- `draw_editor` 返回 caret 单元格，`draw` 里 `frame.set_cursor_position(...)`；覆盖层或
+  下载同意卡打开时**不**设置（光标随之隐藏）。手绘 `│` 删除；空输入时占位符前留一格，
+  否则块状光标会吃掉首字母。
+- 事件循环加 `dirty` 标志：键鼠、op 结果、Harness 事件、忙碌 spinner、toast 到期、
+  覆盖层变化、resize、`needs_repaint` 才重绘，**空闲帧一个字节都不写**。
+- 宽字符行补写从「每帧」改成「转录重建或滚动位置变化时」（`wide_rows_dirty` /
+  `painted_scroll`），否则每帧重写会把 IME 组合串擦掉。
+
+测试：`the_caret_is_a_real_terminal_cursor_inside_the_composer`（断言光标可见、落在
+编辑器行、紧贴最后一个字符、脚下的格子为空）。预览 dump 增加 `cursor` 字段，渲染脚本
+会把它画出来，方便离线核对位置。
+
+已知限制：忙碌（流式输出）时每 tick 都要重绘，组合串仍可能被打断——终端不会告诉我们
+"正在组合中"，没有干净的办法。
+
 ## 已完成：工具结果并入调用行 + 收紧工具块间距（2026-11-15 第十轮）
 
 问题：`ToolResult` 事件只要和"当前正在跑的那一个工具"对不上，就会新建一条
@@ -304,6 +333,7 @@ rm -rf target/debug/incremental                                       # 顺手�
 - 运行期必须保持 `DisableLineWrap`（`lib.rs` 里 `execute!` 打开、退出/panic 时恢复）：一旦允许自动换行，任何一行超出 1 列都会把整屏顶歪，之后全是悬空字符。
 - 渲染宽度：`draw()` 全局右留 1 列；UI 内已禁用东亚歧义宽度字符（· … ¥ 除外），新增 UI 字符串只用 ASCII 标点做分隔符/省略号。`¥` 允许保留（cost 字段）。
 - UI 字形规则：**ASCII + 框线（U+2500–257F）**，我们自己的字符串里别的一律不要（这样无论终端怎么量都安全）。正文里的歧义宽度字符由 `render::sanitize` 按实测模式决定是否折叠成 ASCII，见 `render::AMBIGUOUS_IS_WIDE`。几何符号（`● ○`）、箭头、通用标点（`· › …`）、Latin-1 歧义符号（`× ±`）在中文控制台会按 **2 列**渲染，而 unicode-width 算 1 列，行尾字符会被推到帧缓冲之外变成永久幽灵字符。`test/transcript_uses_only_single_width_glyphs` 在守这条线。
+- 输入框的光标**必须**是真实终端光标（`frame.set_cursor_position`）：Windows 控制台把 IME 组合串和候选窗都锚在控制台光标上，手绘 `│` 会让中文输入法错位。空闲时不要重绘，否则会把组合串擦掉。
 - 工具输出**永远**挂在调用行下面（`└ 首行 +N`，Ctrl+O/点击展开），不要为结果再建条目；绑定键是 tool call id，不是"最近一个工具"。
 - 状态栏格式：`cwd|model|compact X|ctx 1.2%/1M|in A|out B|CacheHit98%|¥cost`，分隔符无空格。宽度不足时按 路径→CacheHit→cost→compact 顺序隐藏字段（见 `render::footer_line` 的 layouts 表），不要退回强制截断。
 - resize 防抖：lib.rs event_loop，Resize 风暴期间跳过 draw，静默 150ms 后 clear+强制重绘（RESIZE_SETTLE 常量）。

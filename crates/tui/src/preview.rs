@@ -183,7 +183,15 @@ fn dump(app: &mut App, width: u16, height: u16) -> String {
         }
         rows.push(serde_json::Value::Array(cells));
     }
-    serde_json::json!({ "width": width, "height": height, "rows": rows }).to_string()
+    let backend = terminal.backend();
+    let cursor = backend.cursor_position();
+    serde_json::json!({
+        "width": width,
+        "height": height,
+        "rows": rows,
+        "cursor": { "x": cursor.x, "y": cursor.y, "visible": backend.cursor_visible() },
+    })
+    .to_string()
 }
 
 #[test]
@@ -818,5 +826,36 @@ fn tool_rows_sit_tight_under_the_text_that_asked_for_them() {
         !rows[tool_rows[1] - 1].trim().is_empty() || rows[tool_rows[1] - 1].contains('└'),
         "calls stay in one block: {:?}",
         &rows[tool_rows[0]..=tool_rows[1]]
+    );
+}
+
+/// The caret must be the terminal's own cursor, sitting inside the composer.
+/// A console draws the IME composition string and anchors the candidate window
+/// at that cursor; a caret painted as a glyph (what we had) leaves the pinyin
+/// floating wherever the last frame happened to leave the cursor.
+#[test]
+fn the_caret_is_a_real_terminal_cursor_inside_the_composer() {
+    let mut app = demo_app();
+    app.input = "你好 wor".chars().collect();
+    app.cursor = app.input.len();
+
+    let dump: serde_json::Value = serde_json::from_str(&dump(&mut app, 80, 12)).expect("json");
+    let cursor = &dump["cursor"];
+    assert_eq!(cursor["visible"], true, "the cursor has to be visible");
+
+    let (x, y) = (
+        cursor["x"].as_u64().expect("x") as usize,
+        cursor["y"].as_u64().expect("y") as usize,
+    );
+    let cells = dump["rows"][y].as_array().expect("row");
+    let symbol = |index: usize| cells[index][0].as_str().unwrap_or_default().to_string();
+    assert_eq!(symbol(1), ">", "caret row is not the composer");
+    // "你好 wor" is two wide glyphs (each followed by a continuation cell), a
+    // space and three latin letters, so the insertion point follows the `r`.
+    assert_eq!(symbol(x - 1), "r", "caret is not at the insertion point");
+    assert_eq!(
+        symbol(x).trim(),
+        "",
+        "the cell under the caret must be empty"
     );
 }

@@ -14,7 +14,7 @@
 
 use std::borrow::Cow;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
@@ -57,13 +57,26 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     };
     draw_transcript(app, frame, content);
     app.mouse_area = content;
-    draw_editor(app, frame, chunks[1]);
+    let caret = draw_editor(app, frame, chunks[1]);
     draw_footer(app, frame, chunks[2]);
     if app.consent.is_some() {
         draw_consent(app, frame, chunks[0]);
     }
     draw_overlay(app, frame, chunks[0]);
-    repaint_wide_rows(frame);
+
+    // A modal owns the screen, so the composer must not keep the cursor.
+    if app.overlay_key().is_none() && app.consent.is_none() {
+        if let Some(caret) = caret {
+            frame.set_cursor_position(caret);
+        }
+    }
+
+    // Forcing every wide row every frame would rewrite the screen 8 times a
+    // second, which also wipes the IME composition string mid-typing. Only do
+    // it on the frames where the transcript was actually rebuilt.
+    if std::mem::take(&mut app.wide_rows_dirty) {
+        repaint_wide_rows(frame);
+    }
 }
 
 /// Rewrite whole rows that contain a double-width glyph.
@@ -721,6 +734,10 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
             *cache = lines;
             *app.owner_cache.borrow_mut() = owners;
             app.lines_sig = (width, sig);
+            // conhost keeps the right half of a wide glyph that we no longer
+            // draw; rewriting those rows is the only way to clear it, and it
+            // is only needed when the text actually changed.
+            app.wide_rows_dirty = true;
         }
     }
     let cache = app.lines_cache.borrow();
@@ -732,6 +749,12 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
         if app.scroll >= max_scroll {
             app.follow = true;
         }
+    }
+    // Scrolling swaps whole rows in and out, which can expose the trailing
+    // cell of a wide glyph the previous frame left behind.
+    if app.painted_scroll != app.scroll {
+        app.painted_scroll = app.scroll;
+        app.wide_rows_dirty = true;
     }
     let paragraph = Paragraph::new(cache.as_slice()).scroll((app.scroll as u16, 0));
     frame.render_widget(paragraph, area);
@@ -768,7 +791,14 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect) {
 // editor
 // ---------------------------------------------------------------------------
 
-fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
+/// Draw the composer and return the cell the caret belongs in.
+///
+/// The caret has to be the *terminal's* cursor, not a glyph: Windows consoles
+/// draw the IME composition string and place the candidate window at the
+/// console cursor position, so with a fake caret the pinyin shows up wherever
+/// the last frame happened to leave the cursor - typically a few rows above
+/// the box, over the transcript.
+fn draw_editor(app: &App, frame: &mut Frame, area: Rect) -> Option<Position> {
     let accent = if app.busy { ACCENT } else { BORDER };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -776,7 +806,7 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width < 4 {
-        return;
+        return None;
     }
 
     let prompt_style = style(ACCENT);
@@ -808,10 +838,10 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
     let text_style = style(TEXT);
     let mut spans = vec![Span::styled("> ", prompt_style)];
     if app.input.is_empty() {
-        // No caret before the placeholder: two glyphs in a row read as a
-        // divider rather than a cursor.
+        // The caret occupies the first cell after the prompt, so the hint has
+        // to start one column later or the block cursor eats its first letter.
         spans.push(Span::styled(
-            "Ask anything. / for commands",
+            " Ask anything. / for commands",
             style(FAINT).add_modifier(Modifier::ITALIC),
         ));
     } else {
@@ -819,13 +849,13 @@ fn draw_editor(app: &App, frame: &mut Frame, area: Rect) {
             pre.into_iter().collect::<String>(),
             text_style,
         ));
-        spans.push(Span::styled(
-            "│",
-            style(ACCENT).add_modifier(Modifier::BOLD),
-        ));
         spans.push(Span::styled(post, text_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+
+    // "> " is two columns; the caret sits right after the visible prefix.
+    let x = inner.x + 2 + pre_w.min(inner.width as usize) as u16;
+    Some(Position::new(x, inner.y))
 }
 
 // ---------------------------------------------------------------------------

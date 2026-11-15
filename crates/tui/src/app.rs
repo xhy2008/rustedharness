@@ -164,6 +164,13 @@ pub struct App {
     pub toast: Option<(String, u64, bool)>,
     /// Set when the whole screen must be repainted from scratch.
     pub needs_repaint: bool,
+    /// Set when the transcript was rebuilt, so the renderer knows to rewrite
+    /// the rows holding double-width glyphs (conhost only drops the trailing
+    /// cell of a wide glyph if someone writes over it).
+    pub wide_rows_dirty: bool,
+    /// Scroll offset of the last painted frame; scrolling brings new rows on
+    /// screen, which can expose the same wide-glyph residue.
+    pub painted_scroll: usize,
     pub quit: bool,
     pub pending: Option<PendingSession>,
 }
@@ -241,6 +248,8 @@ impl App {
             tick: 0,
             toast: None,
             needs_repaint: false,
+            wide_rows_dirty: false,
+            painted_scroll: 0,
             quit: false,
             pending: None,
         };

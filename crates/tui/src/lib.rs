@@ -145,6 +145,7 @@ fn paint(terminal: &mut ratatui::DefaultTerminal, app: &mut App, force_clear: bo
     let mut outcome: Result<()> = Ok(());
     if force_clear || std::mem::take(&mut app.needs_repaint) {
         app.lines_sig = (usize::MAX, 0);
+        app.wide_rows_dirty = true;
         outcome = terminal.clear().map_err(anyhow::Error::from);
     }
     if outcome.is_ok() {
@@ -203,6 +204,11 @@ async fn event_loop(
     const RESIZE_SETTLE: Duration = Duration::from_millis(150);
     let mut resize_at: Option<Instant> = None;
     let mut resize_dirty = false;
+    // Only paint when something changed. An unconditional 8 fps repaint would
+    // redraw the same cells and, worse, re-home the terminal cursor every
+    // frame - which is exactly where conhost anchors the IME composition
+    // string and the candidate window while the user is typing Chinese.
+    let mut dirty = true;
     loop {
         let settling = resize_at.is_some_and(|t| t.elapsed() < RESIZE_SETTLE);
         // Force a full repaint when the overlay changes (opens, closes, or
@@ -212,9 +218,13 @@ async fn event_loop(
         let overlay = app.overlay_key();
         let overlay_changed = overlay != last_overlay;
         last_overlay = overlay;
-        if !settling {
+        if overlay_changed || resize_dirty || app.needs_repaint {
+            dirty = true;
+        }
+        if dirty && !settling {
             paint(terminal, app, overlay_changed || resize_dirty)?;
             resize_dirty = false;
+            dirty = false;
         }
         if let Some(pending) = app.pending.take() {
             let label = pending
@@ -233,8 +243,10 @@ async fn event_loop(
                 Some(short) => format!("resumed session {short}"),
                 None => "new session".to_string(),
             });
+            dirty = true;
             continue;
         }
+        let toast_shown = app.active_toast().is_some();
         tokio::select! {
             biased;
             Some(event) = key_rx.recv() => {
@@ -242,11 +254,26 @@ async fn event_loop(
                     resize_at = Some(Instant::now());
                     resize_dirty = true;
                 }
-                app.handle_event(event, op_tx).await
+                app.handle_event(event, op_tx).await;
+                dirty = true;
             }
-            Some(result) = op_rx.recv() => app.on_op_result(result),
-            Some(event) = harness_rx.recv() => app.on_harness_event(event),
-            _ = ticker.tick() => app.tick += 1,
+            Some(result) = op_rx.recv() => {
+                app.on_op_result(result);
+                dirty = true;
+            }
+            Some(event) = harness_rx.recv() => {
+                app.on_harness_event(event);
+                dirty = true;
+            }
+            _ = ticker.tick() => {
+                app.tick += 1;
+                // The spinner and the toast countdown are the only things that
+                // move on a timer; the last repaint also has to happen on the
+                // tick the toast disappears.
+                if app.busy || toast_shown || app.active_toast().is_some() {
+                    dirty = true;
+                }
+            }
         }
         // Coalesce everything already queued so one frame carries all keys,
         // streamed deltas and tool results; without this, fast input feels
@@ -258,6 +285,7 @@ async fn event_loop(
             if key.is_none() && op.is_none() && harness.is_none() {
                 break;
             }
+            dirty = true;
             if let Some(event) = key {
                 if matches!(event, Event::Resize(..)) {
                     resize_at = Some(Instant::now());
