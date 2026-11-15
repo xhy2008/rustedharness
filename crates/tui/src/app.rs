@@ -311,6 +311,15 @@ impl App {
         self.compact_model = snapshot.compact_model;
         self.context_tokens = snapshot.context_tokens;
         self.context_limit = snapshot.context_limit;
+        // A resumed session shows the numbers the provider last reported, so
+        // the footer keeps saying what this session has spent instead of
+        // restarting from zero.
+        if let Some(usage) = snapshot.usage {
+            self.input_tokens = usage.prompt_tokens;
+            self.output_tokens = usage.completion_tokens;
+            self.cache_hit_pct = usage.cache_hit_pct();
+            self.cost_usd = snapshot.cost_usd;
+        }
         self.todo = snapshot.todos;
         for message in snapshot.messages {
             self.push_message(message);

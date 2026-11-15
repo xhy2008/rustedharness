@@ -140,6 +140,26 @@ pub struct Usage {
     pub cost_usd: Option<f64>,
 }
 
+impl Usage {
+    /// Cache hit ratio of this report, when the provider exposes cached prompt
+    /// tokens. Percent (0-100) of prompt tokens served from cache.
+    pub fn cache_hit_pct(&self) -> Option<u64> {
+        if self.prompt_tokens == 0 || self.cached_tokens == 0 {
+            return None;
+        }
+        Some(((self.cached_tokens * 100) / self.prompt_tokens).min(100))
+    }
+
+    /// Tokens occupying the context window after this request.
+    pub fn context_tokens(&self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.prompt_tokens + self.completion_tokens
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Completion {
     pub content: String,

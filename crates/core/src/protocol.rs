@@ -135,4 +135,11 @@ pub struct SessionSnapshot {
     pub todos: Vec<crate::tools::todo::TodoItem>,
     pub context_tokens: u64,
     pub context_limit: u64,
+    /// Last provider-reported usage, when the session carries one. Keeps the
+    /// token counters populated across a resume.
+    #[serde(default)]
+    pub usage: Option<crate::provider::Usage>,
+    /// Running cost total for the whole session.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }

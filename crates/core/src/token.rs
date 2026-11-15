@@ -39,6 +39,20 @@ impl UsageTracker {
         *usage
     }
 
+    /// Seed the tracker with the values persisted in a session file.
+    ///
+    /// Resuming must not invent numbers, but it must not forget them either:
+    /// the last usage the provider reported still describes the context being
+    /// restored, and the cost total belongs to the session, not to the process.
+    pub fn restore(&self, usage: Usage, cost_usd: Option<f64>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.last = Some(usage);
+        if let Some(cost) = cost_usd {
+            inner.cost_usd = cost;
+            inner.cost_seen = true;
+        }
+    }
+
     /// Accumulated provider-reported cost, or None if no report ever carried
     /// cost data.
     pub fn total_cost_usd(&self) -> Option<f64> {
@@ -61,18 +75,14 @@ impl UsageTracker {
     /// omit it, so the sum of the two reported components is used as a
     /// fallback. Both are API fields; nothing is estimated locally.
     pub fn context_tokens(&self) -> u64 {
-        self.last().map(|u| effective_total(&u)).unwrap_or(0)
+        self.last().map(|u| u.context_tokens()).unwrap_or(0)
     }
 
     /// Cache hit ratio of the most recent report, when the provider exposes
     /// cached prompt tokens. Percent (0-100) of prompt tokens served from
     /// cache; None means the provider reports no cache data at all.
     pub fn cache_hit_pct(&self) -> Option<u64> {
-        let last = self.last()?;
-        if last.prompt_tokens == 0 || last.cached_tokens == 0 {
-            return None;
-        }
-        Some(((last.cached_tokens * 100) / last.prompt_tokens).min(100))
+        self.last()?.cache_hit_pct()
     }
 
     /// Forget the last report. Called after compaction because the previous
@@ -86,14 +96,6 @@ impl UsageTracker {
     /// so the agent can warn once per session without spamming the UI.
     pub fn note_missing_usage(&self) -> bool {
         !self.missing_reported.swap(true, Ordering::Relaxed)
-    }
-}
-
-fn effective_total(usage: &Usage) -> u64 {
-    if usage.total_tokens > 0 {
-        usage.total_tokens
-    } else {
-        usage.prompt_tokens + usage.completion_tokens
     }
 }
 

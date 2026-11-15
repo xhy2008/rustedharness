@@ -1091,3 +1091,39 @@ fn a_finished_highlight_only_lands_on_its_own_file() {
         _ => panic!("the viewer closed"),
     }
 }
+
+/// Resuming a session used to blank the footer: the meters are driven by
+/// provider usage reports, and a restored transcript has none of its own. The
+/// session file now carries the last report, so the numbers stay put.
+#[test]
+fn resuming_restores_the_token_and_context_meters() {
+    use rustedharness_core::protocol::SessionSnapshot;
+    use rustedharness_core::provider::Usage;
+
+    let mut app = demo_app();
+    app.populate(SessionSnapshot {
+        session_id: "s1".into(),
+        cwd: "/tmp".into(),
+        agent_model: "model".into(),
+        compact_model: "compact".into(),
+        messages: Vec::new(),
+        todos: Vec::new(),
+        context_tokens: 12_345,
+        context_limit: 200_000,
+        usage: Some(Usage {
+            prompt_tokens: 1_200,
+            completion_tokens: 80,
+            total_tokens: 12_345,
+            cached_tokens: 1_100,
+            cost_usd: Some(0.004),
+        }),
+        cost_usd: Some(0.42),
+    });
+
+    assert_eq!(app.context_tokens, 12_345, "context meter");
+    assert_eq!(app.context_limit, 200_000);
+    assert_eq!(app.input_tokens, 1_200, "prompt tokens");
+    assert_eq!(app.output_tokens, 80, "completion tokens");
+    assert_eq!(app.cache_hit_pct, Some(91), "cache ratio");
+    assert_eq!(app.cost_usd, Some(0.42), "cost is the session total");
+}

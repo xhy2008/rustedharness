@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, SessionConfig};
 use crate::error::{HarnessError, Result};
-use crate::provider::ChatMessage;
+use crate::provider::{ChatMessage, Usage};
 use crate::tools::todo::TodoItem;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,15 @@ pub enum SessionRecord {
         summary: String,
         dropped_messages: usize,
     },
+    /// Last provider-reported usage plus the running cost total.
+    ///
+    /// Without this a resumed session shows an empty context meter and zero
+    /// tokens until the next request lands, even though the transcript is
+    /// right there on screen.
+    Usage {
+        usage: Usage,
+        cost_usd: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +81,9 @@ pub struct LoadedSession {
     pub messages: Vec<ChatMessage>,
     pub todos: Vec<TodoItem>,
     pub compactions: Vec<(String, usize)>,
+    /// Latest usage report, so a resumed session keeps its context meter.
+    pub usage: Option<Usage>,
+    pub cost_usd: Option<f64>,
     /// A final line that did not parse (typically a torn write after kill -9).
     pub truncated_tail: bool,
 }
@@ -203,6 +215,13 @@ impl SessionWriter {
             name: name.to_string(),
             ok,
             content: content.to_string(),
+        })
+    }
+
+    pub fn usage(&mut self, usage: &Usage, cost_usd: Option<f64>) -> Result<()> {
+        self.append(&SessionRecord::Usage {
+            usage: *usage,
+            cost_usd,
         })
     }
 
@@ -371,6 +390,10 @@ fn load_file(path: &Path) -> Result<LoadedSession> {
                         loaded.messages.push(ChatMessage::tool(id, content));
                     }
                     SessionRecord::Todo { items } => loaded.todos = items,
+                    SessionRecord::Usage { usage, cost_usd } => {
+                        loaded.usage = Some(usage);
+                        loaded.cost_usd = cost_usd;
+                    }
                     SessionRecord::Models { agent, compact } => {
                         // The header Meta holds the model chosen at creation;
                         // every `/model` switch appends a later Models record.
@@ -434,6 +457,103 @@ mod tests {
             dir: Some(dir.to_path_buf()),
             max_saved_sessions: 5,
         }
+    }
+
+    /// Usage is what the footer reads; a resumed session must not lose it.
+    #[test]
+    fn usage_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "agent", "compact").unwrap();
+        writer.user("hello").unwrap();
+        let usage = Usage {
+            prompt_tokens: 1_200,
+            completion_tokens: 80,
+            total_tokens: 1_280,
+            cached_tokens: 1_100,
+            cost_usd: Some(0.004),
+        };
+        writer.usage(&usage, Some(0.02)).unwrap();
+        writer.usage(&usage, Some(0.03)).unwrap();
+
+        let id = writer.id().to_string();
+        drop(writer);
+        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        assert_eq!(loaded.usage, Some(usage), "last report wins");
+        assert_eq!(loaded.cost_usd, Some(0.03), "latest cost total wins");
+        assert_eq!(loaded.messages.len(), 1, "usage rows are not messages");
+    }
+
+    /// How much of a resume is the transcript file itself, and would a binary
+    /// format help? Writes a synthetic session, then times the three costs
+    /// separately: reading the file, parsing JSON records, and decoding the
+    /// same records from a binary blob.
+    #[test]
+    #[ignore = "benchmark; run on demand"]
+    fn storage_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer = SessionWriter::create(&cfg, dir.path(), "agent", "compact").unwrap();
+
+        let file_body = "fn main() {\n    println!(\"hello\");\n}\n".repeat(20);
+        for turn in 0..200 {
+            writer
+                .user(&format!("turn {turn}: please look at the parser"))
+                .unwrap();
+            let call = crate::provider::ToolCall {
+                id: format!("call_{turn}"),
+                kind: "function".into(),
+                function: crate::provider::FunctionCall {
+                    name: "read".into(),
+                    arguments: r#"{"path":"src/main.rs"}"#.into(),
+                },
+            };
+            let mut assistant = ChatMessage::assistant("Looking at it now.");
+            assistant.tool_calls = Some(vec![call]);
+            writer.assistant(&assistant).unwrap();
+            writer
+                .tool_result(&format!("call_{turn}"), "read", true, &file_body)
+                .unwrap();
+            writer
+                .assistant(&ChatMessage::assistant(&format!(
+                    "Turn {turn} looks fine. The parser handles the fence, the table and the \
+                     inline code; nothing to change here."
+                )))
+                .unwrap();
+        }
+        let id = writer.id().to_string();
+        let path = writer.path().to_path_buf();
+        drop(writer);
+
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let store = SessionStore::new(&cfg);
+
+        let started = std::time::Instant::now();
+        let loaded = store.load(&id).unwrap();
+        let load_time = started.elapsed();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let started = std::time::Instant::now();
+        let mut records = Vec::new();
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            records.push(serde_json::from_str::<SessionRecord>(line).unwrap());
+        }
+        let parse_time = started.elapsed();
+
+        let read_time = {
+            let started = std::time::Instant::now();
+            let _ = std::fs::read(&path).unwrap();
+            started.elapsed()
+        };
+        println!(
+            "messages={} records={} file={:.1} MiB | read={:?} load={:?} json-parse={:?}",
+            loaded.messages.len(),
+            records.len(),
+            bytes as f64 / 1_048_576.0,
+            read_time,
+            load_time,
+            parse_time,
+        );
     }
 
     #[test]

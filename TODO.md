@@ -1,5 +1,35 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：恢复会话的统计归零 + 启动慢的真凶（2026-11-15 第十五轮）
+
+**统计归零**：footer 的数字全部来自 provider 的 `usage` 回报，恢复会话时没有任何一次
+请求，于是 `UsageTracker` 是空的 -> ctx/in/out/cache/cost 全 0。
+
+- `SessionRecord::Usage { usage, cost_usd }`：每次拿到 usage 就追加一行（约 100 字节/轮），
+  加载时保留最后一条。`UsageTracker::restore()` 在 `Agent::build` 里回填，`snapshot()`
+  带上 `usage` + `cost_usd`，TUI 的 `populate` 据此填 footer。
+- `Usage::cache_hit_pct()/context_tokens()` 提到 provider 层，tracker 与快照共用。
+
+**启动慢的真凶是 shell 探测，不是会话文件**（release，0.8 MiB / 2400 条消息）：
+
+| 阶段 | 耗时 |
+| --- | --- |
+| `SessionStore::load` | 10.3 ms |
+| `LspHub::new`（含 CodeIndex 打开 sqlite） | 70.4 ms |
+| `ShellSpec::detect` | 0.7 ms（缓存前 2760 ms） |
+| `Agent::resume` 合计 | 87.3 ms |
+
+`ShellSpec::detect` 要启动一次 PowerShell 读版本号，本机冷启动 3.3 s（杀毒 + 模块加载）。
+现在把结果缓存到 `<config_dir>/shell.json`，key = prefer + OS + 可执行文件的 (size, mtime)：
+换 shell 或升级 PS 自动失效。debug 下 resume 从 2.94 s 降到 143 ms。
+
+**二进制存储：不做**（数据见 `storage_benchmark`）：release 下 0.3 MiB 会话 load 3.86 ms，
+其中 JSON 解析 3.22 ms；load 只占 resume 的 12%，即使解码免费也只省 ~9%。而且
+`SessionRecord` 是 internally-tagged 枚举 + 大量 `skip_serializing_if`，bincode 直接反序列化
+会 `InvalidTagEncoding` / `DeserializeAnyNotSupported`（实测），要做二进制得另立一套 schema，
+丢掉 JSONL 的追加写、截断恢复和可 grep。下一个值得动的是那 70 ms 的 `CodeIndex::new`
+（可以懒加载）。
+
 ## 已完成：代码高亮（正文围栏 + /view）（2026-11-15 第十四轮）
 
 - `tui-markdown` 打开默认特性 `highlight-code`（syntect + onig），主题用

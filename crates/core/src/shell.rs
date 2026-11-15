@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellFamily {
     Bash,
     PowerShell,
@@ -20,7 +22,24 @@ pub struct ShellSpec {
 }
 
 impl ShellSpec {
+    /// Detect the shell, reusing the previous answer when it cannot have
+    /// changed.
+    ///
+    /// Detection starts the shell once to read its version, which costs seconds
+    /// on Windows: antivirus plus module loading make a single spawn take 3 s
+    /// here. That is the slowest step of `Agent::new` - and therefore of every
+    /// resume - for a string that only changes when the shell binary does.
     pub fn detect(prefer: &str) -> Self {
+        let path = crate::config::Config::config_dir().join("shell.json");
+        if let Some(spec) = read_cache(&path, prefer) {
+            return spec;
+        }
+        let spec = Self::detect_uncached(prefer);
+        write_cache(&path, prefer, &spec);
+        spec
+    }
+
+    fn detect_uncached(prefer: &str) -> Self {
         if cfg!(windows) {
             if prefer.eq_ignore_ascii_case("git-bash") {
                 if let Some(bash) = find_git_bash() {
@@ -183,6 +202,80 @@ fn regex_like_export(command: &str) -> bool {
         .any(|token| token.starts_with("export ") || token == "export")
 }
 
+/// Cache row: the spec plus the identity of the binary it was probed from.
+#[derive(Serialize, Deserialize)]
+struct CachedShell {
+    prefer: String,
+    os: String,
+    family: ShellFamily,
+    tool_name: String,
+    program: PathBuf,
+    display_name: String,
+    version: String,
+    git_bash: bool,
+    /// `(len, mtime)` of the shell binary when it was probed; a new shell
+    /// install bumps these and the cache is discarded.
+    stamp: Option<(u64, i64)>,
+}
+
+impl From<&ShellSpec> for CachedShell {
+    fn from(spec: &ShellSpec) -> Self {
+        Self {
+            prefer: String::new(),
+            os: spec.os.clone(),
+            family: spec.family,
+            tool_name: spec.tool_name.to_string(),
+            program: spec.program.clone(),
+            display_name: spec.display_name.clone(),
+            version: spec.version.clone(),
+            git_bash: spec.git_bash,
+            stamp: stamp_of(&spec.program),
+        }
+    }
+}
+
+fn stamp_of(program: &Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(program).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime))
+}
+
+fn read_cache(path: &Path, prefer: &str) -> Option<ShellSpec> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cached: CachedShell = serde_json::from_str(&raw).ok()?;
+    if cached.prefer != prefer || cached.os != std::env::consts::OS {
+        return None;
+    }
+    if cached.stamp != stamp_of(&cached.program) {
+        return None;
+    }
+    Some(ShellSpec {
+        family: cached.family,
+        tool_name: Box::leak(cached.tool_name.into_boxed_str()),
+        program: cached.program,
+        display_name: cached.display_name,
+        version: cached.version,
+        os: cached.os,
+        git_bash: cached.git_bash,
+    })
+}
+
+fn write_cache(path: &Path, prefer: &str, spec: &ShellSpec) {
+    let mut cached = CachedShell::from(spec);
+    cached.prefer = prefer.to_string();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(raw) = serde_json::to_string(&cached) {
+        let _ = std::fs::write(path, raw);
+    }
+}
+
 fn version_of(program: &Path, args: &[&str]) -> String {
     let output = Command::new(program).args(args).output();
     let Ok(output) = output else {
@@ -333,5 +426,36 @@ mod tests {
         assert!(spec(ShellFamily::Bash)
             .bashism("rm -rf target && echo hi > /dev/null")
             .is_none());
+    }
+
+    /// Probing the shell costs seconds on Windows, so the answer is cached;
+    /// the cache must expire when the binary behind it changes.
+    #[test]
+    fn the_shell_cache_is_reused_until_the_binary_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("shell.json");
+        let program = dir.path().join("shell.exe");
+        std::fs::write(&program, b"first").unwrap();
+
+        let mut detected = spec(ShellFamily::Bash);
+        detected.program = program.clone();
+        detected.version = "5.2.0".into();
+        detected.os = std::env::consts::OS.to_string();
+        write_cache(&cache, "auto", &detected);
+
+        let hit = read_cache(&cache, "auto").expect("cache hit");
+        assert_eq!(hit.version, "5.2.0");
+        assert_eq!(hit.program, program, "the same binary comes back");
+
+        assert!(
+            read_cache(&cache, "git-bash").is_none(),
+            "a different preference must re-probe"
+        );
+
+        std::fs::write(&program, b"a different build entirely").unwrap();
+        assert!(
+            read_cache(&cache, "auto").is_none(),
+            "a replaced shell must re-probe"
+        );
     }
 }

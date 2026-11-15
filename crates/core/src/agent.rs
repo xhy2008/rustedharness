@@ -151,7 +151,18 @@ impl Agent {
             messages: RwLock::new(messages),
             session: Mutex::new(session),
             todos,
-            usage: Arc::new(UsageTracker::new()),
+            usage: {
+                let tracker = UsageTracker::new();
+                // A resumed session keeps the numbers the provider reported
+                // before it was closed; without this the meter reads zero
+                // while the transcript is clearly not empty.
+                if let Some(loaded) = resume.as_ref().map(|r| &r.loaded) {
+                    if let Some(usage) = loaded.usage {
+                        tracker.restore(usage, loaded.cost_usd);
+                    }
+                }
+                Arc::new(tracker)
+            },
             events: events.clone(),
             agent_model: RwLock::new(agent_model),
             compact_model: RwLock::new(compact_model),
@@ -264,6 +275,8 @@ impl Agent {
             todos: self.todos.snapshot(),
             context_tokens,
             context_limit: self.context_limit(),
+            usage: self.usage.last(),
+            cost_usd: self.usage.total_cost_usd(),
         }
     }
 
@@ -761,6 +774,9 @@ impl Agent {
             return;
         };
         self.usage.record(&usage);
+        if let Ok(mut session) = self.session.lock() {
+            let _ = session.usage(&usage, self.usage.total_cost_usd());
+        }
         let _ = self.events.send(HarnessEvent::TokenUsage {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
@@ -1042,6 +1058,54 @@ mod tests {
             HarnessEvent::ToolResult { id, ok: true, content, .. }
                 if id == "sh1" && content.contains("stream-b")
         )));
+        agent.shutdown().await;
+    }
+
+    /// Where does a resume spend its time? Loads a synthetic transcript and
+    /// times each stage of `Agent::resume` separately.
+    #[tokio::test]
+    #[ignore = "benchmark; run on demand"]
+    async fn resume_timing() {
+        use crate::provider::ChatMessage as Msg;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.session.dir = Some(dir.path().join("sessions"));
+        std::fs::create_dir_all(config.session.dir.as_ref().unwrap()).unwrap();
+
+        let body = "fn main() {\n    println!(\"hello\");\n}\n".repeat(20);
+        let mut writer =
+            crate::session::SessionWriter::create(&config.session, dir.path(), "agent", "compact")
+                .unwrap();
+        for turn in 0..800 {
+            writer.user(&format!("turn {turn}")).unwrap();
+            writer.assistant(&Msg::assistant("Looking.")).unwrap();
+            writer
+                .tool_result(&format!("call_{turn}"), "read", true, &body)
+                .unwrap();
+        }
+        let id = writer.id().to_string();
+        let path = writer.path().to_path_buf();
+        drop(writer);
+        let size = std::fs::metadata(&path).unwrap().len();
+
+        let started = std::time::Instant::now();
+        let loaded = crate::session::SessionStore::new(&config.session)
+            .load(&id)
+            .unwrap();
+        let load = started.elapsed();
+        println!(
+            "session {:.1} MiB / {} messages: load={:?}",
+            size as f64 / 1_048_576.0,
+            loaded.messages.len(),
+            load
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let agent = Agent::resume(config, &id, None, tx).await.unwrap();
+        let resume = started.elapsed();
+        println!("Agent::resume total={resume:?}");
         agent.shutdown().await;
     }
 
