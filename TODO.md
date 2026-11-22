@@ -1,5 +1,18 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：移除默认模型硬编码（2026-11-22）
+
+1. **无内置 provider/model**。`Config::default()` 不再注入 OpenAI provider、
+   `openai/gpt-4o` 或 `gpt-4o-mini`；`normalize()` 不再自动补模型或挑第一个
+   模型。`config init` 只写空 provider 列表，并提示用户配置。
+2. **未配置模型显示 None**。TUI 状态栏、`/session`、`config models`、Web 状态
+   都显示 `None`；模型为空时 TUI 提示 `add a provider/model to models.json`，
+   headless `run` 在启动前直接报错并给同样的提示。
+3. **未知 context 不再猜 128000**。`contextWindow` 未配置时保持未知，TUI 显示
+   `ctx None`；只有模型显式声明时才显示百分比。
+4. **Agent 可无模型启动**。使用 `UnconfiguredModel` 后端承载空配置，首轮请求
+   前返回配置错误；resume 时若 config 没有模型，则沿用会话里的模型。
+
 ## 已完成：对齐 Pi models.json（2026-11-22）
 
 1. **compat 字段名/位置对齐**。`models.json.providers.*.compat` 现在解析 Pi 的

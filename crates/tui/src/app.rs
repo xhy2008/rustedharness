@@ -1496,7 +1496,10 @@ impl App {
                         self.another_model_for_compact = on;
                         self.compact_model = self.agent.compact_model();
                         self.notice(if on {
-                            format!("compaction uses {} again", self.compact_model)
+                            format!(
+                                "compaction uses {} again",
+                                rustedharness_core::config::model_display(&self.compact_model)
+                            )
                         } else {
                             format!(
                                 "compaction uses {} (its prompt cache is already warm)",
@@ -1548,8 +1551,8 @@ impl App {
                     "session {}\n  cwd {}\n  model {} | compact {}\n  ctx {}/{} | in {} | out {}",
                     self.session_id,
                     self.cwd,
-                    self.agent_model,
-                    self.compact_model,
+                    rustedharness_core::config::model_display(&self.agent_model),
+                    rustedharness_core::config::model_display(&self.compact_model),
                     self.context_tokens,
                     self.context_limit,
                     self.input_tokens,

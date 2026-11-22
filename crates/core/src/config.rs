@@ -24,22 +24,23 @@ fn yes() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     /// Default model, either `provider/model` or a model id unique across all
-    /// providers.
-    #[serde(default)]
+    /// providers. Empty means no model is configured.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
     /// Model used for compaction summaries; falls back to `model`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub compact_model: String,
     /// Compact with `compactModel`. Turning it off summarises with `model`
     /// instead: the main model's prompt cache is already warm, while a second
     /// model starts cold and rarely pays for itself.
     #[serde(default = "yes")]
     pub another_model_for_compact: bool,
-    /// Fallback context window for models that do not declare one.
-    #[serde(default)]
+    /// Fallback context window for models that do not declare one. Zero means
+    /// the limit is unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub context_window: u64,
-    /// Fallback provider when a bare model id is ambiguous or unknown.
-    #[serde(default)]
+    /// Provider selected for the current model. Empty means no provider.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub provider: String,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -68,14 +69,13 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let providers = default_providers();
         Self {
-            model: "openai/gpt-4o".to_string(),
-            compact_model: "openai/gpt-4o-mini".to_string(),
+            model: String::new(),
+            compact_model: String::new(),
             another_model_for_compact: true,
-            context_window: 128_000,
-            provider: "openai".to_string(),
-            providers,
+            context_window: 0,
+            provider: String::new(),
+            providers: BTreeMap::new(),
             agent: AgentConfig::default(),
             edit: EditConfig::default(),
             shell: ShellConfig::default(),
@@ -87,40 +87,6 @@ impl Default for Config {
             source: None,
         }
     }
-}
-
-fn default_providers() -> BTreeMap<String, ProviderConfig> {
-    let mut providers = BTreeMap::new();
-    let base_url = std::env::var("OPENAI_BASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    providers.insert(
-        "openai".to_string(),
-        ProviderConfig {
-            name: Some("OpenAI".to_string()),
-            base_url,
-            api: "openai-completions".to_string(),
-            api_key: Some("$OPENAI_API_KEY".to_string()),
-            headers: BTreeMap::new(),
-            compat: Compat::default(),
-            models: vec![
-                ModelConfig {
-                    id: "gpt-4o".to_string(),
-                    name: Some("GPT-4o".to_string()),
-                    context_window: 128_000,
-                    ..Default::default()
-                },
-                ModelConfig {
-                    id: "gpt-4o-mini".to_string(),
-                    name: Some("GPT-4o mini".to_string()),
-                    context_window: 128_000,
-                    ..Default::default()
-                },
-            ],
-        },
-    );
-    providers
 }
 
 /// One provider entry in `models.json`.
@@ -194,31 +160,20 @@ impl ProviderConfig {
 }
 
 /// One model entry below a provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelConfig {
     /// Model id sent to the API. May contain `/` (e.g. OpenRouter ids).
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "is_zero")]
     pub context_window: u64,
     /// Optional output cap. Falls back to `[agent].maxOutputTokens`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "is_false")]
     pub reasoning: bool,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: None,
-            context_window: 128_000,
-            max_tokens: None,
-            reasoning: false,
-        }
-    }
 }
 
 /// `models.json` wrapper.
@@ -247,22 +202,36 @@ impl ModelSpec {
     }
 }
 
-/// Compatibility switches for OpenAI-compatible endpoints. The names and
-/// positions mirror Pi's `models.json` `compat` object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Compatibility switches for OpenAI-compatible endpoints. Field names and
+/// defaults follow Pi's `models.json` `compat` object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Compat {
-    /// `max_tokens`, `max_completion_tokens`, or `omit` (our extension).
-    pub max_tokens_field: MaxTokensField,
-    /// `supportsDeveloperRole`: use the developer role for the leading system message.
+    /// `supportsStore`: send `"store": false` on Chat Completions requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_store: Option<bool>,
+    /// `supportsDeveloperRole`: use the developer role instead of system.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_developer_role: Option<bool>,
+    /// `supportsReasoningEffort`: provider accepts `reasoning_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
     /// `supportsUsageInStreaming`: request `stream_options.include_usage`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_usage_in_streaming: Option<bool>,
+    /// `supportsFinishReason`: streamed responses include `finish_reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_finish_reason: Option<bool>,
+    /// `maxTokensField`: `max_tokens` or `max_completion_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens_field: Option<MaxTokensField>,
     /// `requiresToolResultName`: include the tool name on tool results.
     #[serde(skip_serializing_if = "is_false")]
     pub requires_tool_result_name: bool,
+    /// `requiresAssistantAfterToolResult`: bridge tool results and a following
+    /// user message with a synthetic assistant message.
+    #[serde(skip_serializing_if = "is_false")]
+    pub requires_assistant_after_tool_result: bool,
     /// `requiresNonNullAssistantContent`: send `""` instead of `null` for
     /// tool-call-only assistant messages.
     #[serde(skip_serializing_if = "is_false")]
@@ -271,45 +240,95 @@ pub struct Compat {
     /// contains tool calls/results but the request has no current tools.
     #[serde(skip_serializing_if = "is_false")]
     pub requires_tools_with_tool_history: bool,
-    /// `requiresReasoningContentOnAssistantMessages`: always emit an empty
+    /// `requiresReasoningContentOnAssistantMessages`: emit an empty
     /// `reasoning_content` on assistant messages when reasoning is enabled.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
+}
+
+/// Pi's resolved compatibility values: explicit `models.json` overrides first,
+/// then URL/provider auto-detection. Not serialized; this is the view the
+/// request builders use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedCompat {
+    pub supports_store: bool,
+    pub supports_developer_role: bool,
+    pub supports_usage_in_streaming: bool,
+    pub supports_finish_reason: bool,
+    pub max_tokens_field: MaxTokensField,
+    pub requires_tool_result_name: bool,
+    pub requires_assistant_after_tool_result: bool,
+    pub requires_non_null_assistant_content: bool,
+    pub requires_tools_with_tool_history: bool,
     pub requires_reasoning_content_on_assistant_messages: bool,
-    /// Round-trip `reasoning_content` deltas (our extension).
-    #[serde(skip_serializing_if = "is_false")]
-    pub reasoning_content: bool,
-    /// Send `tool_choice: "auto"` (our extension).
-    #[serde(skip_serializing_if = "is_false")]
-    pub tool_choice: bool,
-    /// Send `parallel_tool_calls: true` (our extension).
-    #[serde(skip_serializing_if = "is_false")]
-    pub parallel_tool_calls: bool,
 }
 
 impl Compat {
-    pub fn uses_developer_role(&self) -> bool {
-        self.supports_developer_role.unwrap_or(false)
-    }
-
-    pub fn uses_stream_usage(&self) -> bool {
-        self.supports_usage_in_streaming.unwrap_or(false)
-    }
-}
-
-impl Default for Compat {
-    fn default() -> Self {
-        Self {
-            max_tokens_field: MaxTokensField::MaxTokens,
-            // Pi-style optional overrides stay off unless models.json opts in.
-            supports_developer_role: None,
-            supports_usage_in_streaming: None,
-            requires_tool_result_name: false,
-            requires_non_null_assistant_content: false,
-            requires_tools_with_tool_history: false,
-            requires_reasoning_content_on_assistant_messages: false,
-            reasoning_content: false,
-            tool_choice: false,
-            parallel_tool_calls: false,
+    /// Resolve Pi's auto-detected defaults from `api`, provider id and base URL.
+    pub fn resolve(&self, api: &str, provider: &str, base_url: &str) -> ResolvedCompat {
+        let url = base_url.to_ascii_lowercase();
+        let provider = provider.to_ascii_lowercase();
+        let is_responses = api.eq_ignore_ascii_case("openai-responses");
+        let is_zai = provider == "zai"
+            || provider == "zai-coding-cn"
+            || url.contains("api.z.ai")
+            || url.contains("open.bigmodel.cn");
+        let is_together = provider == "together"
+            || url.contains("api.together.ai")
+            || url.contains("api.together.xyz");
+        let is_moonshot = provider == "moonshotai"
+            || provider == "moonshotai-cn"
+            || url.contains("api.moonshot.");
+        let is_cloudflare_workers =
+            provider == "cloudflare-workers-ai" || url.contains("api.cloudflare.com");
+        let is_cloudflare_gateway =
+            provider == "cloudflare-ai-gateway" || url.contains("gateway.ai.cloudflare.com");
+        let is_nvidia = provider == "nvidia" || url.contains("integrate.api.nvidia.com");
+        let is_ant_ling = provider == "ant-ling" || url.contains("api.ant-ling.com");
+        let is_cerebras = provider == "cerebras" || url.contains("cerebras.ai");
+        let is_grok = provider == "xai" || url.contains("api.x.ai");
+        let is_deepseek = provider == "deepseek" || url.contains("deepseek.com");
+        let is_non_standard = is_nvidia
+            || is_cerebras
+            || is_grok
+            || is_together
+            || url.contains("chutes.ai")
+            || is_deepseek
+            || is_zai
+            || is_moonshot
+            || provider == "opencode"
+            || url.contains("opencode.ai")
+            || is_cloudflare_workers
+            || is_cloudflare_gateway
+            || is_ant_ling;
+        let use_max_tokens = url.contains("chutes.ai")
+            || is_deepseek
+            || is_moonshot
+            || is_cloudflare_gateway
+            || is_together
+            || is_nvidia
+            || is_ant_ling
+            || is_zai;
+        let is_openai = provider == "openai" || url.contains("api.openai.com");
+        let detected_max_tokens = if use_max_tokens {
+            MaxTokensField::MaxTokens
+        } else {
+            MaxTokensField::MaxCompletionTokens
+        };
+        let detected_developer = if is_responses { true } else { is_openai };
+        ResolvedCompat {
+            supports_store: self.supports_store.unwrap_or(!is_non_standard),
+            supports_developer_role: self.supports_developer_role.unwrap_or(detected_developer),
+            supports_usage_in_streaming: self.supports_usage_in_streaming.unwrap_or(true),
+            supports_finish_reason: self.supports_finish_reason.unwrap_or(true),
+            max_tokens_field: self.max_tokens_field.unwrap_or(detected_max_tokens),
+            requires_tool_result_name: self.requires_tool_result_name,
+            requires_assistant_after_tool_result: self.requires_assistant_after_tool_result,
+            requires_non_null_assistant_content: self.requires_non_null_assistant_content,
+            requires_tools_with_tool_history: self.requires_tools_with_tool_history,
+            requires_reasoning_content_on_assistant_messages: self
+                .requires_reasoning_content_on_assistant_messages
+                .unwrap_or(is_deepseek),
         }
     }
 }
@@ -319,7 +338,6 @@ impl Default for Compat {
 pub enum MaxTokensField {
     MaxTokens,
     MaxCompletionTokens,
-    Omit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,14 +692,6 @@ impl Config {
     }
 
     fn apply_env(&mut self) {
-        if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
-            if !base.trim().is_empty() {
-                self.providers
-                    .entry("openai".to_string())
-                    .or_default()
-                    .base_url = base;
-            }
-        }
         let provider_env = std::env::var("RUSTEDHARNESS_PROVIDER")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -699,67 +709,30 @@ impl Config {
                 self.compact_model = model;
             }
         }
-        // A provider choice without a model selects that provider's first
-        // catalogued model instead of keeping the built-in default.
-        if let Some(provider) = provider_env {
-            if self.model.trim().is_empty() {
-                if let Some(model) = self
-                    .providers
-                    .get(&provider)
-                    .and_then(|provider| provider.models.first())
-                {
-                    self.model = format!("{provider}/{}", model.id);
-                }
-            }
-        }
     }
 
     fn normalize(&mut self) {
         self.edit.anchor_width = self.edit.anchor_width.clamp(2, 4);
         self.agent.rate_limit_interval_secs = self.agent.rate_limit_interval_secs.clamp(1, 300);
-        if self.providers.is_empty() {
-            self.providers = Config::default().providers;
-        }
-        if self.context_window == 0 {
-            self.context_window = 128_000;
-        }
-        if self.model.trim().is_empty() {
-            self.model = "openai/gpt-4o".to_string();
-        }
-        if self.compact_model.trim().is_empty() {
-            self.compact_model = self.model.clone();
-        }
-        // A user may replace the whole provider set in a single-file config and
-        // omit `model`. In that case pick the first catalogued model instead of
-        // keeping the built-in OpenAI default.
-        if !self.providers.contains_key("openai") {
-            if self.model == "openai/gpt-4o" {
-                if let Some(first) = self.model_catalog().first() {
-                    self.model = first.reference();
-                }
-            }
-            if self.compact_model == "openai/gpt-4o-mini" {
-                if let Some(first) = self.model_catalog().first() {
-                    self.compact_model = first.reference();
-                }
+        // Never invent a provider or model. An unset model stays unset and the
+        // frontends render it as `None` until the user configures one.
+        if !self.model.trim().is_empty() {
+            if let Ok(spec) = self.resolve_model(&self.model) {
+                self.model = spec.reference();
+                self.provider = spec.provider;
             }
         }
-        if self.provider.trim().is_empty() {
-            self.provider = self.default_provider_id();
-        }
-        if let Ok(spec) = self.resolve_model(&self.model) {
-            self.model = spec.reference();
-            self.provider = spec.provider;
-        }
-        if let Ok(spec) = self.resolve_model(&self.compact_model) {
-            self.compact_model = spec.reference();
+        if !self.compact_model.trim().is_empty() {
+            if let Ok(spec) = self.resolve_model(&self.compact_model) {
+                self.compact_model = spec.reference();
+            }
         }
     }
 
     /// Model that writes compaction summaries. `compactModel` is kept as
     /// configured so the choice survives toggling the setting off and on.
     pub fn compaction_model(&self) -> &str {
-        if self.another_model_for_compact {
+        if self.another_model_for_compact && !self.compact_model.trim().is_empty() {
             &self.compact_model
         } else {
             &self.model
@@ -797,20 +770,16 @@ impl Config {
         }
     }
 
-    pub fn default_provider_id(&self) -> String {
+    pub fn default_provider_id(&self) -> Option<String> {
         if self.providers.contains_key(&self.provider) {
-            return self.provider.clone();
+            return Some(self.provider.clone());
         }
         if let Some((head, _)) = self.model.split_once('/') {
             if self.providers.contains_key(head) {
-                return head.to_string();
+                return Some(head.to_string());
             }
         }
-        self.providers
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_else(|| "openai".to_string())
+        self.providers.keys().next().cloned()
     }
 
     /// Resolve `provider/model`, a bare unique model id, or a full model id that
@@ -834,20 +803,28 @@ impl Config {
             } else if exact.len() == 1 {
                 (exact[0].clone(), reference.to_string())
             } else {
-                (self.default_provider_id(), reference.to_string())
+                let Some(provider) = self.default_provider_id() else {
+                    return Err(HarnessError::Config(format!(
+                        "no provider configured for model `{reference}`"
+                    )));
+                };
+                (provider, reference.to_string())
             }
         } else if exact.len() == 1 {
             (exact[0].clone(), reference.to_string())
         } else if exact.len() > 1 {
             let default = self.default_provider_id();
-            let selected = if exact.iter().any(|id| id.as_str() == default) {
-                default
-            } else {
-                exact[0].clone()
-            };
+            let selected = default
+                .filter(|id| exact.iter().any(|candidate| candidate.as_str() == id))
+                .unwrap_or_else(|| exact[0].clone());
             (selected, reference.to_string())
         } else {
-            (self.default_provider_id(), reference.to_string())
+            let Some(provider) = self.default_provider_id() else {
+                return Err(HarnessError::Config(format!(
+                    "no provider configured for model `{reference}`"
+                )));
+            };
+            (provider, reference.to_string())
         };
 
         let provider = self
@@ -858,8 +835,7 @@ impl Config {
         let context_window = model
             .map(|m| m.context_window)
             .filter(|value| *value > 0)
-            .unwrap_or(self.context_window)
-            .max(1);
+            .unwrap_or(self.context_window);
         let max_tokens = model.and_then(|m| m.max_tokens).filter(|value| *value > 0);
         Ok(ModelSpec {
             provider: provider_id,
@@ -902,7 +878,6 @@ impl Config {
         self.resolve_model(reference)
             .map(|model| model.context_window)
             .unwrap_or(self.context_window)
-            .max(1)
     }
 
     pub fn model_max_tokens(&self, reference: &str) -> Option<u32> {
@@ -1135,6 +1110,19 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Human-facing model label; an empty reference means nothing is configured.
+pub fn model_display(model: &str) -> &str {
+    if model.trim().is_empty() {
+        "None"
+    } else {
+        model
+    }
+}
+
 fn run_command(command: &str) -> String {
     #[cfg(windows)]
     let mut cmd = {
@@ -1180,14 +1168,16 @@ mod tests {
     }
 
     #[test]
-    fn default_config_roundtrips() {
+    fn default_config_has_no_model_until_configured() {
         let mut cfg: Config =
             serde_json::from_str(&default_config_json()).expect("template parses");
         cfg.normalize();
         assert_eq!(cfg.edit.anchor_width, 2);
-        assert_eq!(cfg.model, "openai/gpt-4o");
-        assert_eq!(cfg.compact_model, "openai/gpt-4o-mini");
-        assert!(cfg.providers.contains_key("openai"));
+        assert!(cfg.model.is_empty());
+        assert!(cfg.compact_model.is_empty());
+        assert!(cfg.providers.is_empty());
+        assert_eq!(cfg.context_window, 0);
+        assert_eq!(model_display(&cfg.model), "None");
         assert_eq!(cfg.agent.compact_threshold, 0.8);
     }
 
@@ -1240,7 +1230,7 @@ mod tests {
         assert_eq!(provider.compat.supports_usage_in_streaming, Some(true));
         assert_eq!(
             provider.compat.max_tokens_field,
-            MaxTokensField::MaxCompletionTokens
+            Some(MaxTokensField::MaxCompletionTokens)
         );
         assert!(provider.compat.requires_tool_result_name);
         assert!(provider.compat.requires_non_null_assistant_content);
@@ -1249,12 +1239,10 @@ mod tests {
     }
 
     #[test]
-    fn default_models_template_parses() {
+    fn default_models_template_is_empty() {
         let file: ModelsFile =
             serde_json::from_str(&default_models_json()).expect("models template parses");
-        let openai = &file.providers["openai"];
-        assert!(openai.models.iter().any(|m| m.id == "gpt-4o"));
-        assert_eq!(openai.api, "openai-completions");
+        assert!(file.providers.is_empty());
     }
 
     #[test]

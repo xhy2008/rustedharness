@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rustedharness_core::agent::Agent;
+use rustedharness_core::config::model_display;
 use rustedharness_core::lsp::{registry, LspHub};
 use rustedharness_core::protocol::HarnessEvent;
 use rustedharness_core::session::SessionStore;
@@ -224,6 +225,11 @@ fn load_config(cli: &Cli) -> Result<Config> {
 }
 
 async fn run_headless(config: Config, cwd: PathBuf, args: RunArgs) -> Result<()> {
+    if args.resume.is_none() && config.model.trim().is_empty() {
+        anyhow::bail!(
+            "no model configured; add a provider/model to models.json and set `model` in config.json"
+        );
+    }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let agent = match &args.resume {
         Some(id) => Agent::resume(config, id, Some(cwd), tx).await?,
@@ -364,7 +370,11 @@ async fn pump(
                 agent_model,
                 ..
             } => {
-                eprintln!("session {session_id} · {agent_model} · {}", cwd);
+                eprintln!(
+                    "session {session_id} · {} · {}",
+                    model_display(&agent_model),
+                    cwd
+                );
             }
             HarnessEvent::UserMessage { .. } => {}
             HarnessEvent::AssistantDelta { text } => {
@@ -617,7 +627,10 @@ fn sessions_command(config: Config, args: SessionsArgs) -> Result<()> {
                     s.id,
                     s.created_at.chars().take(10).collect::<String>(),
                     s.messages,
-                    s.agent_model.chars().take(12).collect::<String>(),
+                    model_display(&s.agent_model)
+                        .chars()
+                        .take(12)
+                        .collect::<String>(),
                     s.cwd
                 );
             }
@@ -626,14 +639,17 @@ fn sessions_command(config: Config, args: SessionsArgs) -> Result<()> {
         SessionsCommand::Show { id } => {
             let loaded = store.load(&id)?;
             if let Some(meta) = &loaded.meta {
-                let compact = if meta.compact_model.is_empty() {
+                let compact = if meta.compact_model.trim().is_empty() {
                     String::new()
                 } else {
-                    format!(" → {}", meta.compact_model)
+                    format!(" → {}", model_display(&meta.compact_model))
                 };
                 println!(
                     "session {} · {} · {}{}",
-                    meta.id, meta.cwd, meta.agent_model, compact
+                    meta.id,
+                    meta.cwd,
+                    model_display(&meta.agent_model),
+                    compact
                 );
             }
             if loaded.truncated_tail {
@@ -687,6 +703,7 @@ fn config_command(config: Config, args: ConfigArgs) -> Result<()> {
             let path = Config::write_default_in(&source_dir)?;
             println!("config: {}", path.display());
             println!("models: {}", source_dir.join("models.json").display());
+            println!("no model configured — add a provider/model to models.json and set `model`");
             Ok(())
         }
         ConfigCommand::Path => {
@@ -704,18 +721,34 @@ fn config_command(config: Config, args: ConfigArgs) -> Result<()> {
             Ok(())
         }
         ConfigCommand::Models => {
-            let default = config.resolve_model(&config.model)?;
-            let compact = config.resolve_model(&config.compact_model)?;
+            let default = config.resolve_model(&config.model).ok();
+            let compact = config.resolve_model(&config.compact_model).ok();
             println!(
                 "default: {}  (compact: {})",
-                default.reference(),
-                compact.reference()
+                default
+                    .as_ref()
+                    .map(|model| model.reference())
+                    .unwrap_or_else(|| "None".to_string()),
+                compact
+                    .as_ref()
+                    .map(|model| model.reference())
+                    .unwrap_or_else(|| "None".to_string())
             );
             println!("     {:<40} {:>9}  NAME", "MODEL", "CONTEXT");
-            for model in config.model_catalog() {
-                let marker = if model.reference() == default.reference() {
+            let catalog = config.model_catalog();
+            if catalog.is_empty() {
+                println!("no models configured — add a provider/model to models.json");
+            }
+            for model in catalog {
+                let marker = if default
+                    .as_ref()
+                    .is_some_and(|default| model.reference() == default.reference())
+                {
                     "*"
-                } else if model.reference() == compact.reference() {
+                } else if compact
+                    .as_ref()
+                    .is_some_and(|compact| model.reference() == compact.reference())
+                {
                     "c"
                 } else {
                     " "
@@ -723,7 +756,11 @@ fn config_command(config: Config, args: ConfigArgs) -> Result<()> {
                 println!(
                     "{marker:<4} {:<40} {:>9}  {}",
                     model.reference(),
-                    model.context_window,
+                    if model.context_window == 0 {
+                        "None".to_string()
+                    } else {
+                        model.context_window.to_string()
+                    },
                     model.name
                 );
             }

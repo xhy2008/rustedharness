@@ -172,19 +172,19 @@ async fn config_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     let provider = agent
         .as_ref()
         .map(|model| model.provider.clone())
-        .unwrap_or_else(|| config.default_provider_id());
+        .or_else(|| config.default_provider_id());
     let agent_model = agent
         .as_ref()
         .map(|model| model.reference())
-        .unwrap_or_else(|| config.model.clone());
-    let compact_model = compact
-        .as_ref()
-        .map(|model| model.reference())
-        .unwrap_or_else(|| config.compact_model.clone());
+        .or_else(|| (!config.model.trim().is_empty()).then(|| config.model.clone()));
+    let compact_model = compact.as_ref().map(|model| model.reference()).or_else(|| {
+        (!config.compact_model.trim().is_empty()).then(|| config.compact_model.clone())
+    });
     let context_window = agent
         .as_ref()
         .map(|model| model.context_window)
-        .unwrap_or(config.context_window);
+        .filter(|value| *value > 0)
+        .or((config.context_window > 0).then_some(config.context_window));
     Json(json!({
         "version": VERSION,
         "cwd": state.cwd.to_string_lossy(),

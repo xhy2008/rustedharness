@@ -104,6 +104,7 @@ impl Compactor {
             temperature: Some(0.0),
             max_tokens: Some(1_500),
             stream: false,
+            model_reasoning: false,
         };
         let completion = backend.complete(request).await?;
         let mut summary = completion.content.trim().to_string();

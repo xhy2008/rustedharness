@@ -35,8 +35,9 @@ excluded from `default-members` so a normal build needs no webview libraries.
 cargo build --release
 export OPENAI_API_KEY=sk-...
 
-# Create ~/.rustedharness/config.json and models.json (optional; defaults work)
+# Create ~/.rustedharness/config.json and models.json
 ./target/release/rustedharness config init
+# Then add a provider/model to models.json and set `model` in config.json.
 
 # One-shot, headless
 ./target/release/rustedharness run "Add a test for the parser and run it"
@@ -80,10 +81,13 @@ and the directory writes its own `.gitignore` (`*`), so it never shows up in
 `git status`. A read-only workspace falls back to an in-memory index.
 
 `rustedharness config init` creates `config.json` and `models.json` without
-overwriting existing files. `config path` prints every path, `config show`
-prints the effective configuration with credentials redacted, `config models`
-lists the resolved model catalog, and `config edit [config|models]` opens the
-file in `$VISUAL`/`$EDITOR` (or the platform default).
+overwriting existing files. There is no built-in provider or model: until one
+is configured, the TUI shows `None`, `run` exits with a configuration prompt,
+and `config models` prints `default: None`. `config path` prints every path,
+`config show` prints the effective configuration with credentials redacted,
+`config models` lists the resolved model catalog, and
+`config edit [config|models]` opens the file in `$VISUAL`/`$EDITOR` (or the
+platform default).
 
 `--config PATH` accepts a `config.json`, a `models.json`, or a directory
 containing both.
@@ -149,10 +153,11 @@ Local endpoints may use a dummy key or omit it.
 Provider fields: `name`, `baseUrl`, `api` (`openai-completions` or
 `openai-responses`), `apiKey`, `headers`, `compat`, and `models`. Pi-style
 JSONC comments and trailing commas are accepted. `$schema` is ignored.
-Model fields: `id`, `name`, `contextWindow` (default 128000), `maxTokens`
+Model fields: `id`, `name`, `contextWindow` (optional), `maxTokens`
 (optional output cap), and `reasoning`. A model entry with an existing id
 replaces it; new entries are appended. A provider with an empty `baseUrl` is
-treated as disabled.
+treated as disabled. When a model omits `contextWindow`, the context limit is
+shown as unavailable instead of being guessed.
 
 `api` selects the wire protocol:
 
@@ -164,15 +169,20 @@ treated as disabled.
   `output_tokens` from `usage`. Reasoning items are not replayed between turns,
   so stateless use does not require server-side response storage.
 
-`compat` uses Pi's field names: `maxTokensField`, `supportsDeveloperRole`,
-`supportsUsageInStreaming`, `requiresToolResultName`,
-`requiresNonNullAssistantContent`, `requiresToolsWithToolHistory`, and
-`requiresReasoningContentOnAssistantMessages`. `maxTokensField` defaults to
-`"max_tokens"`; the optional switches default off and are only emitted when
-`models.json` opts in. `reasoningContent`, `toolChoice`, and
-`parallelToolCalls` are harness extensions, not Pi fields. There is no
-automatic field-degradation retry: if a gateway rejects a field, the provider
-returns the error and the request is not retried.
+`compat` uses Pi's field names and auto-detection: `supportsStore`,
+`supportsDeveloperRole`, `supportsUsageInStreaming`, `supportsFinishReason`,
+`maxTokensField`, `requiresToolResultName`,
+`requiresAssistantAfterToolResult`, `requiresNonNullAssistantContent`,
+`requiresToolsWithToolHistory`, and
+`requiresReasoningContentOnAssistantMessages`. The defaults follow Pi:
+`maxTokensField` is detected from the endpoint, streaming usage defaults on,
+the developer role is used for OpenAI Chat Completions reasoning models (and
+for Responses), and DeepSeek gets empty `reasoning_content` on replayed
+assistant messages. `reasoning_content` is replayed automatically when present.
+`tool_choice` and `parallel_tool_calls` are not emitted from `models.json`;
+Pi only sends them from request options. There is no automatic
+field-degradation retry: if a gateway rejects a field, the provider returns the
+error and the request is not retried.
 
 Pi's advanced model fields (`input`, `inputLimits`, `cost`, `promptCache`,
 `samplingParams`, model-level `api`/`baseUrl`/`headers`/`compat`) and provider
@@ -183,10 +193,7 @@ and model selection loads unchanged.
 
 ```json
 {
-  "model": "openai/gpt-4o",
-  "compactModel": "openai/gpt-4o-mini",
   "anotherModelForCompact": true,
-  "contextWindow": 128000,
   "agent": {
     "maxTurns": 100,
     "compactThreshold": 0.8,
@@ -239,8 +246,10 @@ and model selection loads unchanged.
 whole URL (a mirror), `binary` and `archive` describe an unusual layout.
 
 `model` and `compactModel` may point at different providers; the backend routes
-each request independently. `contextWindow` is the fallback for models that do
-not declare one. `agent.maxOutputTokens` is the fallback when a model has no
+each request independently. Omit `model` to start without one: the TUI shows
+`None` and prompts you to configure a provider; headless `run` exits with the
+same prompt. `contextWindow` is an optional fallback for models that do not
+declare one. `agent.maxOutputTokens` is the fallback when a model has no
 `maxTokens`. Environment variables `RUSTEDHARNESS_MODEL`,
 `RUSTEDHARNESS_COMPACT_MODEL`, and `RUSTEDHARNESS_PROVIDER` override the file.
 

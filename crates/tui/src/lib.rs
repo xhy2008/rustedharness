@@ -81,6 +81,9 @@ pub async fn run(config: Config, cwd: PathBuf, resume: Option<String>) -> Result
     terminal.clear()?;
 
     let mut app = App::new(agent, config);
+    if app.agent_model.trim().is_empty() {
+        app.notice("no model configured — add a provider/model to models.json");
+    }
     let result = event_loop(
         &mut terminal,
         &mut app,

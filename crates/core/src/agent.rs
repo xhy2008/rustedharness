@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::compact::Compactor;
-use crate::config::Config;
+use crate::config::{model_display, Config};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
 use crate::lsp::LspHub;
@@ -59,7 +59,7 @@ impl Agent {
         cwd: PathBuf,
         events: UnboundedSender<HarnessEvent>,
     ) -> Result<Arc<Self>> {
-        let backend: Arc<dyn Backend> = Arc::new(crate::provider::Router::from_config(&config)?);
+        let backend = Self::backend_for(&config)?;
         Self::build(config, cwd, events, backend, None).await
     }
 
@@ -74,7 +74,7 @@ impl Agent {
     }
 
     pub async fn resume(
-        config: Config,
+        mut config: Config,
         session_id: &str,
         cwd_override: Option<PathBuf>,
         events: UnboundedSender<HarnessEvent>,
@@ -85,11 +85,19 @@ impl Agent {
             .meta
             .clone()
             .ok_or_else(|| HarnessError::tool("E_SESSION_CORRUPT", "missing metadata"))?;
+        // A resumed session carries its model in the transcript. Use it when
+        // config.json has none, rather than refusing to resume.
+        if config.model.trim().is_empty() && !meta.agent_model.trim().is_empty() {
+            config.model = meta.agent_model.clone();
+        }
+        if config.compact_model.trim().is_empty() && !meta.compact_model.trim().is_empty() {
+            config.compact_model = meta.compact_model.clone();
+        }
         // Append to the file the session was read from: it may live in a
         // per-project folder and carry pi's `<timestamp>_<id>` name.
         let path = loaded.path.clone();
         let cwd = cwd_override.unwrap_or_else(|| PathBuf::from(&meta.cwd));
-        let backend: Arc<dyn Backend> = Arc::new(crate::provider::Router::from_config(&config)?);
+        let backend = Self::backend_for(&config)?;
         Self::build(
             config,
             cwd,
@@ -98,6 +106,16 @@ impl Agent {
             Some(ResumeData { meta, path, loaded }),
         )
         .await
+    }
+
+    fn backend_for(config: &Config) -> Result<Arc<dyn Backend>> {
+        match crate::provider::Router::from_config(config) {
+            Ok(backend) => Ok(Arc::new(backend)),
+            Err(err) if config.model.trim().is_empty() => Ok(Arc::new(
+                crate::provider::UnconfiguredModel::new(err.to_string()),
+            )),
+            Err(err) => Err(err),
+        }
     }
 
     async fn build(
@@ -198,6 +216,14 @@ impl Agent {
             agent_model: agent.agent_model.read().unwrap().clone(),
             compact_model: agent.compact_model.read().unwrap().clone(),
         });
+        if agent.agent_model.read().unwrap().trim().is_empty() {
+            let _ = events.send(HarnessEvent::Notice {
+                level: "warning".to_string(),
+                message:
+                    "no model configured — add a provider/model to models.json and set `model`"
+                        .to_string(),
+            });
+        }
         Ok(agent)
     }
 
@@ -442,7 +468,7 @@ impl Agent {
 
     fn refresh_system(&self) {
         let model = self.agent_model.read().unwrap().clone();
-        let prompt = system_prompt(&model);
+        let prompt = system_prompt(model_display(&model));
         let mut messages = self.messages.write().unwrap();
         if messages
             .first()
@@ -485,6 +511,18 @@ impl Agent {
     async fn run_turn(self: &Arc<Self>, text: String) -> Result<()> {
         if text.trim().is_empty() {
             return Ok(());
+        }
+        if self.agent_model.read().unwrap().trim().is_empty() {
+            let message =
+                "no model configured — add a provider/model to models.json and set `model`";
+            let _ = self.events.send(HarnessEvent::Error {
+                message: message.to_string(),
+            });
+            let _ = self.events.send(HarnessEvent::TurnComplete {
+                turn: 0,
+                stop_reason: "error".to_string(),
+            });
+            return Err(HarnessError::Config(message.to_string()));
         }
         let token = CancellationToken::new();
         *self.cancel_token.lock().unwrap() = token.clone();
@@ -542,6 +580,11 @@ impl Agent {
                 temperature: self.config.agent.temperature.map(|value| value as f32),
                 max_tokens: Some(self.output_limit()),
                 stream: true,
+                model_reasoning: self
+                    .config
+                    .resolve_model(&self.agent_model.read().unwrap().clone())
+                    .map(|spec| spec.reasoning)
+                    .unwrap_or(false),
             };
 
             let (sink, mut stream_rx) = mpsc::unbounded_channel();
@@ -1006,6 +1049,10 @@ mod tests {
         config.lsp.enabled = false;
         config.mcp.enabled = false;
         config.agent.max_turns = 5;
+        config.agent.auto_compact = false;
+        config.context_window = 100_000;
+        config.model = "test/model".into();
+        config.compact_model = "test/model".into();
         config
     }
 
@@ -1196,6 +1243,26 @@ mod tests {
             "missing retry-limit notice: {notices:?}"
         );
         agent.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_model_is_reported_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.session.dir = Some(dir.path().join("sessions"));
+        config.lsp.enabled = false;
+        config.mcp.enabled = false;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(Fake {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::with_backend(config, dir.path().to_path_buf(), tx, backend.clone())
+            .await
+            .unwrap();
+        let err = agent.send("hello").await.unwrap_err().to_string();
+        agent.shutdown().await;
+        assert!(err.contains("no model configured"), "{err}");
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

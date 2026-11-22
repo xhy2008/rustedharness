@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, Config, MaxTokensField, ProviderConfig};
+use crate::config::{Compat, Config, MaxTokensField, ProviderConfig, ResolvedCompat};
 use crate::error::{HarnessError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -291,6 +291,9 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub stream: bool,
+    /// Whether the routed model is a reasoning model. Pi only uses the
+    /// developer role for reasoning models on Chat Completions.
+    pub model_reasoning: bool,
 }
 
 impl ChatRequest {
@@ -302,6 +305,7 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             stream: true,
+            model_reasoning: false,
         }
     }
 }
@@ -381,6 +385,7 @@ pub trait Backend: Send + Sync {
 pub struct Provider {
     client: Client<OpenAIConfig>,
     compat: Compat,
+    base_url: String,
     name: String,
 }
 
@@ -426,6 +431,7 @@ impl Provider {
         Ok(Self {
             client,
             compat: provider.compat.clone(),
+            base_url: provider.base_url.clone(),
             name: "provider".to_string(),
         })
     }
@@ -435,29 +441,49 @@ impl Provider {
         self
     }
 
+    fn resolved(&self) -> ResolvedCompat {
+        self.compat
+            .resolve("openai-completions", &self.name, &self.base_url)
+    }
+
+    #[cfg(test)]
     fn body(&self, request: &ChatRequest) -> Value {
+        let compat = self.resolved();
+        self.body_with(request, compat)
+    }
+
+    fn body_with(&self, request: &ChatRequest, compat: ResolvedCompat) -> Value {
+        let instruction_role = if request.model_reasoning && compat.supports_developer_role {
+            "developer"
+        } else {
+            "system"
+        };
         let mut messages = Vec::with_capacity(request.messages.len());
-        for (i, message) in request.messages.iter().enumerate() {
+        let mut last_role: Option<Role> = None;
+        for message in &request.messages {
+            if compat.requires_assistant_after_tool_result
+                && last_role == Some(Role::Tool)
+                && message.role == Role::User
+            {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": "I have processed the tool results.",
+                }));
+            }
             let mut out = serde_json::Map::new();
-            let role = if i == 0 && message.role == Role::System {
-                if self.compat.uses_developer_role() {
-                    "developer"
-                } else {
-                    "system"
-                }
-            } else {
-                match message.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                }
+            let role = match message.role {
+                Role::System => instruction_role,
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
             };
             out.insert("role".into(), json!(role));
             if let Some(content) = &message.content {
                 out.insert("content".into(), json!(content));
             } else if message.role == Role::Assistant && message.tool_calls.is_some() {
-                let content = if self.compat.requires_non_null_assistant_content {
+                let content = if compat.requires_assistant_after_tool_result
+                    || compat.requires_non_null_assistant_content
+                {
                     json!("")
                 } else {
                     Value::Null
@@ -465,10 +491,11 @@ impl Provider {
                 out.insert("content".into(), content);
             }
             if let Some(reasoning) = &message.reasoning_content {
-                if self.compat.reasoning_content {
+                if !reasoning.is_empty() {
                     out.insert("reasoning_content".into(), json!(reasoning));
                 }
-            } else if self.compat.requires_reasoning_content_on_assistant_messages
+            } else if compat.requires_reasoning_content_on_assistant_messages
+                && request.model_reasoning
                 && message.role == Role::Assistant
             {
                 out.insert("reasoning_content".into(), json!(""));
@@ -493,32 +520,35 @@ impl Provider {
                 out.insert("tool_call_id".into(), json!(id));
             }
             if let Some(name) = &message.name {
-                if message.role != Role::Tool || self.compat.requires_tool_result_name {
+                if message.role != Role::Tool || compat.requires_tool_result_name {
                     out.insert("name".into(), json!(name));
                 }
             }
             messages.push(Value::Object(out));
+            last_role = Some(message.role);
         }
 
         let mut body = serde_json::Map::new();
         body.insert("model".into(), json!(request.model));
         body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), json!(request.stream));
-        if request.stream && self.compat.uses_stream_usage() {
+        if compat.supports_store {
+            body.insert("store".into(), json!(false));
+        }
+        if request.stream && compat.supports_usage_in_streaming {
             body.insert("stream_options".into(), json!({ "include_usage": true }));
         }
         if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
         if let Some(max_tokens) = request.max_tokens {
-            match self.compat.max_tokens_field {
+            match compat.max_tokens_field {
                 MaxTokensField::MaxTokens => {
                     body.insert("max_tokens".into(), json!(max_tokens));
                 }
                 MaxTokensField::MaxCompletionTokens => {
                     body.insert("max_completion_tokens".into(), json!(max_tokens));
                 }
-                MaxTokensField::Omit => {}
             }
         }
         if !request.tools.is_empty() {
@@ -537,13 +567,7 @@ impl Provider {
                 })
                 .collect();
             body.insert("tools".into(), Value::Array(tools));
-            if self.compat.tool_choice {
-                body.insert("tool_choice".into(), json!("auto"));
-            }
-            if self.compat.parallel_tool_calls {
-                body.insert("parallel_tool_calls".into(), json!(true));
-            }
-        } else if self.compat.requires_tools_with_tool_history
+        } else if compat.requires_tools_with_tool_history
             && request
                 .messages
                 .iter()
@@ -552,6 +576,32 @@ impl Provider {
             body.insert("tools".into(), Value::Array(Vec::new()));
         }
         Value::Object(body)
+    }
+}
+
+/// Stand-in backend for a workspace that has no model yet. The UI still
+/// starts and shows `None`; the first turn reports a configuration error.
+pub struct UnconfiguredModel {
+    message: String,
+}
+
+impl UnconfiguredModel {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Backend for UnconfiguredModel {
+    async fn stream_chat(
+        &self,
+        _request: ChatRequest,
+        _sink: Option<UnboundedSender<StreamEvent>>,
+        _cancel: CancellationToken,
+    ) -> Result<Completion> {
+        Err(HarnessError::Config(self.message.clone()))
     }
 }
 
@@ -569,6 +619,12 @@ pub struct Router {
 
 impl Router {
     pub fn from_config(config: &Config) -> Result<Self> {
+        if config.model.trim().is_empty() {
+            return Err(HarnessError::Config(
+                "no model configured; set `model` in config.json or add a model to models.json"
+                    .to_string(),
+            ));
+        }
         let mut providers: BTreeMap<String, Arc<dyn Backend>> = BTreeMap::new();
         let mut unusable = BTreeMap::new();
         for (id, provider) in &config.providers {
@@ -617,7 +673,13 @@ impl Router {
         let default_provider = config
             .resolve_model(&config.model)
             .map(|model| model.provider)
-            .unwrap_or_else(|_| config.default_provider_id());
+            .or_else(|_| {
+                config.default_provider_id().ok_or_else(|| {
+                    HarnessError::Config(
+                        "no provider configured for the selected model".to_string(),
+                    )
+                })
+            })?;
         if !providers.contains_key(&default_provider) {
             let reason = unusable
                 .get(&default_provider)
@@ -661,6 +723,11 @@ impl Backend for Router {
                 .unwrap_or_else(|| format!("provider `{provider_id}` is not configured"));
             HarnessError::Config(format!("cannot use model `{}`: {reason}", request.model))
         })?;
+        request.model_reasoning = self
+            .config
+            .resolve_model(&request.model)
+            .map(|spec| spec.reasoning)
+            .unwrap_or(false);
         request.model = model_id;
         provider.stream_chat(request, sink, cancel).await
     }
@@ -868,7 +935,8 @@ impl Provider {
         sink: Option<&UnboundedSender<StreamEvent>>,
         cancel: &CancellationToken,
     ) -> Result<Completion> {
-        let body = self.body(request);
+        let compat = self.resolved();
+        let body = self.body_with(request, compat);
         let chat = self.client.chat();
         if request.stream {
             // Guard the request itself with cancellation: the client awaits the
@@ -951,6 +1019,16 @@ impl Provider {
                     function: FunctionCall { name, arguments },
                 })
                 .collect();
+            if completion.finish_reason.is_none() {
+                if compat.supports_finish_reason {
+                    return Err(self.provider_error("stream ended without finish_reason"));
+                }
+                completion.finish_reason = Some(if completion.tool_calls.is_empty() {
+                    "stop".to_string()
+                } else {
+                    "tool_calls".to_string()
+                });
+            }
             return Ok(completion);
         }
 
@@ -1178,10 +1256,11 @@ mod tests {
     }
 
     #[test]
-    fn optional_compat_fields_are_off_by_default() {
+    fn pi_defaults_shape_the_body() {
         let p = provider();
         let mut request = ChatRequest::new("m", vec![ChatMessage::user("x")]);
         request.stream = true;
+        request.max_tokens = Some(10);
         request.tools = vec![ToolDefinition {
             name: "read".into(),
             description: "d".into(),
@@ -1190,7 +1269,9 @@ mod tests {
         let body = p.body(&request);
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
-        assert!(body.get("stream_options").is_none());
+        assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+        assert_eq!(body["store"], false);
+        assert_eq!(body["max_completion_tokens"], 10);
     }
 
     #[test]
@@ -1201,7 +1282,7 @@ mod tests {
         p.compat.requires_tool_result_name = true;
         p.compat.requires_non_null_assistant_content = true;
         p.compat.requires_tools_with_tool_history = true;
-        p.compat.requires_reasoning_content_on_assistant_messages = true;
+        p.compat.requires_reasoning_content_on_assistant_messages = Some(true);
 
         let mut tool = ChatMessage::tool("call_1", "result");
         tool.name = Some("read".into());
@@ -1223,6 +1304,8 @@ mod tests {
                 tool,
             ],
         );
+        let mut request = request;
+        request.model_reasoning = true;
         let body = p.body(&request);
         assert_eq!(body["messages"][0]["role"], "developer");
         assert_eq!(body["messages"][1]["content"], "");
@@ -1234,14 +1317,13 @@ mod tests {
     #[test]
     fn body_honours_compat_switches() {
         let mut p = provider();
-        p.compat.max_tokens_field = MaxTokensField::MaxCompletionTokens;
+        p.compat.max_tokens_field = Some(MaxTokensField::MaxCompletionTokens);
         p.compat.supports_developer_role = Some(true);
-        p.compat.reasoning_content = true;
-        p.compat.tool_choice = true;
         let mut request = ChatRequest::new(
             "m",
             vec![ChatMessage::system("sys"), ChatMessage::user("hi")],
         );
+        request.model_reasoning = true;
         request.max_tokens = Some(10);
         request.tools = vec![ToolDefinition {
             name: "read".into(),
@@ -1252,19 +1334,98 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "developer");
         assert_eq!(body["max_completion_tokens"], 10);
         assert!(body.get("max_tokens").is_none());
-        assert_eq!(body["tool_choice"], "auto");
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    fn provider_at(base_url: &str, name: &str) -> Provider {
+        let config = ProviderConfig {
+            base_url: base_url.into(),
+            ..Default::default()
+        };
+        Provider::from_provider(&config, String::new())
+            .unwrap()
+            .with_name(name)
     }
 
     #[test]
-    fn reasoning_content_is_round_tripped_only_when_enabled() {
+    fn auto_detection_matches_pi_defaults() {
+        let openai = provider_at("https://api.openai.com/v1", "openai");
+        let mut request = ChatRequest::new("m", vec![ChatMessage::system("sys")]);
+        request.stream = true;
+        request.max_tokens = Some(10);
+        request.model_reasoning = true;
+        let body = openai.body(&request);
+        assert_eq!(body["messages"][0]["role"], "developer");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream_options"], json!({ "include_usage": true }));
+        assert_eq!(body["max_completion_tokens"], 10);
+
+        request.model_reasoning = false;
+        let body = openai.body(&request);
+        assert_eq!(body["messages"][0]["role"], "system");
+
+        let deepseek = provider_at("https://api.deepseek.com/v1", "deepseek");
+        let mut request = ChatRequest::new(
+            "m",
+            vec![ChatMessage::assistant_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+            )],
+        );
+        request.stream = true;
+        request.max_tokens = Some(10);
+        request.model_reasoning = true;
+        let body = deepseek.body(&request);
+        assert_eq!(body["messages"][0]["reasoning_content"], "");
+        assert!(body.get("store").is_none());
+        assert_eq!(body["max_tokens"], 10);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn tool_results_can_be_bridged_for_a_following_user_message() {
         let mut p = provider();
+        p.compat.requires_assistant_after_tool_result = true;
+        let request = ChatRequest::new(
+            "m",
+            vec![
+                ChatMessage::assistant_tool_calls(
+                    None,
+                    vec![ToolCall {
+                        id: "call_1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                    }],
+                ),
+                ChatMessage::tool("call_1", "result"),
+                ChatMessage::user("next"),
+            ],
+        );
+        let body = p.body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "I have processed the tool results.");
+        assert_eq!(messages[3]["role"], "user");
+    }
+
+    #[test]
+    fn reasoning_content_is_replayed_automatically() {
+        let p = provider();
         let mut assistant = ChatMessage::assistant("x");
         assistant.reasoning_content = Some("why".into());
-        let request = ChatRequest::new("m", vec![assistant]);
-        assert!(p.body(&request)["messages"][0]
-            .get("reasoning_content")
-            .is_none());
-        p.compat.reasoning_content = true;
+        let mut request = ChatRequest::new("m", vec![assistant]);
+        request.model_reasoning = true;
         assert_eq!(p.body(&request)["messages"][0]["reasoning_content"], "why");
     }
 

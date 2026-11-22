@@ -50,12 +50,14 @@ client, code index, and process registry.
 
 ### Configuration
 
-`config.rs` merges `~/.rustedharness/config.json` (settings and default model)
+`config.rs` merges `~/.rustedharness/config.json` (settings and model choice)
 with `~/.rustedharness/models.json` (Pi-style providers and model lists). The
-directory can be moved with `RUSTEDHARNESS_DIR`. Model references are
-`provider/model` or a bare unique id, and each model carries its own context
-window and optional output cap. API keys and header values support literals,
-`$ENV`/`${ENV}` interpolation, and `!command`.
+directory can be moved with `RUSTEDHARNESS_DIR`. There is no built-in provider
+or default model: an unset choice stays empty, displays as `None`, and the TUI
+prompts for configuration; headless runs fail before the first turn. Model
+references are `provider/model` or a bare unique id, and each model carries its
+own optional context window and output cap. API keys and header values support
+literals, `$ENV`/`${ENV}` interpolation, and `!command`.
 
 ### Provider compatibility
 
@@ -65,12 +67,12 @@ window and optional output cap. API keys and header values support literals,
 `instructions` and flat function tools, and folding `response.*` SSE events
 back into the same `Completion`. A `Router` selects the provider that owns each
 request's model, so the agent and compaction models can use different endpoints
-and different protocols in one session. `Compat` controls `max_tokens` vs
-`max_completion_tokens`, `system` vs `developer`, `reasoning_content`,
-`supportsDeveloperRole`, `supportsUsageInStreaming`, and the Pi compatibility
-flags for tool result names and assistant content. Optional switches default
-off and must be enabled in `models.json`; the provider never retries a rejected
-request with fields removed.
+and different protocols in one session. `Compat` resolves Pi's defaults from the endpoint: `max_tokens` vs
+`max_completion_tokens`, `system` vs `developer`, streaming usage,
+`finish_reason`, `store`, tool-result names, assistant content, and DeepSeek's
+empty `reasoning_content`. `reasoning_content` is replayed automatically when
+present; `tool_choice`/`parallel_tool_calls` are left to request options. The
+provider never retries a rejected request with fields removed.
 
 ### Path anchoring
 

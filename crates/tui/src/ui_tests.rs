@@ -245,6 +245,18 @@ fn row_text(json: &str, row: usize) -> String {
 }
 
 #[test]
+fn an_unconfigured_model_renders_none() {
+    let mut app = demo_app();
+    app.agent_model.clear();
+    app.compact_model.clear();
+    app.context_limit = 0;
+    let json = dump(&mut app, 120, 20);
+    let footer = row_text(&json, 19);
+    assert!(footer.contains("None"), "{footer}");
+    assert!(footer.contains("ctx None"), "{footer}");
+}
+
+#[test]
 fn the_status_line_reports_the_language_server() {
     let mut app = demo_app();
     let json = dump(&mut app, 120, 20);

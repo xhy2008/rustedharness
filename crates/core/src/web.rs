@@ -450,6 +450,7 @@ async fn extract_with_compact(
         temperature: Some(0.0),
         max_tokens: Some(1_500),
         stream: false,
+        model_reasoning: false,
     };
     let completion = backend.complete(request).await?;
     Ok(completion.content)

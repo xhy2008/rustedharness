@@ -727,7 +727,11 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
     } else {
         GREEN
     };
-    let ctx_str = format!("ctx {:.1}%/{}", ctx_pct, human_count(app.context_limit));
+    let ctx_str = if app.context_limit == 0 {
+        "ctx None".to_string()
+    } else {
+        format!("ctx {:.1}%/{}", ctx_pct, human_count(app.context_limit))
+    };
 
     let lsp = app.lsp_summary();
 
@@ -756,12 +760,21 @@ fn footer_line(app: &App, width: usize) -> Line<'static> {
             }
             spans.push(Span::styled(shorten_path(&app.cwd, cwd), style(MUTED)));
             spans.push(Span::styled("|", style(FAINT)));
-            spans.push(Span::styled(app.agent_model.clone(), style(BLUE)));
+            spans.push(Span::styled(
+                rustedharness_core::config::model_display(&app.agent_model).to_string(),
+                style(BLUE),
+            ));
             // Only worth a column when compaction runs on a different model.
-            if compact && app.compact_model != app.agent_model {
+            if compact
+                && !app.compact_model.trim().is_empty()
+                && app.compact_model != app.agent_model
+            {
                 spans.push(Span::styled("|", style(FAINT)));
                 spans.push(Span::styled(
-                    format!("compact {}", app.compact_model),
+                    format!(
+                        "compact {}",
+                        rustedharness_core::config::model_display(&app.compact_model)
+                    ),
                     style(DIM),
                 ));
             }
@@ -1034,7 +1047,10 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             let item = PickerItem {
                 label: "another model for compact".to_string(),
                 detail: if app.another_model_for_compact {
-                    format!("on - summaries use {}", app.compact_model)
+                    format!(
+                        "on - summaries use {}",
+                        rustedharness_core::config::model_display(&app.compact_model)
+                    )
                 } else {
                     "off - summaries use the main model".to_string()
                 },

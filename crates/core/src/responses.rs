@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, ProviderConfig};
+use crate::config::{Compat, ProviderConfig, ResolvedCompat};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
     Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall, Usage,
@@ -28,6 +28,7 @@ pub struct ResponsesProvider {
     api_key: String,
     headers: BTreeMap<String, String>,
     compat: Compat,
+    base_url: String,
     name: String,
 }
 
@@ -56,6 +57,7 @@ impl ResponsesProvider {
             api_key,
             headers: provider.resolved_headers(),
             compat: provider.compat.clone(),
+            base_url: provider.base_url.clone(),
             name: "provider".to_string(),
         })
     }
@@ -65,7 +67,13 @@ impl ResponsesProvider {
         self
     }
 
+    fn resolved(&self) -> ResolvedCompat {
+        self.compat
+            .resolve("openai-responses", &self.name, &self.base_url)
+    }
+
     fn body(&self, request: &ChatRequest) -> Value {
+        let compat = self.resolved();
         let mut instructions: Option<String> = None;
         let mut input: Vec<Value> = Vec::with_capacity(request.messages.len());
 
@@ -76,7 +84,7 @@ impl ResponsesProvider {
                     if index == 0 && !content.is_empty() {
                         instructions = Some(content);
                     } else if !content.is_empty() {
-                        let role = if self.compat.uses_developer_role() {
+                        let role = if compat.supports_developer_role {
                             "developer"
                         } else {
                             "system"
@@ -152,12 +160,6 @@ impl ResponsesProvider {
                 })
                 .collect();
             body.insert("tools".into(), Value::Array(tools));
-            if self.compat.tool_choice {
-                body.insert("tool_choice".into(), json!("auto"));
-            }
-            if self.compat.parallel_tool_calls {
-                body.insert("parallel_tool_calls".into(), json!(true));
-            }
         }
         Value::Object(body)
     }
@@ -615,6 +617,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(100),
             stream: true,
+            model_reasoning: false,
         };
 
         let body = provider.body(&request);
@@ -645,13 +648,6 @@ mod tests {
         assert!(body["tools"][0].get("function").is_none());
         assert!(body.get("tool_choice").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
-
-        let mut opted_in = provider.clone();
-        opted_in.compat.tool_choice = true;
-        opted_in.compat.parallel_tool_calls = true;
-        let body = opted_in.body(&request);
-        assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["parallel_tool_calls"], true);
     }
 
     #[test]

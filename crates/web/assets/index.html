@@ -1511,8 +1511,8 @@ try {
 
   /* ---------------- session chrome ---------------- */
   function updateModelChips() {
-    const model = state.agentModel || (state.config && state.config.agent_model) || '—';
-    const compact = state.compactModel || (state.config && state.config.compact_model) || '—';
+    const model = state.agentModel || (state.config && state.config.agent_model) || 'None';
+    const compact = state.compactModel || (state.config && state.config.compact_model) || 'None';
     $('modelChipValue').textContent = model;
     $('modelChip').title = '切换 agent 模型：' + model;
     $('compactChipValue').textContent = compact;
@@ -2082,7 +2082,7 @@ try {
     const avatar = el('span', 'agent-avatar');
     avatar.append(icon('spark'));
     head.append(avatar, el('span', null, 'Agent'));
-    const tag = el('span', 'model-tag', state.agentModel || 'agent');
+    const tag = el('span', 'model-tag', state.agentModel || 'None');
     tag.title = state.agentModel || '';
     head.append(tag);
     if (live) head.append(el('span', 'live-dot'));
@@ -2496,8 +2496,8 @@ try {
     addKv(kv, '连接', isConnected() ? '已连接' : '未连接');
     addKv(kv, '会话', state.sessionId || '—');
     addKv(kv, '工作区', state.cwd || '—');
-    addKv(kv, 'Agent', state.agentModel || '—');
-    addKv(kv, 'Compact', state.compactModel || '—');
+    addKv(kv, 'Agent', state.agentModel || 'None');
+    addKv(kv, 'Compact', state.compactModel || 'None');
     addKv(kv, '上下文', state.contextLimit
       ? fmtTokens(state.contextTokens) + ' / ' + fmtTokens(state.contextLimit)
       : '—');
@@ -3534,7 +3534,7 @@ try {
       }
       const model = text.slice(6).trim();
       if (!model) {
-        addNote('当前 agent 模型：' + (state.agentModel || '—'), 'brand');
+        addNote('当前 agent 模型：' + (state.agentModel || 'None'), 'brand');
         inputEl.value = '';
         resizeInput();
         return;
