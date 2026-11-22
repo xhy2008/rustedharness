@@ -12,7 +12,7 @@ use rustedharness_core::provider::{Backend, ChatRequest, Completion, StreamEvent
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{App, Overlay, PickerItem};
+use crate::app::{App, Overlay, PickerItem, SettingsPage};
 use crate::entries::{Entry, EntryKind};
 
 struct Stub;
@@ -369,6 +369,25 @@ fn streaming_blocks_open_themselves_and_fold_on_completion() {
         metadata: None,
     });
     assert!(!app.entries[tool].expanded, "a finished tool folds");
+}
+
+#[test]
+fn compaction_settings_explain_the_disabled_strip_option() {
+    let mut app = demo_app();
+    app.compact_is_separate = false;
+    app.compact_model = app.agent_model.clone();
+    app.overlay = Overlay::Settings {
+        page: SettingsPage::Compaction,
+        sel: 3,
+    };
+    let json = dump(&mut app, 140, 30);
+    let screen: String = (0..30)
+        .map(|row| row_text(&json, row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("strip old context"), "{screen}");
+    assert!(screen.contains("disabled"), "{screen}");
+    assert!(screen.contains("complete live history"), "{screen}");
 }
 
 /// With compaction on the main model there is no second column to show.
@@ -902,6 +921,7 @@ fn narrowing_a_picker_filter_keeps_the_overlay_identity() {
         label: label.into(),
         detail: String::new(),
         value: label.into(),
+        disabled: false,
     };
     app.overlay = Overlay::Slash {
         prefix: String::new(),

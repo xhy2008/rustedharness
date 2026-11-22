@@ -962,7 +962,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             } else {
                 "servers"
             };
-            draw_picker(frame, body, title, items, *sel, "")
+            draw_picker(frame, body, title, items, *sel, "", None)
         }
         Overlay::Model {
             items,
@@ -977,14 +977,14 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 crate::app::ModelTarget::Agent => "model",
                 crate::app::ModelTarget::Compact => "compact model",
             };
-            draw_picker(frame, body, title, &shown, *sel, filter);
+            draw_picker(frame, body, title, &shown, *sel, filter, None);
         }
         Overlay::Session { items, sel, filter } => {
             let shown: Vec<PickerItem> = session_filtered(items, filter)
                 .into_iter()
                 .cloned()
                 .collect();
-            draw_picker(frame, body, "sessions", &shown, *sel, filter);
+            draw_picker(frame, body, "sessions", &shown, *sel, filter, None);
         }
         Overlay::FileBrowser { rel, entries, sel } => {
             let title = if rel.is_empty() {
@@ -1050,7 +1050,8 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 crate::app::SettingsPage::Compaction => "settings / compaction",
             };
             let items = app.settings_items();
-            draw_picker(frame, body, title, &items, *sel, "");
+            let help = app.settings_description();
+            draw_picker(frame, body, title, &items, *sel, "", Some(&help));
         }
         Overlay::Hotkeys => {
             let lines = vec![
@@ -1289,9 +1290,19 @@ fn draw_picker(
     items: &[PickerItem],
     sel: usize,
     filter: &str,
+    help: Option<&str>,
 ) {
-    let window = items.len().min(12);
-    let height = window as u16 + if items.len() > window { 2 } else { 1 } + 1;
+    let help_lines = help
+        .map(|text| wrap_plain(text, body.width.saturating_sub(6) as usize))
+        .unwrap_or_default();
+    let help_height = if help_lines.is_empty() {
+        0
+    } else {
+        help_lines.len() as u16 + 1
+    };
+    let max_window = body.height.saturating_sub(help_height + 3).max(1) as usize;
+    let window = items.len().min(12).min(max_window);
+    let height = window as u16 + if items.len() > window { 2 } else { 1 } + 1 + help_height;
     let mut heading = vec![
         Span::styled(" ", style(FAINT)),
         Span::styled(title.to_string(), style(MUTED)),
@@ -1327,7 +1338,8 @@ fn draw_picker(
     }
 
     let width = inner.width as usize;
-    let start = sel.saturating_sub(inner.height as usize / 2);
+    let list_height = inner.height.saturating_sub(help_height) as usize;
+    let start = sel.saturating_sub(list_height / 2);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if items.is_empty() {
         lines.push(Line::from(Span::styled("no matches", style(FAINT))));
@@ -1338,14 +1350,11 @@ fn draw_picker(
         .max()
         .unwrap_or(0);
     let label_col = (longest + 2).clamp(10, (width * 2 / 5).max(12));
-    for (index, item) in items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(inner.height as usize)
-    {
+    for (index, item) in items.iter().enumerate().skip(start).take(list_height) {
         let selected = index == sel;
-        let row_style = if selected {
+        let row_style = if item.disabled {
+            style(FAINT)
+        } else if selected {
             Style::default().fg(TEXT).bg(SELECTED_BG)
         } else {
             Style::default().fg(MUTED)
@@ -1353,7 +1362,7 @@ fn draw_picker(
         let mut spans = vec![
             Span::styled(
                 if selected { "> " } else { "  " },
-                if selected {
+                if selected && !item.disabled {
                     style(ACCENT).bg(SELECTED_BG)
                 } else {
                     style(FAINT)
@@ -1369,7 +1378,7 @@ fn draw_picker(
             if room > 4 {
                 spans.push(Span::styled(
                     format!("  {}", clip(&sanitize(&item.detail), room)),
-                    if selected {
+                    if selected && !item.disabled {
                         style(MUTED).bg(SELECTED_BG)
                     } else {
                         style(FAINT)
@@ -1378,11 +1387,40 @@ fn draw_picker(
             }
         }
         let line = Line::from(spans);
-        lines.push(if selected {
+        lines.push(if selected && !item.disabled {
             fill(line, width, SELECTED_BG)
         } else {
             line
         });
     }
+    if !help_lines.is_empty() {
+        lines.push(Line::from(""));
+        for line in help_lines {
+            lines.push(Line::from(Span::styled(line, style(FAINT))));
+        }
+    }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let current_len = current.chars().count();
+        if !current.is_empty() && current_len + 1 + word_len > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }

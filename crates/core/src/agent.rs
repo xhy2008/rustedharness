@@ -297,16 +297,6 @@ impl Agent {
         *self.compaction.read().unwrap()
     }
 
-    /// Update one compaction option and persist it under `agent`.
-    pub fn set_auto_compact(&self, on: bool) -> Result<()> {
-        let mut settings = self.compaction_settings();
-        settings.auto_compact = on;
-        self.config
-            .save_setting(&["agent", "autoCompact"], json!(on))?;
-        *self.compaction.write().unwrap() = settings;
-        Ok(())
-    }
-
     pub fn set_compact_threshold(&self, threshold: f64) -> Result<()> {
         let threshold = threshold.clamp(0.1, 0.99);
         let mut settings = self.compaction_settings();
@@ -908,9 +898,6 @@ impl Agent {
         tools: &[crate::provider::ToolDefinition],
     ) -> Result<()> {
         let settings = self.compaction_settings();
-        if !settings.auto_compact {
-            return Ok(());
-        }
         let compactor = Compactor::new(settings, self.context_limit(), self.usage.clone());
         let messages = self.messages.read().unwrap().clone();
         if !compactor.needs_compaction() {
@@ -1103,7 +1090,6 @@ mod tests {
         config.lsp.enabled = false;
         config.mcp.enabled = false;
         config.agent.max_turns = 5;
-        config.agent.auto_compact = false;
         config.context_window = 100_000;
         config.model = "test/model".into();
         config.compact_model = "test/model".into();

@@ -207,7 +207,6 @@ and model selection loads unchanged.
     "maxTurns": 100,
     "compactThreshold": 0.8,
     "keepRecentTurns": 8,
-    "autoCompact": true,
     "compactStripContext": true,
     "temperature": 0.2,
     "chaseLimit": 3,
@@ -280,11 +279,11 @@ appended to the tool result.
   `compactModel` is unset (the default), compaction uses the main model and
   sends the live system prompt, tool catalog and old messages unchanged, so
   the provider can serve the whole prefix from prompt cache. A separate model
-  starts cold, so `agent.compactStripContext` can omit old tool output and
-  reasoning from the transcript before summarising. `/settings` opens a
-  compaction submenu for the model, auto-compaction, threshold, recent-turn
-  count and this stripping option; changes apply immediately and are written
-  to `config.json`.
+  starts cold, so `agent.compactStripContext` can omit tool calls, tool results
+  and reasoning older than the last `2 * keepRecentTurns` user turns; recent
+  turns keep them. `/settings` opens a compaction submenu for the model,
+  threshold, recent-turn count and this stripping option. Auto-compaction is
+  always on. Changes apply immediately and are written to `config.json`.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).

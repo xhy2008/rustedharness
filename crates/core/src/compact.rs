@@ -125,8 +125,14 @@ impl Compactor {
                     .iter()
                     .take_while(|message| message.role == Role::System)
                     .count();
+                let elide_before = if self.strip_context {
+                    recent_turn_start(messages, self.keep_recent_turns.saturating_mul(2))
+                        .saturating_sub(system_end)
+                } else {
+                    0
+                };
                 let transcript =
-                    render_transcript(&messages[system_end..plan.keep_from], self.strip_context);
+                    render_transcript(&messages[system_end..plan.keep_from], elide_before);
                 (
                     vec![
                         ChatMessage::system(SUMMARY_SYSTEM),
@@ -176,22 +182,42 @@ impl Compactor {
     }
 }
 
-fn render_transcript(messages: &[ChatMessage], strip_context: bool) -> String {
+/// Index of the first message in the most recent `turns` user turns.
+fn recent_turn_start(messages: &[ChatMessage], turns: usize) -> usize {
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == Role::User)
+        .map(|(index, _)| index)
+        .collect();
+    if user_indices.len() > turns {
+        user_indices[user_indices.len() - turns]
+    } else {
+        0
+    }
+}
+
+/// Render the dropped prefix for a separate summary model. Tool calls, tool
+/// results and reasoning before `elide_before` are omitted; the prose stays so
+/// the summary still knows what happened without paying to re-read old machine
+/// output.
+fn render_transcript(messages: &[ChatMessage], elide_before: usize) -> String {
     let mut out = String::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         let role = match message.role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        if message.role == Role::Tool && strip_context {
+        let elide = index < elide_before;
+        if message.role == Role::Tool && elide {
             let id = message.tool_call_id.as_deref().unwrap_or("unknown");
             out.push_str(&format!("[tool_result {id}] (output omitted)\n"));
             continue;
         }
         if let Some(reasoning) = &message.reasoning_content {
-            if !strip_context && !reasoning.is_empty() {
+            if !elide && !reasoning.is_empty() {
                 out.push_str(&format!("[reasoning] {reasoning}\n"));
             }
         }
@@ -199,11 +225,13 @@ fn render_transcript(messages: &[ChatMessage], strip_context: bool) -> String {
             out.push_str(&format!("[{role}] {content}\n"));
         }
         if let Some(calls) = &message.tool_calls {
-            for call in calls {
-                out.push_str(&format!(
-                    "[tool_call {}] {} {}\n",
-                    call.id, call.function.name, call.function.arguments
-                ));
+            if !elide {
+                for call in calls {
+                    out.push_str(&format!(
+                        "[tool_call {}] {} {}\n",
+                        call.id, call.function.name, call.function.arguments
+                    ));
+                }
             }
         }
         if let Some(id) = &message.tool_call_id {
@@ -384,20 +412,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_separate_model_can_drop_tool_output_and_reasoning() {
+    async fn a_separate_model_drops_old_tool_output_but_keeps_recent_turns() {
         let fake = Fake::default();
-        let mut msgs = conv(3);
-        msgs.push(ChatMessage::assistant("answer"));
+        let mut msgs = vec![ChatMessage::system("SYS")];
+        msgs.push(ChatMessage::user("u0"));
+        msgs.push(ChatMessage::assistant("a0"));
+        msgs.push(ChatMessage::assistant("old answer"));
         if let Some(last) = msgs.last_mut() {
             last.reasoning_content = Some("hidden chain".into());
         }
-        msgs.push(ChatMessage::tool("c1", "very long tool output"));
+        msgs.push(ChatMessage::tool("c1", "very long old tool output"));
+        msgs.push(ChatMessage::user("u1"));
+        msgs.push(ChatMessage::assistant("a1"));
+        msgs.push(ChatMessage::user("u2"));
+        msgs.push(ChatMessage::assistant("a2"));
+        msgs.push(ChatMessage::assistant_tool_calls(
+            None,
+            vec![crate::provider::ToolCall {
+                id: "c2".into(),
+                kind: "function".into(),
+                function: crate::provider::FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+        ));
+        msgs.push(ChatMessage::tool("c2", "recent tool output"));
         msgs.push(ChatMessage::user("u3"));
         msgs.push(ChatMessage::assistant("a3"));
         msgs.push(ChatMessage::user("last"));
         msgs.push(ChatMessage::assistant("done"));
-        let plan = compactor().plan(&msgs).unwrap();
-        compactor()
+        let compact = compactor();
+        let plan = compact.plan(&msgs).unwrap();
+        compact
             .summarize(
                 &fake,
                 "compact-model",
@@ -410,9 +457,11 @@ mod tests {
             .unwrap();
         let request = fake.request();
         let transcript = request.messages[1].content.as_deref().unwrap();
-        assert!(!transcript.contains("very long tool output"));
+        assert!(!transcript.contains("very long old tool output"));
         assert!(transcript.contains("output omitted"));
         assert!(!transcript.contains("hidden chain"));
+        assert!(transcript.contains("recent tool output"));
+        assert!(transcript.contains("[tool_call c2] read"));
     }
 
     #[test]

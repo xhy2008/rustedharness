@@ -58,6 +58,8 @@ pub struct PickerItem {
     pub label: String,
     pub detail: String,
     pub value: String,
+    /// Dimmed and inert: the selected mode makes this option meaningless.
+    pub disabled: bool,
 }
 
 pub enum Overlay {
@@ -261,6 +263,7 @@ fn filtered_commands(text: &str) -> Vec<PickerItem> {
             label: cmd.to_string(),
             detail: help.to_string(),
             value: cmd.to_string(),
+            disabled: false,
         })
         .collect()
 }
@@ -1434,6 +1437,7 @@ impl App {
                     label: spec.id.to_string(),
                     detail: format!("{} | {state}", spec.display),
                     value: spec.id.to_string(),
+                    disabled: false,
                 }
             })
             .collect()
@@ -1539,20 +1543,12 @@ impl App {
                     };
                     match value.as_str() {
                         "model" => self.open_model_picker(ModelTarget::Compact, true),
-                        "auto" => {
-                            let on = !self.compaction.auto_compact;
-                            match self.agent.set_auto_compact(on) {
-                                Ok(()) => {
-                                    self.compaction = self.agent.compaction_settings();
-                                    self.notice(format!(
-                                        "auto compaction: {}",
-                                        if on { "on" } else { "off" }
-                                    ));
-                                }
-                                Err(err) => self.push(EntryKind::Error, "", err.to_string()),
-                            }
-                        }
                         "threshold" | "keep" => self.adjust_setting(true),
+                        "strip" if !self.compact_is_separate => {
+                            self.notice(
+                                "strip is disabled while compaction uses the main model: the full history is required for cache hits",
+                            );
+                        }
                         "strip" => {
                             let on = !self.compaction.compact_strip_context;
                             match self.agent.set_compact_strip_context(on) {
@@ -1730,6 +1726,7 @@ impl App {
                 label: spec.reference(),
                 detail: format!("{} | ctx {}", spec.name, human_count(spec.context_window)),
                 value: spec.reference(),
+                disabled: false,
             })
             .collect();
         if items.is_empty() {
@@ -1741,11 +1738,9 @@ impl App {
                 0,
                 PickerItem {
                     label: "None (main model)".to_string(),
-                    detail: format!(
-                        "reuse {} and its cached prompt",
-                        rustedharness_core::config::model_display(&self.agent_model)
-                    ),
+                    detail: "use the main model and its cached prompt".to_string(),
                     value: String::new(),
+                    disabled: false,
                 },
             );
         }
@@ -1780,67 +1775,94 @@ impl App {
             SettingsPage::Root => vec![PickerItem {
                 label: "compaction".to_string(),
                 detail: format!(
-                    "model {} | auto {} | {:.0}% | keep {}",
+                    "model {} | {:.0}% threshold | keep {}",
                     if self.compact_is_separate {
                         rustedharness_core::config::model_display(&self.compact_model).to_string()
                     } else {
                         "None (main model)".to_string()
                     },
-                    if self.compaction.auto_compact {
-                        "on"
-                    } else {
-                        "off"
-                    },
                     self.compaction.compact_threshold * 100.0,
                     self.compaction.keep_recent_turns
                 ),
                 value: "compaction".to_string(),
+                disabled: false,
             }],
             SettingsPage::Compaction => vec![
                 PickerItem {
                     label: "model".to_string(),
                     detail: if self.compact_is_separate {
-                        rustedharness_core::config::model_display(&self.compact_model).to_string()
+                        format!(
+                            "{} (separate)",
+                            rustedharness_core::config::model_display(&self.compact_model)
+                        )
                     } else {
-                        "None - reuse the main model and its cached prompt".to_string()
+                        "None - reuse the main model's cached prompt".to_string()
                     },
                     value: "model".to_string(),
-                },
-                PickerItem {
-                    label: "auto compact".to_string(),
-                    detail: if self.compaction.auto_compact {
-                        "on".to_string()
-                    } else {
-                        "off".to_string()
-                    },
-                    value: "auto".to_string(),
+                    disabled: false,
                 },
                 PickerItem {
                     label: "threshold".to_string(),
                     detail: format!(
-                        "{:.0}% of the context window (left/right)",
+                        "{:.0}% of the context window",
                         self.compaction.compact_threshold * 100.0
                     ),
                     value: "threshold".to_string(),
+                    disabled: false,
                 },
                 PickerItem {
                     label: "keep recent turns".to_string(),
-                    detail: format!("{} turns (left/right)", self.compaction.keep_recent_turns),
+                    detail: format!("{} turns", self.compaction.keep_recent_turns),
                     value: "keep".to_string(),
+                    disabled: false,
                 },
                 PickerItem {
                     label: "strip old context".to_string(),
-                    detail: format!(
-                        "{} - omit old tool output and reasoning when a separate model is selected",
-                        if self.compaction.compact_strip_context {
-                            "on"
-                        } else {
-                            "off"
-                        }
-                    ),
+                    detail: if self.compact_is_separate {
+                        format!(
+                            "{} - omit tool calls and thinking older than {} turns",
+                            if self.compaction.compact_strip_context {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            self.compaction.keep_recent_turns.saturating_mul(2)
+                        )
+                    } else {
+                        "disabled - the main model needs the complete history".to_string()
+                    },
                     value: "strip".to_string(),
+                    disabled: !self.compact_is_separate,
                 },
             ],
+        }
+    }
+
+    /// Long description of the selected setting, shown under the submenu.
+    pub(crate) fn settings_description(&self) -> String {
+        let page = match &self.overlay {
+            Overlay::Settings { page, .. } => *page,
+            _ => SettingsPage::Root,
+        };
+        if page == SettingsPage::Root {
+            return "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string();
+        }
+        let sel = match &self.overlay {
+            Overlay::Settings { sel, .. } => *sel,
+            _ => 0,
+        };
+        let value = self
+            .settings_items_for(page)
+            .get(sel)
+            .map(|item| item.value.clone())
+            .unwrap_or_default();
+        match value.as_str() {
+            "model" => "None reuses the main model. The summary request then sends the same system prompt, tools and old messages as the live turn, so the provider can serve the whole prefix from prompt cache. A separate model starts with a cold cache; it is useful only when its lower price outweighs the uncached input.".to_string(),
+            "threshold" => "Compaction starts when the provider-reported context reaches this share of the model's context window. Use Left/Right to change it by 5%. Lower values compact earlier and keep more headroom; higher values spend more context before summarising.".to_string(),
+            "keep" => "After compaction this many recent user turns stay verbatim below the summary. They are the model's immediate working context. Use Left/Right to change the count.".to_string(),
+            "strip" if self.compact_is_separate => format!("With a separate model, omit tool calls, tool results and reasoning older than the last {} user turns. Recent turns keep their tool output and thinking so the summary still understands current work.", self.compaction.keep_recent_turns.saturating_mul(2)),
+            "strip" => "Disabled while the compaction model is None. Main-model compaction must send the complete live history so the provider prompt cache hits; removing old tool output or thinking would invalidate that prefix.".to_string(),
+            _ => String::new(),
         }
     }
 
@@ -1908,6 +1930,7 @@ impl App {
                     s.updated_at
                 ),
                 value: s.id.clone(),
+                disabled: false,
             })
             .collect();
         if items.is_empty() {
@@ -2515,18 +2538,9 @@ mod tests {
                 ..
             }
         ));
-        let before = app.compaction.auto_compact;
         app.overlay = Overlay::Settings {
             page: SettingsPage::Compaction,
             sel: 1,
-        };
-        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
-        assert_eq!(app.compaction.auto_compact, !before);
-        assert_eq!(app.compaction, app.agent.compaction_settings());
-
-        app.overlay = Overlay::Settings {
-            page: SettingsPage::Compaction,
-            sel: 2,
         };
         let threshold = app.compaction.compact_threshold;
         app.adjust_setting(true);
@@ -2537,6 +2551,16 @@ mod tests {
         assert!(!app.compact_is_separate);
         assert_eq!(app.compact_model, app.agent_model);
         assert_eq!(app.agent.compact_model(), app.agent_model);
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: 3,
+        };
+        assert!(app.settings_items()[3].disabled);
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert!(
+            app.compaction.compact_strip_context,
+            "the disabled item did nothing"
+        );
     }
 
     #[test]

@@ -317,10 +317,10 @@ pub struct AgentConfig {
     pub compact_threshold: f64,
     /// Recent user/assistant turns kept verbatim across a compaction.
     pub keep_recent_turns: usize,
-    pub auto_compact: bool,
-    /// With a separate summary model, omit old tool output and reasoning from
-    /// the transcript. The main-model path ignores this: it must reuse the
-    /// live prompt verbatim to hit the provider cache.
+    /// With a separate summary model, omit tool calls, tool results and
+    /// reasoning older than the last `2 * keepRecentTurns` user turns. The
+    /// main-model path ignores this: it must reuse the live prompt verbatim
+    /// to hit the provider cache.
     pub compact_strip_context: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -341,7 +341,6 @@ impl Default for AgentConfig {
             max_turns: 100,
             compact_threshold: 0.80,
             keep_recent_turns: 8,
-            auto_compact: true,
             compact_strip_context: true,
             temperature: Some(0.2),
             chase_limit: 3,
@@ -357,7 +356,6 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
-    pub auto_compact: bool,
     pub compact_threshold: f64,
     pub keep_recent_turns: usize,
     pub compact_strip_context: bool,
@@ -366,7 +364,6 @@ pub struct CompactionSettings {
 impl From<&AgentConfig> for CompactionSettings {
     fn from(cfg: &AgentConfig) -> Self {
         Self {
-            auto_compact: cfg.auto_compact,
             compact_threshold: cfg.compact_threshold,
             keep_recent_turns: cfg.keep_recent_turns,
             compact_strip_context: cfg.compact_strip_context,
@@ -739,7 +736,7 @@ impl Config {
 
     /// Persist one setting into `config.json`, leaving every other key
     /// (including ones this version does not model) untouched. `path` is a
-    /// JSON object path, e.g. `["agent", "autoCompact"]`.
+    /// JSON object path, e.g. `["agent", "compactThreshold"]`.
     pub fn save_setting(&self, path: &[&str], value: Value) -> Result<()> {
         let (last, parents) = path
             .split_last()
@@ -1363,11 +1360,11 @@ mod tests {
             source: Some(dir.path().to_path_buf()),
             ..Config::default()
         };
-        cfg.save_setting(&["agent", "autoCompact"], serde_json::json!(false))
+        cfg.save_setting(&["agent", "compactThreshold"], serde_json::json!(0.7))
             .unwrap();
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["agent"]["autoCompact"], serde_json::json!(false));
+        assert_eq!(saved["agent"]["compactThreshold"], 0.7);
         assert_eq!(saved["agent"]["maxTurns"], 7);
         assert_eq!(saved["denyTools"][0], "bash");
         assert_eq!(saved["note"], "keep me");
