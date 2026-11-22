@@ -147,7 +147,8 @@ interpolation, or `!command` output. `$$` and `$!` produce literal `$` and `!`.
 Local endpoints may use a dummy key or omit it.
 
 Provider fields: `name`, `baseUrl`, `api` (`openai-completions` or
-`openai-responses`), `apiKey`, `headers`, `compat`, and `models`.
+`openai-responses`), `apiKey`, `headers`, `compat`, and `models`. Pi-style
+JSONC comments and trailing commas are accepted. `$schema` is ignored.
 Model fields: `id`, `name`, `contextWindow` (default 128000), `maxTokens`
 (optional output cap), and `reasoning`. A model entry with an existing id
 replaces it; new entries are appended. A provider with an empty `baseUrl` is

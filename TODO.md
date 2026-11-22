@@ -1,5 +1,20 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：对齐 Pi models.json（2026-11-22）
+
+1. **compat 字段名/位置对齐**。`models.json.providers.*.compat` 现在解析 Pi 的
+   `supportsDeveloperRole`、`supportsUsageInStreaming`、`requiresToolResultName`、
+   `requiresNonNullAssistantContent`、`requiresToolsWithToolHistory`、
+   `requiresReasoningContentOnAssistantMessages`、`maxTokensField`。删除了我们的
+   `systemRole`/`streamUsage` 写法；`reasoningContent`、`toolChoice`、
+   `parallelToolCalls` 保留为 harness 扩展。
+2. **JSONC**。`models.json`/`config.json` 现在接受 `//`、`/* ... */` 注释和尾随逗号。
+3. **已知未映射的 Pi 字段**（会被忽略，但不会导致加载失败）：provider 的
+   `oauth`/`authHeader`/`modelOverrides`；model 的 `api`/`baseUrl`/`input`/
+   `inputLimits`/`cost`/`promptCache`/`samplingParams*`/`thinkingLevelMap`/`headers`/
+   `compat`；以及多数高级 compat 标志。provider/model 基本选择与 OpenAI-compatible
+   请求可互通。
+
 ## 已完成：移除 provider degradation retry（2026-11-22）
 
 1. **Chat Completions 和 Responses 都只发一次请求**。删除

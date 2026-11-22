@@ -626,15 +626,16 @@ impl Config {
 
     fn read_json(path: &Path) -> Result<Self> {
         let raw = Self::read_text(path)?;
-        serde_json::from_str::<Config>(&strip_trailing_commas(&raw))
+        serde_json::from_str::<Config>(&strip_trailing_commas(&strip_json_comments(&raw)))
             .map_err(|e| HarnessError::Config(format!("invalid config {}: {e}", path.display())))
     }
 
     fn read_models(path: &Path) -> Result<ModelsFile> {
         let raw = Self::read_text(path)?;
-        serde_json::from_str::<ModelsFile>(&strip_trailing_commas(&raw)).map_err(|e| {
-            HarnessError::Config(format!("invalid models file {}: {e}", path.display()))
-        })
+        serde_json::from_str::<ModelsFile>(&strip_trailing_commas(&strip_json_comments(&raw)))
+            .map_err(|e| {
+                HarnessError::Config(format!("invalid models file {}: {e}", path.display()))
+            })
     }
 
     /// Write `config.json` and `models.json` if they do not exist. Existing
@@ -773,7 +774,9 @@ impl Config {
         let path = dir.join("config.json");
         let mut root: Value = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|raw| serde_json::from_str(&strip_trailing_commas(&raw)).ok())
+            .and_then(|raw| {
+                serde_json::from_str(&strip_trailing_commas(&strip_json_comments(&raw))).ok()
+            })
             .filter(Value::is_object)
             .unwrap_or_else(|| Value::Object(Default::default()));
         root[key] = value;
@@ -950,6 +953,57 @@ impl Config {
     pub fn sessions_dir() -> PathBuf {
         Self::data_dir().join("sessions")
     }
+}
+
+/// Pi `models.json` allows `//` and `/* ... */` comments outside strings.
+/// Replace them with whitespace so strict serde_json can parse the result.
+pub fn strip_json_comments(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            out.push('\n');
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// Pi and JSON5-style config files allow trailing commas; strict serde_json
@@ -1135,6 +1189,27 @@ mod tests {
         assert_eq!(cfg.compact_model, "openai/gpt-4o-mini");
         assert!(cfg.providers.contains_key("openai"));
         assert_eq!(cfg.agent.compact_threshold, 0.8);
+    }
+
+    #[test]
+    fn jsonc_comments_are_accepted() {
+        let raw = r#"{
+          // provider comment
+          "providers": {
+            "p": {
+              "baseUrl": "https://example.com/v1",
+              /* block comment */
+              "models": [{ "id": "m", }],
+            },
+          },
+        }"#;
+        let file: ModelsFile =
+            serde_json::from_str(&strip_trailing_commas(&strip_json_comments(raw))).unwrap();
+        assert_eq!(file.providers["p"].models[0].id, "m");
+        assert_eq!(
+            strip_json_comments(r#"{ "url": "https://example.com/a//b" }"#),
+            r#"{ "url": "https://example.com/a//b" }"#
+        );
     }
 
     #[test]
