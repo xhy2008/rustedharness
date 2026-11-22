@@ -165,22 +165,11 @@ the resolved file name. A pinned `lsp.downloads.<server>.version` skips the
 redirect, and `.url` replaces the URL entirely, which is what keeps installs
 working when github.com is unreachable.
 
-`download_manifest` then asks `published_digest` for the expected SHA-256: an
-explicit pin, the digest cached by a previous install
-(`lsp/checksums/<server>/<version>.sha256`), then the GitHub release API's
-per-asset `digest` field or a checksums file attached to that release. A
-resolved digest is cached, so repeat installs never call the API; `GITHUB_TOKEN`
-only raises its anonymous quota for a first-time lookup.
-
-`github_release_digest` returns `DigestLookup`, not `Option`: `NoDigest` means
-the release answered and carries no usable digest, while `Unavailable(reason)`
-means the API itself failed (network, `HTTP 403` rate limit, bad payload).
-`published_digest` turns either into `ExpectedDigest::Unverified(reason)`, which
-is reported as an `unverified` download status and does not stop the install: a
-missing digest is a warning, while a digest that is published and does not match
-is `E_LSP_CHECKSUM_MISMATCH` and drops the cached value. Downloads still
-validate HTTPS, the host whitelist and the archive cap, and extraction is
-checked for escapes.
+`download_manifest` validates the resolved URL against the HTTPS and
+official-host rules, then streams the artifact into the cache. Downloads are
+not checksum-verified: trust comes from explicit consent, the host whitelist,
+the 256 MiB cap and extraction checks that reject paths escaping the target
+directory.
 
 `LspHub::new` schedules `check_updates`, which compares each installed version
 with `latest_tag` and emits `update_available` when they differ. Installs write
@@ -213,6 +202,6 @@ Unit tests live beside the modules. They cover path escapes (including
 symlinks), anchor stability/staleness, batch atomicity, CRLF preservation,
 provider compatibility fallbacks, usage-only accounting, compaction, session
 recovery, terminal emulation, LSP position conversion, tree-sitter extraction
-across all bundled grammars, checksum/url validation, MCP naming, web
+across all bundled grammars, download URL validation, MCP naming, web
 extraction, and tool schema/no-op guards. CLI/web/TUI end-to-end behavior is
 exercised manually against a mock OpenAI-compatible SSE server.

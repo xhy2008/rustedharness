@@ -344,28 +344,16 @@ impl Agent {
             .unwrap_or_default()
     }
 
-    /// Fetch the vendor-published SHA-256 for a registry server. This does not
-    /// install anything; the digest is shown to the user before a manual
-    /// install proceeds.
-    pub async fn lsp_checksum(&self, server: &str) -> Result<crate::lsp::ChecksumInfo> {
-        crate::lsp::checksum_server(&self.config.lsp, &self.cwd(), server).await
-    }
-
     /// Install or update a language server on the user's behalf (TUI action).
-    /// A `sha256` supplied here is used for this download only; it is not
-    /// written back to `config.json`.
-    pub async fn install_lsp(
-        &self,
-        server: &str,
-        sha256: Option<String>,
-        update: bool,
-    ) -> Result<PathBuf> {
-        let mut lsp = self.config.lsp.clone();
-        if let Some(sha) = sha256 {
-            crate::lsp::pin_sha256(&mut lsp, server, &sha)?;
-        }
-        crate::lsp::install_server(&lsp, &self.cwd(), server, update, Some(self.events.clone()))
-            .await
+    pub async fn install_lsp(&self, server: &str, update: bool) -> Result<PathBuf> {
+        crate::lsp::install_server(
+            &self.config.lsp,
+            &self.cwd(),
+            server,
+            update,
+            Some(self.events.clone()),
+        )
+        .await
     }
 
     pub fn set_agent_model(&self, model: &str) -> Result<()> {
@@ -1065,7 +1053,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path());
-        let tool = crate::shell::ShellSpec::detect(&config.shell.prefer).tool_name;
+        let tool = crate::shell::ShellSpec::detect(&config.shell.prefer).tool_name();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let backend = Arc::new(ShellFake {
             calls: std::sync::atomic::AtomicUsize::new(0),

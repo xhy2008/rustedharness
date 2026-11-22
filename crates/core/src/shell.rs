@@ -12,8 +12,6 @@ pub enum ShellFamily {
 #[derive(Debug, Clone)]
 pub struct ShellSpec {
     pub family: ShellFamily,
-    /// Registered tool name; unique on every platform.
-    pub tool_name: &'static str,
     pub program: PathBuf,
     pub display_name: String,
     pub version: String,
@@ -22,6 +20,14 @@ pub struct ShellSpec {
 }
 
 impl ShellSpec {
+    /// Registered tool name; unique on every platform.
+    pub fn tool_name(&self) -> &'static str {
+        match self.family {
+            ShellFamily::Bash => "bash",
+            ShellFamily::PowerShell => "powershell",
+        }
+    }
+
     /// Detect the shell, reusing the previous answer when it cannot have
     /// changed.
     ///
@@ -46,7 +52,6 @@ impl ShellSpec {
                     let version = version_of(&bash, &["--version"]);
                     return Self {
                         family: ShellFamily::Bash,
-                        tool_name: "bash",
                         program: bash,
                         display_name: "Git Bash".into(),
                         version,
@@ -58,7 +63,6 @@ impl ShellSpec {
             let (program, version) = find_powershell();
             return Self {
                 family: ShellFamily::PowerShell,
-                tool_name: "powershell",
                 program,
                 display_name: "PowerShell".into(),
                 version,
@@ -75,7 +79,6 @@ impl ShellSpec {
         let version = version_of(&program, &["--version"]);
         Self {
             family: ShellFamily::Bash,
-            tool_name: "bash",
             program,
             display_name: "bash".into(),
             version,
@@ -208,7 +211,6 @@ struct CachedShell {
     prefer: String,
     os: String,
     family: ShellFamily,
-    tool_name: String,
     program: PathBuf,
     display_name: String,
     version: String,
@@ -224,7 +226,6 @@ impl From<&ShellSpec> for CachedShell {
             prefer: String::new(),
             os: spec.os.clone(),
             family: spec.family,
-            tool_name: spec.tool_name.to_string(),
             program: spec.program.clone(),
             display_name: spec.display_name.clone(),
             version: spec.version.clone(),
@@ -256,7 +257,6 @@ fn read_cache(path: &Path, prefer: &str) -> Option<ShellSpec> {
     }
     Some(ShellSpec {
         family: cached.family,
-        tool_name: Box::leak(cached.tool_name.into_boxed_str()),
         program: cached.program,
         display_name: cached.display_name,
         version: cached.version,
@@ -344,11 +344,6 @@ mod tests {
     fn spec(family: ShellFamily) -> ShellSpec {
         ShellSpec {
             family,
-            tool_name: if family == ShellFamily::Bash {
-                "bash"
-            } else {
-                "powershell"
-            },
             program: PathBuf::from(if family == ShellFamily::Bash {
                 "/bin/bash"
             } else {
@@ -397,8 +392,8 @@ mod tests {
 
     #[test]
     fn tool_names_are_platform_unique() {
-        assert_eq!(spec(ShellFamily::Bash).tool_name, "bash");
-        assert_eq!(spec(ShellFamily::PowerShell).tool_name, "powershell");
+        assert_eq!(spec(ShellFamily::Bash).tool_name(), "bash");
+        assert_eq!(spec(ShellFamily::PowerShell).tool_name(), "powershell");
     }
 
     #[test]

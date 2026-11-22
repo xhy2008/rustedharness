@@ -31,7 +31,7 @@ impl ShellTool {
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
-        self.spec.tool_name
+        self.spec.tool_name()
     }
 
     fn description(&self) -> String {

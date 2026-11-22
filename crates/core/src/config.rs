@@ -392,9 +392,8 @@ pub struct LspConfig {
     pub servers: BTreeMap<String, String>,
     pub request_timeout_ms: u64,
     /// Optional download overrides, keyed by server id. URLs default to the
-    /// registry's GitHub release; the digest is discovered from the release
-    /// metadata automatically. Entries here only pin a version/URL or override
-    /// the digest for a private mirror.
+    /// registry's GitHub release; entries here pin a version or point at a
+    /// private mirror.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub downloads: BTreeMap<String, LspDownload>,
 }
@@ -409,10 +408,6 @@ pub struct LspDownload {
     /// HTTPS archive/binary URL, replacing the release asset (a mirror).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Require this SHA-256 (lowercase hex). Unset uses the digest the release
-    /// publishes, and installs unverified when it publishes none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
     /// gz | zip | tar.gz | raw, inferred from the asset name when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<String>,

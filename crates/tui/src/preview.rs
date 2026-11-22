@@ -303,7 +303,6 @@ fn preview_panel() {
         display_name: "rust-analyzer".into(),
         version: "2026-11-12".into(),
         url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-12/rust-analyzer-x86_64-pc-windows-msvc.zip".into(),
-        sha256: None,
         runtime_hint: Some("extract to ~/.rustedharness/lsp".into()),
     });
     parent_dump(&mut app, "ui-preview-consent.json", 100, 30);
@@ -507,8 +506,7 @@ fn preview_settings() {
     parent_dump(&mut app, "ui-preview-settings-off.json", 100, 20);
 }
 
-/// The `/lsp` panel: installed version, live state, and the subcommands that
-/// replaced `/install` and `/checksum`.
+/// The `/lsp` panel: installed version, live state, and the subcommands.
 #[test]
 #[ignore = "writes target/ui-preview-lsp.json; run on demand"]
 fn preview_lsp_panel() {

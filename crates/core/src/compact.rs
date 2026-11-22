@@ -191,6 +191,7 @@ mod tests {
             _sink: Option<UnboundedSender<crate::provider::StreamEvent>>,
             _cancel: CancellationToken,
         ) -> Result<Completion> {
+            assert!(!request.stream, "summaries use the non-streaming path");
             *self.seen_model.lock().unwrap() = request.model;
             Ok(Completion {
                 content: "## 目标\nship it\n## 已完成\nx\n## 关键约束\ny\n## 待办\nz\n## 踩坑\nw"

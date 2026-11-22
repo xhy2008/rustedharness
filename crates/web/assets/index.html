@@ -996,14 +996,13 @@ try {
       <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
       <div>
         <h2 id="consentTitle">下载语言服务器？</h2>
-        <p>桌面代码智能依赖本地 LSP；文件会校验 SHA-256 后解压。</p>
+        <p>桌面代码智能依赖本地 LSP；文件会从 HTTPS 白名单主机下载后解压。</p>
       </div>
     </div>
     <p class="consent-lead" id="consentLead"></p>
     <div class="consent-box"><span class="consent-label">下载地址</span><span id="consentUrl"></span></div>
-    <div class="consent-box"><span class="consent-label">SHA-256</span><span id="consentSha"></span></div>
     <div class="consent-box"><span class="consent-label">运行时依赖</span><span id="consentRuntime">—</span></div>
-    <p class="consent-lead">下载仅允许 HTTPS 与白名单主机，并在解压前校验固定摘要。</p>
+    <p class="consent-lead">下载仅允许 HTTPS 与白名单主机，并限制归档大小。</p>
     <div class="modal-actions">
       <button class="btn" type="button" id="denyBtn">拒绝</button>
       <button class="btn primary" type="button" id="allowBtn">允许下载</button>
@@ -1333,7 +1332,6 @@ try {
     $('consentLead').textContent = '工作区需要 ' + event.display_name + ' ' + event.version +
       ' 才能提供精确的代码智能。是否允许现在下载？';
     $('consentUrl').textContent = event.url || '';
-    $('consentSha').textContent = event.sha256 || '';
     $('consentRuntime').textContent = event.runtime_hint || '无额外运行时依赖';
     openModal('consentModal');
   }

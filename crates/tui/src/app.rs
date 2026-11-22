@@ -20,7 +20,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::Config;
-use rustedharness_core::lsp::{ChecksumInfo, ServerStatus};
+use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
 use rustedharness_core::provider::{ChatMessage, Role};
 use rustedharness_core::tools::todo::TodoItem;
@@ -30,10 +30,6 @@ use crate::entries::{Entry, EntryKind, ProcessCard};
 
 /// Long-running action routed through the event loop so rendering never blocks.
 pub enum OpResult {
-    Checksum {
-        server: String,
-        result: std::result::Result<ChecksumInfo, String>,
-    },
     Installed {
         server: String,
         result: std::result::Result<PathBuf, String>,
@@ -143,9 +139,6 @@ pub struct ConsentCard {
     pub display_name: String,
     pub version: String,
     pub url: String,
-    /// `None` when the release publishes no digest: the download is offered
-    /// anyway and installed unverified.
-    pub sha256: Option<String>,
     pub runtime_hint: Option<String>,
 }
 
@@ -237,7 +230,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/lsp", "language server status"),
     ("/lsp install <id>", "download the newest release"),
     ("/lsp update <id>", "re-install from the newest release"),
-    ("/lsp checksum <id>", "digest an install would verify"),
     ("/procs", "background processes"),
     ("/copy", "copy the last assistant reply"),
     ("/quit", "exit"),
@@ -275,7 +267,6 @@ fn lsp_id_query(text: &str) -> Option<(&'static str, &str)> {
     let prefix = match verb {
         "install" => "/lsp install ",
         "update" => "/lsp update ",
-        "checksum" => "/lsp checksum ",
         _ => return None,
     };
     Some((prefix, partial))
@@ -578,16 +569,6 @@ impl App {
 
     pub fn on_op_result(&mut self, result: OpResult) {
         match result {
-            OpResult::Checksum { server, result } => match result {
-                Ok(info) => self.notice(format!(
-                    "{server} {} | {} | sha256 {} ({})",
-                    info.version,
-                    info.url,
-                    info.sha256.as_deref().unwrap_or("none published"),
-                    info.source
-                )),
-                Err(err) => self.push(EntryKind::Error, "", format!("{server} checksum: {err}")),
-            },
             OpResult::Installed { server, result } => match result {
                 Ok(path) => self.notice(format!("{server} ready at {}", path.display())),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} install: {err}")),
@@ -786,7 +767,6 @@ impl App {
                 display_name,
                 version,
                 url,
-                sha256,
                 runtime_hint,
                 ..
             } => {
@@ -795,7 +775,6 @@ impl App {
                     display_name,
                     version,
                     url,
-                    sha256,
                     runtime_hint,
                 });
             }
@@ -1620,7 +1599,7 @@ impl App {
                 let name = server.clone();
                 tokio::spawn(async move {
                     let result = agent
-                        .install_lsp(&name, None, update)
+                        .install_lsp(&name, update)
                         .await
                         .map_err(|e| e.to_string());
                     let _ = tx.send(OpResult::Installed {
@@ -1633,30 +1612,10 @@ impl App {
                     if update { "updating" } else { "installing" }
                 ));
             }
-            "checksum" => {
-                if server.is_empty() {
-                    self.notice("usage: /lsp checksum <server-id>");
-                    return;
-                }
-                let server = server.to_string();
-                let agent = self.agent.clone();
-                let tx = op_tx.clone();
-                let name = server.clone();
-                tokio::spawn(async move {
-                    let result = agent.lsp_checksum(&name).await.map_err(|e| e.to_string());
-                    let _ = tx.send(OpResult::Checksum {
-                        server: name,
-                        result,
-                    });
-                });
-                self.notice(format!("checksumming {server}..."));
-            }
             other => self.push(
                 EntryKind::Error,
                 "",
-                format!(
-                    "unknown lsp subcommand: {other} - try /lsp, /lsp install, /lsp update or /lsp checksum"
-                ),
+                format!("unknown lsp subcommand: {other} - try /lsp, /lsp install or /lsp update"),
             ),
         }
     }
@@ -2071,19 +2030,13 @@ fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Everything language-server related is a `/lsp` subcommand; the old
-    /// top-level `/install` and `/checksum` must not come back.
+    /// Everything language-server related is a `/lsp` subcommand.
     #[test]
     fn lsp_commands_live_under_lsp() {
         for (command, _) in COMMANDS {
             assert_ne!(*command, "/install", "use /lsp install");
-            assert_ne!(*command, "/checksum", "use /lsp checksum");
         }
-        for sub in [
-            "/lsp install <id>",
-            "/lsp update <id>",
-            "/lsp checksum <id>",
-        ] {
+        for sub in ["/lsp install <id>", "/lsp update <id>"] {
             assert!(COMMANDS.iter().any(|(command, _)| *command == sub), "{sub}");
         }
     }
@@ -2242,10 +2195,6 @@ mod tests {
             Some(("/lsp install ", "ru"))
         );
         assert_eq!(lsp_id_query("/lsp update "), Some(("/lsp update ", "")));
-        assert_eq!(
-            lsp_id_query("/lsp checksum lua"),
-            Some(("/lsp checksum ", "lua"))
-        );
         assert_eq!(lsp_id_query("/lsp install"), Some(("/lsp install ", "")));
         for text in ["/lsp", "/lsp bogus x", "/model ru", "/install ru"] {
             assert_eq!(lsp_id_query(text), None, "{text}");
@@ -2270,13 +2219,13 @@ mod tests {
     #[test]
     fn the_verb_alone_lists_every_server() {
         let mut app = crate::preview::demo_app();
-        app.input = "/lsp checksum".chars().collect();
+        app.input = "/lsp update".chars().collect();
         app.cursor = app.input.len();
         app.refresh_slash();
         let Overlay::Slash { items, prefix, .. } = &app.overlay else {
             panic!("expected the completion menu");
         };
-        assert_eq!(prefix, "/lsp checksum ");
+        assert_eq!(prefix, "/lsp update ");
         assert_eq!(items.len(), rustedharness_core::lsp::registry().len());
     }
 
@@ -2361,6 +2310,6 @@ mod tests {
                     .starts_with("lsp")
             })
             .collect();
-        assert_eq!(shown.len(), 4, "{shown:?}");
+        assert_eq!(shown.len(), 3, "{shown:?}");
     }
 }

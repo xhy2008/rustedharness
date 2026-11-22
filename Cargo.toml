@@ -38,10 +38,8 @@ dunce = "1"
 flate2 = "1"
 futures-util = "0.3"
 globset = "0.4"
-hex = "0.4"
 html2md = "0.2.17"
 ignore = "0.4"
-moka = { version = "0.12", features = ["future"] }
 nix = { version = "0.30", features = ["signal", "process"] }
 portable-pty = "0.9"
 ratatui = "0.30"
@@ -52,17 +50,13 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
 similar = "2"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"

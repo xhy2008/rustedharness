@@ -1,5 +1,5 @@
 //! LSP first-class integration: stdio JSON-RPC client, per-language supervisor,
-//! server registry, verified auto-download and transparent L0 fallback.
+//! server registry, consented auto-download and transparent L0 fallback.
 //!
 //! The client speaks the subset of LSP 3.16 the harness needs (definition,
 //! type definition, implementation, references, hover, document symbols,
@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc::UnboundedSender;
@@ -67,9 +66,7 @@ impl ArchiveKind {
 
 /// One language server description. `repo` is the GitHub project whose newest
 /// release is downloaded and `asset` is that release's file name template
-/// (`{tag}`, `{target}`, `{os}`, `{ext}`). Downloads are verified against the
-/// digest the vendor publishes when there is one; `lsp.downloads.<id>.sha256`
-/// is an optional override, not a requirement.
+/// (`{tag}`, `{target}`, `{os}`, `{ext}`).
 #[derive(Debug, Clone)]
 pub struct ServerSpec {
     pub language: &'static str,
@@ -517,15 +514,6 @@ fn cache_root() -> PathBuf {
     Config::data_dir().join("lsp")
 }
 
-/// Local cache for vendor-published digests, so repeat installs and
-/// `lsp checksum` do not depend on the GitHub API quota.
-fn digest_cache_path(server: &str, version: &str) -> PathBuf {
-    cache_root()
-        .join("checksums")
-        .join(server)
-        .join(format!("{version}.sha256"))
-}
-
 /// The version installed for a server and the path of its binary. The cache
 /// keeps exactly one version per server, so this is what `resolve_command`
 /// falls back to.
@@ -558,30 +546,8 @@ fn prune_other_versions(spec: &ServerSpec, keep: &str) {
     }
 }
 
-fn read_digest_cache(path: &Path) -> Option<(String, String)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    let hash = lines.next()?.trim();
-    if !valid_sha256(hash) {
-        return None;
-    }
-    let source = lines.next().unwrap_or("cached").trim().to_string();
-    Some((hash.to_ascii_lowercase(), source))
-}
-
-fn write_digest_cache(path: &Path, hash: &str, source: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, format!("{hash}\n{source}\n"));
-}
-
-fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// Enforce the download transport rules shared by installation and checksum
-/// discovery: HTTPS plus an official-host suffix match.
+/// Enforce the download transport rules: HTTPS plus an official-host suffix
+/// match.
 fn validate_download_url(url: &str, domains: &[String]) -> Result<url::Url> {
     let parsed = url::Url::parse(url)
         .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", format!("bad URL: {e}")))?;
@@ -610,23 +576,6 @@ fn validate_download_url(url: &str, domains: &[String]) -> Result<url::Url> {
         ));
     }
     Ok(parsed)
-}
-
-fn http_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(format!("rustedharness/{}", VERSION))
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() > 4 {
-                attempt.error("too many redirects")
-            } else if attempt.url().scheme() != "https" {
-                attempt.error("redirect downgraded to non-HTTPS")
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
-        .ok()
 }
 
 /// Resolve the newest release tag of `<owner>/<repo>` from the
@@ -720,91 +669,6 @@ fn tag_from_location(location: &str) -> Option<String> {
             .map(|tag| tag.into_owned())
             .unwrap_or_else(|_| tag.to_string()),
     )
-}
-
-async fn fetch_text(url: &str, limit: usize) -> Option<String> {
-    let client = http_client()?;
-    let response = client.get(url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let text = response.text().await.ok()?;
-    (text.len() <= limit).then_some(text)
-}
-
-/// Parse a published checksums file (`<hash>  <name>`, `*<name>`, or the BSD
-/// `SHA256 (name) = <hash>` form) and return the entry for `asset_name`.
-fn parse_checksum_file(text: &str, asset_name: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((label, value)) = line.split_once('=') {
-            if label.contains(&format!("({asset_name})")) {
-                let hash = value.trim();
-                if valid_sha256(hash) {
-                    return Some(hash.to_ascii_lowercase());
-                }
-            }
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let hash = parts.next().unwrap_or("");
-        if !valid_sha256(hash) {
-            continue;
-        }
-        let matches_asset = parts.any(|name| {
-            let name = name.trim_start_matches('*');
-            name == asset_name || name.rsplit('/').next() == Some(asset_name)
-        });
-        if matches_asset {
-            return Some(hash.to_ascii_lowercase());
-        }
-    }
-    None
-}
-
-/// Outcome of asking GitHub's release API for a published digest.
-enum DigestLookup {
-    Found {
-        sha256: String,
-        source: String,
-    },
-    /// The release answered, but publishes no digest we can use.
-    NoDigest,
-    /// The API could not be reached or refused us (rate limit, auth, network).
-    /// This is not evidence that the vendor omitted a digest.
-    Unavailable(String),
-}
-
-/// Return the `digest` metadata GitHub records for the named release asset.
-fn asset_digest(assets: &[Value], asset_name: &str) -> Option<String> {
-    assets.iter().find_map(|entry| {
-        if entry.get("name").and_then(Value::as_str) != Some(asset_name) {
-            return None;
-        }
-        let digest = entry.get("digest").and_then(Value::as_str)?;
-        let hash = digest.strip_prefix("sha256:")?;
-        valid_sha256(hash).then(|| hash.to_ascii_lowercase())
-    })
-}
-
-/// Release assets that are likely to hold checksums for the other artifacts.
-fn checksum_assets(assets: &[Value]) -> Vec<(String, String)> {
-    assets
-        .iter()
-        .filter_map(|entry| {
-            let name = entry.get("name").and_then(Value::as_str)?;
-            let lower = name.to_ascii_lowercase();
-            if !(lower.contains("sha256") || lower.contains("checksum")) || lower.ends_with(".sig")
-            {
-                return None;
-            }
-            let url = entry.get("browser_download_url").and_then(Value::as_str)?;
-            Some((name.to_string(), url.to_string()))
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -937,46 +801,10 @@ struct DownloadTarget {
 struct DownloadManifest {
     version: String,
     url: String,
-    digest: ExpectedDigest,
     archive: ArchiveKind,
     binary: String,
     domains: Vec<String>,
     display: String,
-}
-
-/// Expected SHA-256 of an artifact. A release that publishes no digest is not
-/// fatal: the download proceeds unverified and reports why.
-enum ExpectedDigest {
-    Verified { sha256: String, source: String },
-    Unverified(String),
-}
-
-impl ExpectedDigest {
-    fn sha256(&self) -> Option<&str> {
-        match self {
-            ExpectedDigest::Verified { sha256, .. } => Some(sha256),
-            ExpectedDigest::Unverified(_) => None,
-        }
-    }
-
-    fn warning(&self) -> Option<&str> {
-        match self {
-            ExpectedDigest::Verified { .. } => None,
-            ExpectedDigest::Unverified(reason) => Some(reason),
-        }
-    }
-}
-
-/// A checksum obtained for a registry entry without installing it. The
-/// `source` field makes the trust path explicit to the user.
-#[derive(Debug, Clone, Serialize)]
-pub struct ChecksumInfo {
-    pub server_id: String,
-    pub version: String,
-    pub url: String,
-    /// `None` when the release publishes no digest, so installs go unverified.
-    pub sha256: Option<String>,
-    pub source: String,
 }
 
 pub struct LspHub {
@@ -1264,168 +1092,6 @@ impl LspHub {
         self.download_server(spec).await
     }
 
-    /// Report the SHA-256 an install would verify for a registry server, if
-    /// the release publishes one. This only inspects the digest.
-    pub async fn checksum(&self, server_id: &str) -> Result<ChecksumInfo> {
-        let spec = spec_for_id(server_id).ok_or_else(|| {
-            HarnessError::tool(
-                "E_UNKNOWN_LSP_SERVER",
-                format!("unknown language server `{server_id}`"),
-            )
-        })?;
-        let Some(target) = self.download_target(spec).await? else {
-            return Err(HarnessError::tool(
-                "E_LSP_NO_DOWNLOAD",
-                format!(
-                    "`{}` has no built-in download URL; install it manually: {}",
-                    spec.id, spec.install_hint
-                ),
-            ));
-        };
-        validate_download_url(&target.url, &target.domains)?;
-        let digest = self
-            .published_digest(spec, &target.version, &target.url)
-            .await;
-        Ok(ChecksumInfo {
-            server_id: spec.id.to_string(),
-            version: target.version,
-            url: target.url,
-            source: match &digest {
-                ExpectedDigest::Verified { source, .. } => source.clone(),
-                ExpectedDigest::Unverified(reason) => reason.clone(),
-            },
-            sha256: digest.sha256().map(str::to_string),
-        })
-    }
-
-    /// Resolve the expected digest for an artifact: an explicit pin, then the
-    /// value cached by an earlier lookup, then the vendor's release metadata.
-    /// A digest that cannot be found is reported, never enforced.
-    async fn published_digest(
-        &self,
-        spec: &ServerSpec,
-        version: &str,
-        artifact_url: &str,
-    ) -> ExpectedDigest {
-        if let Some(pinned) = self
-            .config
-            .downloads
-            .get(spec.id)
-            .and_then(|entry| entry.sha256.clone())
-        {
-            return if valid_sha256(&pinned) {
-                ExpectedDigest::Verified {
-                    sha256: pinned.to_ascii_lowercase(),
-                    source: "pinned in lsp.downloads".to_string(),
-                }
-            } else {
-                ExpectedDigest::Unverified(format!(
-                    "lsp.downloads.{}.sha256 is not a 64-character hex digest",
-                    spec.id
-                ))
-            };
-        }
-        let cache_path = digest_cache_path(spec.id, version);
-        if let Some((sha256, source)) = read_digest_cache(&cache_path) {
-            return ExpectedDigest::Verified { sha256, source };
-        }
-        // The release API is the only source of a published digest: it records
-        // `sha256:` for each asset and lists the checksums files attached to
-        // the release.
-        match self.github_release_digest(artifact_url).await {
-            Ok(DigestLookup::Found { sha256, source }) => {
-                write_digest_cache(&cache_path, &sha256, &source);
-                ExpectedDigest::Verified { sha256, source }
-            }
-            Ok(DigestLookup::NoDigest) => {
-                ExpectedDigest::Unverified(format!("release {version} publishes no SHA-256"))
-            }
-            Ok(DigestLookup::Unavailable(reason)) => {
-                ExpectedDigest::Unverified(format!("could not read the release digest ({reason})"))
-            }
-            Err(err) => ExpectedDigest::Unverified(err.to_string()),
-        }
-    }
-
-    async fn github_release_digest(&self, artifact_url: &str) -> Result<DigestLookup> {
-        let parsed = url::Url::parse(artifact_url)
-            .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", format!("bad URL: {e}")))?;
-        if parsed.host_str() != Some("github.com") {
-            return Ok(DigestLookup::NoDigest);
-        }
-        let segments: Vec<&str> = parsed
-            .path_segments()
-            .map(|segments| segments.collect())
-            .unwrap_or_default();
-        // /{owner}/{repo}/releases/download/{tag}/{asset...}
-        if segments.len() < 6
-            || segments.get(2) != Some(&"releases")
-            || segments.get(3) != Some(&"download")
-        {
-            return Ok(DigestLookup::NoDigest);
-        }
-        let owner = segments[0];
-        let repo = segments[1];
-        let tag = segments[4];
-        let asset = urlencoding::decode(&segments[5..].join("/"))
-            .map(|value| value.into_owned())
-            .unwrap_or_else(|_| segments[5..].join("/"));
-        let api = format!(
-            "https://api.github.com/repos/{owner}/{repo}/releases/tags/{}",
-            urlencoding::encode(tag)
-        );
-        let client = reqwest::Client::builder()
-            .user_agent(format!("rustedharness/{}", VERSION))
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|e| HarnessError::tool("E_LSP_DOWNLOAD", e.to_string()))?;
-        let mut request = client
-            .get(&api)
-            .header("Accept", "application/vnd.github+json");
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            if !token.is_empty() {
-                request = request.bearer_auth(token);
-            }
-        }
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => return Ok(DigestLookup::Unavailable(err.to_string())),
-        };
-        let status = response.status();
-        if !status.is_success() {
-            return Ok(DigestLookup::Unavailable(format!("HTTP {status}")));
-        }
-        let value: Value = match response.json().await {
-            Ok(value) => value,
-            Err(err) => return Ok(DigestLookup::Unavailable(err.to_string())),
-        };
-        let Some(assets) = value.get("assets").and_then(Value::as_array) else {
-            return Ok(DigestLookup::Unavailable(
-                "release metadata has no assets".to_string(),
-            ));
-        };
-        let asset_name = asset.rsplit('/').next().unwrap_or(asset.as_str());
-        if let Some(hash) = asset_digest(assets, asset_name) {
-            return Ok(DigestLookup::Found {
-                sha256: hash,
-                source: "GitHub release asset digest".to_string(),
-            });
-        }
-        // Some releases publish a checksums file instead of per-asset digests.
-        for (name, url) in checksum_assets(assets) {
-            let Some(text) = fetch_text(&url, 1024 * 1024).await else {
-                continue;
-            };
-            if let Some(hash) = parse_checksum_file(&text, asset_name) {
-                return Ok(DigestLookup::Found {
-                    sha256: hash,
-                    source: format!("GitHub release checksums ({name})"),
-                });
-            }
-        }
-        Ok(DigestLookup::NoDigest)
-    }
-
     /// Re-download a server, replacing the installed copy with the newest
     /// release.
     pub async fn update(&self, server_id: &str) -> Result<PathBuf> {
@@ -1435,9 +1101,6 @@ impl LspHub {
                 format!("unknown language server `{server_id}`"),
             )
         })?;
-        // Drop cached digests so the fresh artifact is verified against the
-        // release metadata as it is now, not as it was for the old version.
-        self.clear_digest_cache(spec);
         self.download_server(spec).await
     }
 
@@ -1522,13 +1185,9 @@ impl LspHub {
             )
         })?;
         validate_download_url(&target.url, &target.domains)?;
-        let digest = self
-            .published_digest(spec, &target.version, &target.url)
-            .await;
         Ok(DownloadManifest {
             version: target.version,
             url: target.url,
-            digest,
             archive: target.archive,
             binary: target.binary,
             domains: target.domains,
@@ -1656,35 +1315,18 @@ impl LspHub {
         Ok(client)
     }
 
-    /// Fetch a verified archive and extract it into the cache. The SHA-256 is
-    /// discovered from the vendor's GitHub release metadata (optionally
-    /// overridden by a pin); HTTPS, an allow-listed host and (in interactive
-    /// mode) explicit consent are still required.
-    fn clear_digest_cache(&self, spec: &ServerSpec) {
-        let _ = std::fs::remove_dir_all(cache_root().join("checksums").join(spec.id));
-    }
-
+    /// Fetch a consented archive and extract it into the cache. HTTPS, an
+    /// allow-listed host and (in interactive mode) explicit consent are
+    /// required.
     async fn download_server(&self, spec: &ServerSpec) -> Result<PathBuf> {
         let DownloadManifest {
             version,
             url,
-            digest,
             archive,
             binary,
             domains,
             display,
         } = self.download_manifest(spec).await?;
-        let expected = digest.sha256().map(str::to_ascii_lowercase);
-        if let Some(warning) = digest.warning() {
-            self.emit(HarnessEvent::DownloadStatus {
-                server_id: spec.id.to_string(),
-                state: "unverified".to_string(),
-                detail: Some(format!(
-                    "installing without checksum verification: {warning}"
-                )),
-                percent: None,
-            });
-        }
 
         let consented = *self.consent.lock().unwrap().get(spec.id).unwrap_or(&false);
         if !consented {
@@ -1706,7 +1348,6 @@ impl LspHub {
                         display_name: display.clone(),
                         version: version.clone(),
                         url: url.clone(),
-                        sha256: expected.clone(),
                         runtime_hint: (!spec.runtime_deps.is_empty())
                             .then(|| spec.runtime_deps.join(", ")),
                     });
@@ -1822,28 +1463,6 @@ impl LspHub {
                 });
             }
         }
-        if let Some(expected) = expected.as_deref() {
-            let actual = hex::encode(Sha256::digest(&bytes));
-            if !actual.eq_ignore_ascii_case(expected) {
-                self.emit(HarnessEvent::DownloadStatus {
-                    server_id: spec.id.to_string(),
-                    state: "checksum_failed".to_string(),
-                    detail: Some(format!("expected {expected}, got {actual}")),
-                    percent: None,
-                });
-                // A published digest that does not match is a hard failure:
-                // the artifact is not the one the vendor signed off on.
-                self.clear_digest_cache(spec);
-                return Err(HarnessError::tool(
-                    "E_LSP_CHECKSUM_MISMATCH",
-                    format!(
-                        "SHA-256 mismatch for {}: expected {expected}, got {actual}",
-                        spec.id
-                    ),
-                ));
-            }
-        }
-
         let target = cache_root().join(spec.id).join(&version);
         std::fs::create_dir_all(&target)?;
         let binary_path = extract_archive(&bytes, archive, &target, &binary)?;
@@ -2402,23 +2021,6 @@ impl LspHub {
     }
 }
 
-/// Pin a SHA-256 supplied for a single install. The digest is validated and
-/// used for this call only; it is never written back to `config.json`.
-pub fn pin_sha256(config: &mut LspConfig, server: &str, sha256: &str) -> Result<()> {
-    let sha = sha256.trim().to_ascii_lowercase();
-    if !valid_sha256(&sha) {
-        return Err(HarnessError::Config(
-            "sha256 must be exactly 64 hexadecimal characters".to_string(),
-        ));
-    }
-    config
-        .downloads
-        .entry(server.to_string())
-        .or_default()
-        .sha256 = Some(sha);
-    Ok(())
-}
-
 /// One-shot install/update used by the CLI and the TUI. A management hub never
 /// stays alive: it is shut down before the result is returned.
 pub async fn install_server(
@@ -2435,14 +2037,6 @@ pub async fn install_server(
     } else {
         hub.install(server).await
     };
-    hub.shutdown_all().await;
-    result
-}
-
-/// One-shot checksum discovery used by the CLI and the TUI.
-pub async fn checksum_server(config: &LspConfig, cwd: &Path, server: &str) -> Result<ChecksumInfo> {
-    let hub = LspHub::new(cwd.to_path_buf(), &enabled(config), None);
-    let result = hub.checksum(server).await;
     hub.shutdown_all().await;
     result
 }
@@ -3751,8 +3345,8 @@ mod tests {
     async fn install_waits_for_consent_and_reports_a_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        // Pin the version, URL and digest so the manifest needs no network: the
-        // point of this test is the consent handshake, not the download.
+        // Pin the version and URL so the manifest needs no network: the point
+        // of this test is the consent handshake, not the download.
         let mut config = LspConfig::default();
         config.downloads.insert(
             "lua-language-server".to_string(),
@@ -3762,7 +3356,6 @@ mod tests {
                     "https://github.com/LuaLS/lua-language-server/releases/download/3.19.2/lua-language-server-3.19.2-win32-x64.zip"
                         .to_string(),
                 ),
-                sha256: Some("0".repeat(64)),
                 ..Default::default()
             },
         );
@@ -3923,106 +3516,6 @@ mod tests {
             "E_LSP_ERROR",
             "invalid params (code -32602)"
         )));
-    }
-
-    #[test]
-    fn sha256_validation_is_strict() {
-        assert!(valid_sha256(&"a".repeat(64)));
-        assert!(valid_sha256(&"0123456789abcdef".repeat(4)));
-        assert!(!valid_sha256(&"a".repeat(63)));
-        assert!(!valid_sha256(&"a".repeat(65)));
-        assert!(!valid_sha256(&"g".repeat(64)));
-        assert!(!valid_sha256(""));
-    }
-
-    #[test]
-    fn discovered_digests_roundtrip_through_the_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rust-analyzer").join("2026-10-19.sha256");
-        let hash = "0123456789abcdef".repeat(4);
-        write_digest_cache(&path, &hash, "GitHub release asset digest");
-        assert_eq!(
-            read_digest_cache(&path),
-            Some((hash, "GitHub release asset digest".to_string()))
-        );
-        std::fs::write(&path, "not-a-hash\ncached\n").unwrap();
-        assert!(read_digest_cache(&path).is_none());
-    }
-
-    /// A rate-limited or unreachable API must never be described as "the
-    /// vendor publishes no digest": the two paths return different errors.
-    #[tokio::test]
-    async fn artifact_urls_outside_github_releases_answer_without_a_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        let hub = LspHub::new(dir.path().to_path_buf(), &LspConfig::default(), None);
-        for url in [
-            "https://example.com/tool.tar.gz",
-            "https://github.com/owner/repo/archive/v1.tar.gz",
-        ] {
-            assert!(matches!(
-                hub.github_release_digest(url).await.unwrap(),
-                DigestLookup::NoDigest
-            ));
-        }
-        assert!(hub.github_release_digest("not a url").await.is_err());
-    }
-
-    #[test]
-    fn release_assets_expose_digests_and_checksum_files() {
-        let hash = "0123456789abcdef".repeat(4);
-        let assets = vec![
-            json!({ "name": "server.zip", "digest": format!("sha256:{hash}"),
-                    "browser_download_url": "https://github.com/o/r/releases/download/t/server.zip" }),
-            json!({ "name": "SHA256SUMS",
-                    "browser_download_url": "https://github.com/o/r/releases/download/t/SHA256SUMS" }),
-            json!({ "name": "server.zip.sig",
-                    "browser_download_url": "https://github.com/o/r/releases/download/t/server.zip.sig" }),
-        ];
-        assert_eq!(
-            asset_digest(&assets, "server.zip").as_deref(),
-            Some(hash.as_str())
-        );
-        assert!(asset_digest(&assets, "other.zip").is_none());
-        let checksums = checksum_assets(&assets);
-        assert_eq!(checksums.len(), 1);
-        assert_eq!(checksums[0].0, "SHA256SUMS");
-    }
-
-    #[test]
-    fn checksum_files_are_parsed_in_common_formats() {
-        let hash = "0123456789abcdef".repeat(4);
-        let gnu = format!(
-            "{hash}  lua-language-server-3.19.2-linux-x64.tar.gz
-{hash}  other.zip
-"
-        );
-        assert_eq!(
-            parse_checksum_file(&gnu, "lua-language-server-3.19.2-linux-x64.tar.gz").as_deref(),
-            Some(hash.as_str())
-        );
-        assert!(parse_checksum_file(&gnu, "missing.zip").is_none());
-        let star = format!(
-            "{hash} *rust-analyzer-linux.gz
-"
-        );
-        assert_eq!(
-            parse_checksum_file(&star, "rust-analyzer-linux.gz").as_deref(),
-            Some(hash.as_str())
-        );
-        let bsd = format!(
-            "SHA256 (clangd-linux-23.1.0.zip) = {hash}
-"
-        );
-        assert_eq!(
-            parse_checksum_file(&bsd, "clangd-linux-23.1.0.zip").as_deref(),
-            Some(hash.as_str())
-        );
-        assert!(parse_checksum_file(
-            "# comment
-not a checksum",
-            "x"
-        )
-        .is_none());
     }
 
     #[test]

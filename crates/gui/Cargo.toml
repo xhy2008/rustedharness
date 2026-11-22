@@ -12,8 +12,6 @@ desktop = ["dep:tauri", "dep:tauri-build", "dep:rustedharness-web", "dep:tokio"]
 [dependencies]
 rustedharness-core = { path = "../core" }
 rustedharness-web = { path = "../web", optional = true }
-serde.workspace = true
-serde_json.workspace = true
 tauri = { version = "2", optional = true }
 tauri-build = { version = "2", optional = true }
 tokio = { workspace = true, optional = true }

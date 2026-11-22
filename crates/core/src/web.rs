@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
 use crate::provider::{Backend, ChatMessage, ChatRequest};
-use tokio_util::sync::CancellationToken;
 
 const MAX_BODY_BYTES: usize = 2_000_000;
 const MAX_MARKDOWN_CHARS: usize = 60_000;
@@ -450,16 +449,9 @@ async fn extract_with_compact(
         tools: Vec::new(),
         temperature: Some(0.0),
         max_tokens: Some(1_500),
-        stream: true,
+        stream: false,
     };
-    // The completions backend only actually works over the SSE streaming
-    // endpoint; `Backend::complete` forces `stream:false` but still parses the
-    // response as a stream, so many gateways yield zero chunks and an empty
-    // completion. Call stream_chat directly with streaming enabled — with no
-    // sink the full completion is still returned — so extraction succeeds.
-    let completion = backend
-        .stream_chat(request, None, CancellationToken::new())
-        .await?;
+    let completion = backend.complete(request).await?;
     Ok(completion.content)
 }
 
@@ -561,36 +553,31 @@ mod tests {
     use crate::provider::{Completion, StreamEvent};
     use tokio::sync::mpsc::UnboundedSender;
 
-    /// Mimics the OpenAI-compatible gateways that broke extraction: they only
-    /// emit tokens over the SSE streaming endpoint. A non-streaming request
-    /// (stream=false) returns an empty completion.
-    struct StreamOnlyBackend;
+    /// Extraction must use the non-streaming completion path. The provider
+    /// implements that path per protocol, so a backend only has to answer the
+    /// request it is given.
+    struct ExtractionBackend;
 
     #[async_trait::async_trait]
-    impl Backend for StreamOnlyBackend {
+    impl Backend for ExtractionBackend {
         async fn stream_chat(
             &self,
             request: ChatRequest,
             _sink: Option<UnboundedSender<StreamEvent>>,
             _cancel: tokio_util::sync::CancellationToken,
         ) -> Result<Completion> {
-            if request.stream {
-                Ok(Completion {
-                    content: "extracted: the page is about Rust".to_string(),
-                    ..Default::default()
-                })
-            } else {
-                // The gateway returns a bare JSON body that the SSE parser
-                // turns into zero chunks — the original silent-empty bug.
-                Ok(Completion::default())
-            }
+            assert!(!request.stream, "compaction/extraction should not stream");
+            Ok(Completion {
+                content: "extracted: the page is about Rust".to_string(),
+                ..Default::default()
+            })
         }
     }
 
     #[tokio::test]
-    async fn compact_extraction_returns_content_through_streaming_path() {
+    async fn compact_extraction_uses_the_non_streaming_completion() {
         let out = extract_with_compact(
-            &StreamOnlyBackend,
+            &ExtractionBackend,
             "test/model",
             "https://example.com",
             "Rust is a language.",

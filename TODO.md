@@ -1,5 +1,25 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：移除 LSP 校验机制 + 非流式 completion（2026-11-22）
+
+1. **P0：`Backend::complete` 修复**。`Provider` 现在按 `request.stream` 分流：流式仍走
+   `create_stream_byot`，非流式走 `create_byot` 并解析普通 JSON Chat Completions 响应
+   （content、reasoning、tool_calls、usage、cache token）。`Compactor` 和网页抽取都恢复使用
+   `complete()`，删除了 `web.rs` 里“只能走流式绕行”的 workaround。新增 mock HTTP server 测试
+   `non_streaming_completion_parses_json_responses`。
+2. **移除 LSP checksum 机制**。删除 GitHub release digest 查询、checksum 文件解析、digest 缓存、
+   `lsp.downloads.<id>.sha256`、`--sha256`、`lsp checksum`、`ChecksumInfo`、`pin_sha256`、
+   `DownloadConsent.sha256`、TUI `/lsp checksum` 与网页 consent 里的 SHA-256 行。保留：
+   下载前 consent、HTTPS、host 白名单、256 MiB 上限、解压逃逸检查。
+3. **低风险清理**。删除 `ProcRegistry::spawn_pipe_fallback`（pty 失败返回 `E_PTY`）；
+   `ShellSpec` 不再保存 `tool_name`，按 `ShellFamily` 返回静态字符串，删除 `Box::leak`；
+   删除未使用依赖 `moka`、`tokio-stream`、`tower-http`、`tracing-subscriber`、`hex`、`sha2`
+   及各 crate 的未使用项。
+4. **文档**。README 与 `docs/architecture.md` 删除 checksum 流程，更新 CLI/TUI 命令和信任模型。
+5. **验证**。安装 `rustfmt` / `rust-clippy`（1.93.1）后跑通
+   `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+   `cargo test --workspace`；core 154 passed，tui 36 passed，web 4 passed，lsp_live 3 ignored。
+
 ## 已完成：LSP 下载进度 + 失败不再静默（2026-11-15 第二十七轮）
 
 用户报告：下载只有一句 `downloading`，任务管理器里几乎没网络流量，疑似静默失败。

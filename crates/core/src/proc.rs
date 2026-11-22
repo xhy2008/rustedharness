@@ -738,172 +738,54 @@ impl ProcRegistry {
         let finished_at = Arc::new(Mutex::new(None));
 
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows: self.config.pty_rows,
-            cols: self.config.pty_cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
-
-        if let Ok(pair) = pair {
-            let mut child = match pair.slave.spawn_command(cmd) {
-                Ok(child) => child,
-                Err(err) => {
-                    return Err(HarnessError::tool(
-                        "E_SPAWN",
-                        format!("failed to spawn {}: {err}", self.spec.program.display()),
-                    ));
-                }
-            };
-            drop(pair.slave);
-            let pid = child.process_id().unwrap_or(0);
-            let killer = child.clone_killer();
-            let reader = pair.master.try_clone_reader().ok();
-            // ConPTY (PSUEDOCONSOLE_INHERIT_CURSOR) starts by emitting a DSR
-            // cursor-position query on the output pipe and blocks all child
-            // output until something answers on the input pipe. Without a
-            // writer the shell never produces output at all.
-            let writer = pair.master.take_writer().ok();
-            let master: Box<dyn MasterPty + Send> = pair.master;
-
-            if let Some(mut reader) = reader {
-                let screen = screen.clone();
-                let raw = raw.clone();
-                let changed_at = changed_at.clone();
-                let pty_rows = self.config.pty_rows;
-                std::thread::spawn(move || {
-                    let mut writer = writer;
-                    let mut buf = [0u8; 8192];
-                    let mut pending: Vec<u8> = Vec::new();
-                    loop {
-                        match reader.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if let Ok(mut raw) = raw.lock() {
-                                    if raw.len() < MAX_RAW_BYTES {
-                                        let remaining = MAX_RAW_BYTES - raw.len();
-                                        raw.extend_from_slice(&buf[..n.min(remaining)]);
-                                    }
-                                }
-                                if let Ok(mut screen) = screen.lock() {
-                                    screen.feed(&buf[..n]);
-                                }
-                                if let Ok(mut t) = changed_at.lock() {
-                                    *t = Instant::now();
-                                }
-                                if let Some(writer) = writer.as_mut() {
-                                    pending.extend_from_slice(&buf[..n]);
-                                    answer_terminal_queries(&mut pending, writer, pty_rows);
-                                    if pending.len() > 256 {
-                                        pending.clear();
-                                    }
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                });
-            }
-
-            let entry = Arc::new(ProcEntry {
-                pid,
-                started: Instant::now(),
-                screen,
-                raw,
-                status: status.clone(),
-                exit_code: exit_code.clone(),
-                changed_at,
-                finished_at: finished_at.clone(),
-                killer: Mutex::new(Some(killer)),
-                _master: Mutex::new(Some(master)),
-            });
-            self.entries.lock().unwrap().insert(pid, entry.clone());
-
-            let status_wait = status.clone();
-            let exit_wait = exit_code.clone();
-            let finished_wait = finished_at.clone();
-            let events = self.events.clone();
-            let pid_wait = pid;
-            std::thread::spawn(move || {
-                let wait = child.wait();
-                let code = wait.as_ref().ok().map(|s| s.exit_code() as i32);
-                let mut status = status_wait.lock().unwrap();
-                if *status == ProcStatus::Running {
-                    *status = match &wait {
-                        Ok(_) => ProcStatus::Exited,
-                        Err(_) => ProcStatus::Failed,
-                    };
-                }
-                drop(status);
-                *exit_wait.lock().unwrap() = code;
-                *finished_wait.lock().unwrap() = Some(Instant::now());
-                if let Some(events) = events {
-                    let _ = events.send(HarnessEvent::ProcessExited {
-                        pid: pid_wait,
-                        status: "exited".into(),
-                        exit_code: code,
-                    });
-                }
-            });
-            return Ok(entry);
-        }
-
-        // Degraded path: pipe capture with CR folding. Kept for platforms or
-        // containers where a pty cannot be allocated.
-        self.spawn_pipe_fallback(
-            &args,
-            screen,
-            raw,
-            status,
-            exit_code,
-            changed_at,
-            finished_at,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_pipe_fallback(
-        &self,
-        args: &[String],
-        screen: Arc<Mutex<ScreenEmulator>>,
-        raw: Arc<Mutex<Vec<u8>>>,
-        status: Arc<Mutex<ProcStatus>>,
-        exit_code: Arc<Mutex<Option<i32>>>,
-        changed_at: Arc<Mutex<Instant>>,
-        finished_at: Arc<Mutex<Option<Instant>>>,
-    ) -> Result<Arc<ProcEntry>> {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&self.spec.program)
-            .args(args)
-            .current_dir(self.spec_cwd())
-            .env("TERM", "xterm-256color")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: self.config.pty_rows,
+                cols: self.config.pty_cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|err| {
                 HarnessError::tool(
-                    "E_SPAWN",
-                    format!("failed to spawn {} ({e})", self.spec.program.display()),
+                    "E_PTY",
+                    format!(
+                        "cannot allocate a pty for {}: {err}",
+                        self.spec.program.display()
+                    ),
                 )
             })?;
-        let pid = child.id();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        for stream in [
-            stdout.map(|s| Box::new(s) as Box<dyn Read + Send>),
-            stderr.map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let mut stream = stream;
+
+        let mut child = match pair.slave.spawn_command(cmd) {
+            Ok(child) => child,
+            Err(err) => {
+                return Err(HarnessError::tool(
+                    "E_SPAWN",
+                    format!("failed to spawn {}: {err}", self.spec.program.display()),
+                ));
+            }
+        };
+        drop(pair.slave);
+        let pid = child.process_id().unwrap_or(0);
+        let killer = child.clone_killer();
+        let reader = pair.master.try_clone_reader().ok();
+        // ConPTY (PSUEDOCONSOLE_INHERIT_CURSOR) starts by emitting a DSR
+        // cursor-position query on the output pipe and blocks all child
+        // output until something answers on the input pipe. Without a
+        // writer the shell never produces output at all.
+        let writer = pair.master.take_writer().ok();
+        let master: Box<dyn MasterPty + Send> = pair.master;
+
+        if let Some(mut reader) = reader {
             let screen = screen.clone();
             let raw = raw.clone();
             let changed_at = changed_at.clone();
+            let pty_rows = self.config.pty_rows;
             std::thread::spawn(move || {
+                let mut writer = writer;
                 let mut buf = [0u8; 8192];
+                let mut pending: Vec<u8> = Vec::new();
                 loop {
-                    match stream.read(&mut buf) {
+                    match reader.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
                             if let Ok(mut raw) = raw.lock() {
@@ -918,12 +800,20 @@ impl ProcRegistry {
                             if let Ok(mut t) = changed_at.lock() {
                                 *t = Instant::now();
                             }
+                            if let Some(writer) = writer.as_mut() {
+                                pending.extend_from_slice(&buf[..n]);
+                                answer_terminal_queries(&mut pending, writer, pty_rows);
+                                if pending.len() > 256 {
+                                    pending.clear();
+                                }
+                            }
                         }
                         Err(_) => break,
                     }
                 }
             });
         }
+
         let entry = Arc::new(ProcEntry {
             pid,
             started: Instant::now(),
@@ -933,17 +823,19 @@ impl ProcRegistry {
             exit_code: exit_code.clone(),
             changed_at,
             finished_at: finished_at.clone(),
-            killer: Mutex::new(None),
-            _master: Mutex::new(None),
+            killer: Mutex::new(Some(killer)),
+            _master: Mutex::new(Some(master)),
         });
         self.entries.lock().unwrap().insert(pid, entry.clone());
+
         let status_wait = status.clone();
         let exit_wait = exit_code.clone();
         let finished_wait = finished_at.clone();
         let events = self.events.clone();
+        let pid_wait = pid;
         std::thread::spawn(move || {
             let wait = child.wait();
-            let code = wait.as_ref().ok().and_then(|s| s.code());
+            let code = wait.as_ref().ok().map(|s| s.exit_code() as i32);
             let mut status = status_wait.lock().unwrap();
             if *status == ProcStatus::Running {
                 *status = match &wait {
@@ -956,7 +848,7 @@ impl ProcRegistry {
             *finished_wait.lock().unwrap() = Some(Instant::now());
             if let Some(events) = events {
                 let _ = events.send(HarnessEvent::ProcessExited {
-                    pid,
+                    pid: pid_wait,
                     status: "exited".into(),
                     exit_code: code,
                 });

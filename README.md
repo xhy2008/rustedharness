@@ -58,8 +58,7 @@ cargo run -p rustedharness-gui --features desktop
 model for any subcommand. `MODEL` may be `provider/model` or a bare model id
 that is unique across the configured providers. `run --json` emits one JSON
 event per line, and `run --resume <id>` continues a saved session. `run --yes`
-approves language server downloads without prompting (still requires a pinned
-SHA-256).
+approves language server downloads without prompting.
 
 ## Configuration
 
@@ -210,7 +209,7 @@ enabled. Rejected knobs are retried one at a time.
     "maxRestarts": 3,
     "requestTimeoutMs": 5000,
     "downloads": {
-      "rust-analyzer": { "version": "2026-11-02", "sha256": "<64 hex chars>" }
+      "rust-analyzer": { "version": "2026-11-02" }
     }
   },
   "mcp": {
@@ -227,8 +226,7 @@ enabled. Rejected knobs are retried one at a time.
 
 `lsp.downloads.<server>` is optional and only overrides the default flow:
 `version` pins a tag instead of taking the newest release, `url` replaces the
-whole URL (a mirror), `sha256` requires a specific digest, `binary` and
-`archive` describe an unusual layout.
+whole URL (a mirror), `binary` and `archive` describe an unusual layout.
 
 `model` and `compactModel` may point at different providers; the backend routes
 each request independently. `contextWindow` is the fallback for models that do
@@ -351,28 +349,9 @@ that costs no API quota - and the artifact is fetched with a direct `GET` of
 `.../releases/download/<tag>/<asset>`. Nothing is pinned in the registry, so a
 release every week never leaves a stale URL behind.
 
-The expected SHA-256 is then looked up, in order:
-
-1. a pinned `lsp.downloads.<server>.sha256` (explicit override, e.g. a mirror);
-2. the digest cached by a previous install;
-3. the GitHub release API: the asset's `digest` field, or a checksums file the
-   vendor attached to that release (`SHA256SUMS`, `*.sha256`).
-
-Only step 3 calls the API; a resolved digest is cached under
-`lsp/checksums/<server>/<version>.sha256`, so repeat installs read the cache and
-never call the API again. `GITHUB_TOKEN` is optional and only raises the API's
-anonymous 60-requests-per-hour quota.
-
-Verification is best effort, and the outcome is stated:
-
-- a published digest that matches means the binary is verified;
-- no digest at all (the vendor published none, the API is rate limited, or the
-  network is blocked) is reported as a warning and the install proceeds;
-- a published digest that does **not** match is a hard failure
-  (`E_LSP_CHECKSUM_MISMATCH`) and nothing is written to the cache.
-
-`lsp checksum <server>` prints what an install would verify, or says that the
-release publishes none, so a digest can be pinned before installing.
+Downloads are not checksum-verified. Trust comes from explicit consent, HTTPS
+only, a host whitelist, a 256 MiB archive cap and extraction checks that reject
+paths escaping the target directory.
 
 Shortly after startup the harness asks each *installed* server's release page
 for its newest tag and emits `update_available` when it differs from the cached
@@ -393,32 +372,26 @@ Transport rules are enforced for every download:
 rustedharness lsp list                    # registry + installed versions
 rustedharness lsp install rust-analyzer   # newest release, cached locally
 rustedharness lsp update rust-analyzer    # re-install the newest release
-rustedharness lsp checksum rust-analyzer  # show the digest and its source
 ```
 
-The TUI exposes the same four verbs under one command, so nothing LSP-related
-is a top-level slash command:
+The TUI exposes the same verbs under one command, so nothing LSP-related is a
+top-level slash command:
 
 | Command | Effect |
 | --- | --- |
 | `/lsp` | status panel: language, installed version, state |
 | `/lsp install <id>` | download the newest release |
 | `/lsp update <id>` | re-install from the newest release |
-| `/lsp checksum <id>` | digest an install would verify |
 
-Typing a space after `install`, `update` or `checksum` completes server ids
-from the registry and marks each one installed, downloadable, or manual. On the
-CLI every subcommand validates the id against the same registry, so a typo
-prints the valid list.
+Typing a space after `install` or `update` completes server ids from the
+registry and marks each one installed, downloadable, or manual. On the CLI
+every subcommand validates the id against the same registry, so a typo prints
+the valid list.
 
 The status line carries the live state: `lsp rust` while a server is up,
 `lsp rust warm` while it is still loading the workspace, `lsp c down` when it
 failed to start, and `+N` for the servers behind it. `/lsp` shows the full list
 with ids and versions.
-
-`lsp checksum` is informational: installation performs the same lookup and
-verification automatically. Set `GITHUB_TOKEN` only to raise the GitHub API
-quota; it is never required for a normal install.
 
 Without a server, L0 provides definitions, references, and identifier lookup
 from a real tree-sitter parse indexed in SQLite (stored per workspace under
@@ -484,9 +457,9 @@ to the same workspace anchoring and timeouts as built-in tools.
   symlink resolution; `..` traversal is rejected.
 - The web server binds to loopback by default. If exposed, use a token and a
   TLS-terminating proxy.
-- LSP downloads require explicit consent plus an explicitly pinned checksum.
-  `lsp checksum` only reads published release metadata; there is no
-  "trust anything from GitHub" install path.
+- LSP downloads require explicit consent and are restricted to HTTPS on
+  whitelisted hosts. They are not checksum-verified; run the harness in a
+  container or VM if the download source is not trusted.
 - Fetched web content is clearly marked untrusted and truncated.
 - Shell commands run with the user's privileges. The harness is not a sandbox;
   run it in a container or VM if you need isolation.
@@ -511,8 +484,8 @@ the platform webview stack
 These are documented substitutions or additions that keep the build portable
 and the trust model explicit:
 
-- **Language-server downloads** never invent checksums; the user must pin one.
-  `lsp checksum` helps discover the official digest but does not weaken this.
+- **Language-server downloads** are consented, HTTPS-only and host-whitelisted,
+  but not checksum-verified.
 - **GUI** is an optional `desktop` feature rather than a default build target.
 
 ## License

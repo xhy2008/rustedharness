@@ -904,13 +904,6 @@ fn draw_consent(app: &App, frame: &mut Frame, body: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(clip(&card.url, text_width), style(DIM))),
-        Line::from(Span::styled(
-            match &card.sha256 {
-                Some(sha256) => format!("sha256 {}", clip(sha256, text_width)),
-                None => "sha256 none published - installing unverified".to_string(),
-            },
-            style(FAINT),
-        )),
     ];
     if let Some(hint) = &card.runtime_hint {
         lines.push(Line::from(Span::styled(
@@ -1158,7 +1151,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "/lsp install <id>   /lsp update <id>   /lsp checksum <id>",
+                "/lsp install <id>   /lsp update <id>",
                 style(FAINT),
             )));
             draw_info_block(frame, body, lines);

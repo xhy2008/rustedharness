@@ -101,27 +101,14 @@ struct LspArgs {
 enum LspCommand {
     /// Show the built-in server registry and availability.
     List,
-    /// Install the newest release of a server (verified when the release
-    /// publishes a digest).
+    /// Install the newest release of a server.
     Install {
         /// Server id, e.g. rust-analyzer.
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
         server: String,
-        /// Require this SHA-256 instead of the published digest.
-        #[arg(long, value_name = "HEX")]
-        sha256: Option<String>,
     },
     /// Re-install a server from its newest release.
     Update {
-        #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
-        server: String,
-        /// Require this SHA-256 instead of the published digest.
-        #[arg(long, value_name = "HEX")]
-        sha256: Option<String>,
-    },
-    /// Show the SHA-256 an install would verify, if the release publishes one.
-    Checksum {
-        /// Server id, e.g. rust-analyzer.
         #[arg(value_parser = clap::builder::PossibleValuesParser::new(lsp_server_ids()))]
         server: String,
     },
@@ -456,7 +443,6 @@ async fn pump(
                 display_name,
                 version,
                 url,
-                sha256,
                 runtime_hint,
                 ..
             } => {
@@ -465,10 +451,7 @@ async fn pump(
                     agent.grant_download(&server_id, true);
                     continue;
                 }
-                let sha256 = sha256.as_deref().unwrap_or("none published");
-                eprintln!(
-                    "\n{display_name} {version} is not installed.\n  {url}\n  sha256: {sha256}"
-                );
+                eprintln!("\n{display_name} {version} is not installed.\n  {url}");
                 if let Some(hint) = runtime_hint {
                     eprintln!("  runtime: {hint}");
                 }
@@ -560,37 +543,19 @@ async fn lsp_command(config: Config, cwd: PathBuf, args: LspArgs) -> Result<()> 
                 );
             }
             println!(
-                concat!(
-                    "{} servers in the built-in registry. Downloads take the newest GitHub ",
-                    "release and verify its published SHA-256 when the vendor provides one; ",
-                    "`lsp checksum <id>` only inspects the digest."
-                ),
+                "{} servers in the built-in registry. Downloads take the newest GitHub release.",
                 registry().len()
             );
             hub.shutdown_all().await;
             Ok(())
         }
-        LspCommand::Install { server, sha256 } => {
-            lsp_install(config, cwd, &server, sha256.as_deref(), false).await
-        }
-        LspCommand::Update { server, sha256 } => {
-            lsp_install(config, cwd, &server, sha256.as_deref(), true).await
-        }
-        LspCommand::Checksum { server } => lsp_checksum(config, cwd, &server).await,
+        LspCommand::Install { server } => lsp_install(config, cwd, &server, false).await,
+        LspCommand::Update { server } => lsp_install(config, cwd, &server, true).await,
     }
 }
 
-async fn lsp_install(
-    config: Config,
-    cwd: PathBuf,
-    server: &str,
-    sha256: Option<&str>,
-    update: bool,
-) -> Result<()> {
-    let mut lsp = config.lsp;
-    if let Some(sha) = sha256 {
-        rustedharness_core::lsp::pin_sha256(&mut lsp, server, sha)?;
-    }
+async fn lsp_install(config: Config, cwd: PathBuf, server: &str, update: bool) -> Result<()> {
+    let lsp = config.lsp;
     // Progress goes to stderr so the caller's stdout stays clean. Without a
     // sink a 50 MB download prints nothing at all and reads as a hang.
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -630,42 +595,6 @@ async fn lsp_install(
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sink).await;
     let path = result?;
     println!("installed {server}: {}", path.display());
-    Ok(())
-}
-
-async fn lsp_checksum(config: Config, cwd: PathBuf, server: &str) -> Result<()> {
-    let config_path = config.source_dir().join("config.json");
-    let info = rustedharness_core::lsp::checksum_server(&config.lsp, &cwd, server).await?;
-    println!("server:  {}", info.server_id);
-    println!("version: {}", info.version);
-    println!("url:     {}", info.url);
-    match &info.sha256 {
-        Some(sha256) => {
-            println!("sha256:  {sha256}");
-            println!("source:  {}", info.source);
-            let snippet = serde_json::json!({
-                "lsp": { "downloads": { info.server_id.clone(): { "sha256": sha256 } } }
-            });
-            println!(
-                "\nInstall verifies this digest automatically; pin it in {} only to override:",
-                config_path.display()
-            );
-            println!("{}", serde_json::to_string_pretty(&snippet)?);
-        }
-        None => {
-            println!("sha256:  none published");
-            println!("source:  {}", info.source);
-            println!(
-                "\nThe install would proceed without verification. Pin a digest in {} \
-                 (\"sha256\") to require one.",
-                config_path.display()
-            );
-        }
-    }
-    println!(
-        "\nInstall now: rustedharness lsp install {}",
-        info.server_id
-    );
     Ok(())
 }
 

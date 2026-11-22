@@ -154,14 +154,14 @@ struct ChatMessageWire {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WireContent {
     Text(String),
     Parts(Vec<WirePart>),
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum WirePart {
     #[serde(rename = "text")]
@@ -172,7 +172,7 @@ enum WirePart {
     Unknown,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct WireImageUrl {
     url: String,
 }
@@ -433,10 +433,6 @@ impl Provider {
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
-    }
-
-    pub fn compat(&self) -> &Compat {
-        &self.compat
     }
 
     fn body(&self, request: &ChatRequest, degraded_without: Option<&str>) -> Value {
@@ -743,6 +739,118 @@ struct WireUsage {
     cached_tokens: Option<u64>,
 }
 
+impl WireUsage {
+    fn into_usage(self) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: self.total_tokens,
+            cached_tokens: self
+                .cached_tokens
+                .or_else(|| {
+                    self.prompt_tokens_details
+                        .as_ref()
+                        .and_then(|details| details.cached_tokens)
+                })
+                .unwrap_or(0),
+            cost_usd: self.cost_usd,
+        }
+    }
+}
+
+/// A non-streaming Chat Completions response.
+#[derive(Debug, Deserialize)]
+struct WireResponse {
+    #[serde(default)]
+    choices: Vec<WireResponseChoice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireResponseChoice {
+    #[serde(default)]
+    message: WireResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WireResponseMessage {
+    #[serde(default)]
+    content: Option<WireContent>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireResponseToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireResponseToolCall {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<WireFunction>,
+}
+
+impl WireResponse {
+    fn into_completion(self) -> Completion {
+        let mut completion = Completion::default();
+        if let Some(usage) = self.usage {
+            completion.usage = Some(usage.into_usage());
+        }
+        let mut call_index = 0usize;
+        for choice in self.choices {
+            if let Some(reason) = choice.finish_reason {
+                completion.finish_reason = Some(reason);
+            }
+            if let Some(content) = choice.message.content {
+                completion.content.push_str(&wire_content_text(content));
+            }
+            if let Some(reasoning) = choice.message.reasoning_content {
+                completion.reasoning.push_str(&reasoning);
+            }
+            for call in choice.message.tool_calls.unwrap_or_default() {
+                let WireResponseToolCall { id, function } = call;
+                let Some(function) = function else {
+                    continue;
+                };
+                let name = function.name.unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let id = id
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| format!("call_{call_index}"));
+                call_index += 1;
+                completion.tool_calls.push(ToolCall {
+                    id,
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name,
+                        arguments: function.arguments.unwrap_or_default(),
+                    },
+                });
+            }
+        }
+        completion
+    }
+}
+
+fn wire_content_text(content: WireContent) -> String {
+    match content {
+        WireContent::Text(text) => text,
+        WireContent::Parts(parts) => parts
+            .into_iter()
+            .filter_map(|part| match part {
+                WirePart::Text { text } => Some(text),
+                WirePart::ImageUrl { .. } | WirePart::Unknown => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 #[async_trait::async_trait]
 impl Backend for Provider {
     async fn stream_chat(
@@ -755,29 +863,50 @@ impl Backend for Provider {
         let mut last_error = String::new();
 
         for degraded in candidates {
-            let body = self.body(&request, degraded);
-            // Guard the request itself with cancellation: `create_stream_byot`
-            // awaits the response headers, which is where a slow or rate-limited
-            // provider stalls — without this the cancel token cannot interrupt
-            // until the first chunk arrives.
-            let chat = self.client.chat();
-            let request_future = chat.create_stream_byot::<Value, WireChunk>(body);
-            let created = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                result = request_future => result,
-            };
-            drop(chat);
-            let stream = match created {
-                Ok(stream) => stream,
+            match self
+                .send_once(&request, degraded, sink.as_ref(), &cancel)
+                .await
+            {
+                Ok(completion) => return Ok(completion),
                 Err(err) => {
                     let text = err.to_string();
                     if is_compat_rejection(&text) {
                         last_error = text;
                         continue;
                     }
-                    return Err(HarnessError::Provider(format!("{}: {text}", self.name)));
+                    return Err(err);
                 }
+            }
+        }
+
+        Err(HarnessError::Provider(format!(
+            "{}: all compatibility fallbacks failed: {last_error}",
+            self.name
+        )))
+    }
+}
+
+impl Provider {
+    async fn send_once(
+        &self,
+        request: &ChatRequest,
+        degraded_without: Option<&str>,
+        sink: Option<&UnboundedSender<StreamEvent>>,
+        cancel: &CancellationToken,
+    ) -> Result<Completion> {
+        let body = self.body(request, degraded_without);
+        let chat = self.client.chat();
+        if request.stream {
+            // Guard the request itself with cancellation: the client awaits the
+            // response headers before the first event, which is where a slow or
+            // rate-limited provider stalls.
+            let request_future = chat.create_stream_byot::<Value, WireChunk>(body);
+            let created = tokio::select! {
+                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+                result = request_future => result,
             };
+            drop(chat);
+            let stream = created.map_err(|err| self.provider_error(err))?;
 
             let mut completion = Completion::default();
             let mut calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
@@ -788,26 +917,9 @@ impl Backend for Provider {
                     item = stream.next() => item,
                 };
                 let Some(item) = item else { break };
-                let chunk = match item {
-                    Ok(chunk) => chunk,
-                    Err(err) => return Err(HarnessError::Provider(err.to_string())),
-                };
+                let chunk = item.map_err(|err| self.provider_error(err))?;
                 if let Some(usage) = chunk.usage {
-                    completion.usage = Some(Usage {
-                        prompt_tokens: usage.prompt_tokens,
-                        completion_tokens: usage.completion_tokens,
-                        total_tokens: usage.total_tokens,
-                        cached_tokens: usage
-                            .cached_tokens
-                            .or_else(|| {
-                                usage
-                                    .prompt_tokens_details
-                                    .as_ref()
-                                    .and_then(|d| d.cached_tokens)
-                            })
-                            .unwrap_or(0),
-                        cost_usd: usage.cost_usd,
-                    });
+                    completion.usage = Some(usage.into_usage());
                 }
                 for choice in chunk.choices {
                     if let Some(reason) = choice.finish_reason {
@@ -816,7 +928,7 @@ impl Backend for Provider {
                     if let Some(text) = choice.delta.content {
                         if !text.is_empty() {
                             completion.content.push_str(&text);
-                            if let Some(sink) = &sink {
+                            if let Some(sink) = sink {
                                 let _ = sink.send(StreamEvent::Delta(text));
                             }
                         }
@@ -824,7 +936,7 @@ impl Backend for Provider {
                     if let Some(reasoning) = choice.delta.reasoning_content {
                         if !reasoning.is_empty() {
                             completion.reasoning.push_str(&reasoning);
-                            if let Some(sink) = &sink {
+                            if let Some(sink) = sink {
                                 let _ = sink.send(StreamEvent::Reasoning(reasoning));
                             }
                         }
@@ -868,10 +980,18 @@ impl Backend for Provider {
             return Ok(completion);
         }
 
-        Err(HarnessError::Provider(format!(
-            "{}: all compatibility fallbacks failed: {last_error}",
-            self.name
-        )))
+        let request_future = chat.create_byot::<Value, WireResponse>(body);
+        let created = tokio::select! {
+            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+            result = request_future => result,
+        };
+        drop(chat);
+        let response = created.map_err(|err| self.provider_error(err))?;
+        Ok(response.into_completion())
+    }
+
+    fn provider_error(&self, err: impl std::fmt::Display) -> HarnessError {
+        HarnessError::Provider(format!("{}: {err}", self.name))
     }
 }
 
@@ -1148,5 +1268,78 @@ mod tests {
         assert_eq!(body["parallel_tool_calls"], true);
         let body = p.body(&request, Some("max_tokens"));
         assert!(body.get("max_tokens").is_none());
+    }
+
+    /// Serve one HTTP request and return the bound base URL. The caller only
+    /// needs the response, so the request body is drained but not parsed.
+    async fn one_shot_json_server(response: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/v1")
+    }
+
+    #[tokio::test]
+    async fn non_streaming_completion_parses_json_responses() {
+        let base_url = one_shot_json_server(
+            r#"{
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello from json",
+                        "tool_calls": [{
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"}
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 4,
+                    "total_tokens": 7,
+                    "prompt_tokens_details": {"cached_tokens": 2}
+                }
+            }"#,
+        )
+        .await;
+        let provider = Provider::from_provider(
+            &ProviderConfig {
+                base_url,
+                ..Default::default()
+            },
+            "test-key".into(),
+        )
+        .unwrap();
+
+        let completion = provider
+            .complete(ChatRequest::new("m", vec![ChatMessage::user("hi")]))
+            .await
+            .unwrap();
+
+        assert_eq!(completion.content, "hello from json");
+        assert_eq!(completion.finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(completion.tool_calls.len(), 1);
+        assert_eq!(completion.tool_calls[0].id, "call_abc");
+        assert_eq!(completion.tool_calls[0].function.name, "read");
+        let usage = completion.usage.expect("usage");
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(usage.cached_tokens, 2);
     }
 }
