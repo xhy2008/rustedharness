@@ -881,9 +881,10 @@ pub fn system_prompt(cwd: &Path, spec: &ShellSpec, model: &str) -> String {
          1. Paths: relative paths are anchored at the session cwd; never access \
          outside the workspace root. Shell commands always start in the session \
          cwd (no persistent `cd`).\n\
-         2. Reading: `read` returns `line#anchor|content`. Pass the exact anchor, \
-         e.g. pos=\"12#AB\", to `edit`. Only lines N-1/N/N+1 of an edit have their \
-         anchors invalidated; re-read if you are unsure.\n\
+         2. Reading: `read` returns `line#anchor|content`. Line numbers select the \
+         edit position; the anchor verifies that line's content. Pass it, e.g. \
+         pos=\"12#AB\", to `edit`. An edit changes only that line's anchor; inserts \
+         and deletes shift line numbers, so use the anchors returned by the edit.\n\
          3. Editing: prefer `edit` with a batch of edits[] applied bottom-up. Never \
          include the `line#anchor|` prefix or diff markers in `lines`. A stale \
          anchor rejects the whole batch (E_STALE_ANCHOR) and returns the current \

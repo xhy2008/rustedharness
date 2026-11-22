@@ -52,10 +52,11 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> String {
-        "Apply one or more anchored patches to an existing file. Each edit is \
+        "Apply one or more line-numbered patches to an existing file. Each edit is \
          {op: replace|insert_before|insert_after|delete|replace_text, pos: line or \
-         \"line#anchor\", end?, lines?, oldText?, newText?}. All edits are validated \
-         against one pre-edit snapshot and applied bottom-up; any stale anchor rejects \
+         \"line#anchor\", end?, lines?, oldText?, newText?}. Line numbers choose the \
+         position; an anchor verifies that line's current content. All edits are \
+         validated against one pre-edit snapshot and applied bottom-up; any stale anchor rejects \
          the whole batch with E_STALE_ANCHOR and the current anchor table. replace_text \
          uses oldText/newText and must be the ONLY edit in a call; mixing it with any \
          other edit (or several replace_text ops) fails with E_INVALID_PATCH. Never include \
@@ -99,7 +100,16 @@ impl Tool for EditTool {
                 format!("refusing to edit binary file {}", ctx.rel(&path)),
             ));
         }
-        let original = String::from_utf8_lossy(&raw).to_string();
+        // `is_binary` already rejects invalid UTF-8; keep this explicit so the
+        // edit path never turns undecodable bytes into replacement characters.
+        let original = std::str::from_utf8(&raw)
+            .map_err(|_| {
+                HarnessError::tool(
+                    "E_BINARY",
+                    format!("refusing to edit non-UTF-8 file {}", ctx.rel(&path)),
+                )
+            })?
+            .to_string();
         let width = ctx.config.edit.anchor_width;
         let applied = apply_edits(
             &original,
@@ -229,6 +239,16 @@ impl NormOp {
             NormOp::InsertBefore { at, .. } | NormOp::InsertAfter { at, .. } => (*at, *at),
         }
     }
+
+    /// Lines are inserted between `slot - 1` and `slot`. Both
+    /// `insert_after N` and `insert_before N + 1` address the same slot.
+    fn insertion_slot(&self) -> Option<usize> {
+        match self {
+            NormOp::InsertBefore { at, .. } => Some(*at),
+            NormOp::InsertAfter { at, .. } => Some(at.saturating_add(1)),
+            NormOp::Replace { .. } | NormOp::Delete { .. } => None,
+        }
+    }
 }
 
 /// Pure batch-validation + application, also used by the unit tests.
@@ -240,7 +260,9 @@ pub fn apply_edits(
 ) -> Result<Applied> {
     let crlf = original.contains("\r\n");
     let trailing_newline = original.ends_with('\n');
-    let original_lines: Vec<String> = original.lines().map(|s| s.replace('\r', "")).collect();
+    // `str::lines` already removes CRLF; keep any embedded CR intact so an
+    // edit round-trips the file exactly as `read` saw it.
+    let original_lines: Vec<String> = original.lines().map(str::to_string).collect();
     let total = original_lines.len();
     let refs: Vec<&str> = original_lines.iter().map(|s| s.as_str()).collect();
     let anchors = hashline::anchors(&refs, width);
@@ -423,7 +445,30 @@ pub fn apply_edits(
         normalized.push(op);
     }
 
-    // Overlap: ranges must be disjoint; two inserts at the same point conflict.
+    // Overlap: ranges must be disjoint; two inserts at the same boundary
+    // conflict even when one is `insert_after N` and the other is
+    // `insert_before N + 1`.
+    let mut slots: Vec<(usize, usize)> = normalized
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| op.insertion_slot().map(|slot| (slot, i)))
+        .collect();
+    slots.sort_unstable();
+    for pair in slots.windows(2) {
+        let (slot, i1) = pair[0];
+        let (_, i2) = pair[1];
+        if pair[0].0 == pair[1].0 {
+            return Err(HarnessError::tool_details(
+                "E_OVERLAP",
+                format!(
+                    "edits #{i1} and #{i2} insert at the same position; split them into separate \
+                     calls"
+                ),
+                json!({ "first": [slot, slot], "second": [slot, slot] }),
+            ));
+        }
+    }
+
     let mut spans: Vec<(usize, usize, usize)> = normalized
         .iter()
         .enumerate()
@@ -612,6 +657,16 @@ mod tests {
     }
 
     #[test]
+    fn insert_after_and_insert_before_same_boundary_conflict() {
+        let edits = vec![
+            op(EditOpKind::InsertBefore, 3, None, &["B"]),
+            op(EditOpKind::InsertAfter, 2, None, &["A"]),
+        ];
+        let err = apply_edits(SRC, &edits, 2, true).unwrap_err();
+        assert_eq!(err.code(), "E_OVERLAP");
+    }
+
+    #[test]
     fn delete_range_and_multiple_ops() {
         let applied = apply_edits(
             SRC,
@@ -628,7 +683,7 @@ mod tests {
 
     #[test]
     fn stale_anchor_rejects_whole_batch() {
-        let anchor = hashline::anchor_at(&SRC.lines().collect::<Vec<_>>(), 1, 2);
+        let anchor = hashline::anchors(&SRC.lines().collect::<Vec<_>>(), 2)[1].clone();
         let bad = EditOpArgs {
             op: EditOpKind::Replace,
             pos: json!(format!("2#{}", if anchor == "ZZ" { "YY" } else { "ZZ" })),
@@ -750,6 +805,18 @@ mod tests {
             apply_edits(src, &[op(EditOpKind::Replace, 2, None, &["BETA"])], 2, true).unwrap();
         let text = reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline);
         assert_eq!(text, "alpha\r\nBETA\r\n");
+    }
+
+    #[test]
+    fn embedded_cr_survives_an_edit() {
+        let src = "a\rb\nc\n";
+        let applied =
+            apply_edits(src, &[op(EditOpKind::Replace, 2, None, &["C"])], 2, true).unwrap();
+        assert_eq!(applied.new_lines[0], "a\rb");
+        assert_eq!(
+            reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline),
+            "a\rb\nC\n"
+        );
     }
 
     #[test]

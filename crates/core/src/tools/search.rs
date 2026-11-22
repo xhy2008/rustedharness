@@ -108,7 +108,7 @@ impl Tool for GrepTool {
                 if crate::tools::fs_tools::is_binary(&bytes) {
                     return None;
                 }
-                let text = String::from_utf8_lossy(&bytes);
+                let text = std::str::from_utf8(&bytes).ok()?;
                 let lines: Vec<&str> = text.lines().collect();
                 let mut hits = Vec::new();
                 let mut file_anchors: Option<Vec<String>> = None;

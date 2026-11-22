@@ -301,9 +301,10 @@ cannot impersonate instructions. `web_search` uses `BRAVE_API_KEY` and
 
 ### Anchored editing (Hashline)
 
-`read` returns lines tagged as `line#anchor|content`. The anchor is an xxHash32
-of the line and its neighbourhood, rendered in the alphabet
-`ZPMQVRWSNKTXJBYH`. `edit` accepts a batch:
+`read` returns lines tagged as `line#anchor|content`. Line numbers choose the
+position; the anchor is an xxHash32 of that line's normalized content, rendered
+in the alphabet `ZPMQVRWSNKTXJBYH`, and only confirms the line is still the one
+the model saw. `edit` accepts a batch:
 
 ```json
 {
@@ -320,9 +321,11 @@ Anchor width defaults to 2 characters and can be raised to 4 with
 `delete`, and `replace_text`.
 
 If any anchor is stale, the whole batch is rejected with `E_STALE_ANCHOR`; no
-partial write occurs. Editing a line invalidates the anchors of its neighbours,
-and `write` into an existing file appends without destroying content. The
-append result message is exactly `文件已存在，内容已追加`.
+partial write occurs. Editing a line changes only that line's anchor; inserts
+and deletes shift later line numbers, so the edit result returns fresh anchors
+for the shifted range. Identical lines share an anchor because the hash covers
+only content, not neighbours. `write` into an existing file appends without
+destroying content. The append result message is exactly `文件已存在，内容已追加`.
 
 ## Language servers
 

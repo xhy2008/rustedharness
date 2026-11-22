@@ -85,12 +85,16 @@ This is the only tool-level policy: all tools are auto-allowed otherwise.
 
 ### Hashline editing
 
-`hashline.rs` hashes `(previous, current, next)` lines with xxHash32, normalizes
-trailing whitespace/CR, and encodes the hash in a short alphabet. `read` emits
-`line#anchor|content`; `edit` validates anchors against one snapshot, sorts
-operations bottom-up, rejects overlapping ranges, and applies nothing unless
-the whole batch is valid. The file is re-read before writing to detect external
-changes. `write` appends to existing files instead of truncating.
+`hashline.rs` hashes each line's normalized content with xxHash32, ignoring
+neighbouring lines, and encodes the hash in a short alphabet. `read` emits
+`line#anchor|content`; the line number is authoritative and the anchor only
+confirms that the line still has the content the model saw. Identical lines
+therefore share an anchor; collisions are accepted because the hash is a guard,
+not an identity. `edit` validates anchors against one snapshot, sorts operations
+bottom-up, rejects overlapping ranges and duplicate insertion points, and
+applies nothing unless the whole batch is valid. The file is re-read before
+writing to detect external changes. `write` appends to existing files instead of
+truncating.
 
 ### Token accounting
 

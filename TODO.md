@@ -1,5 +1,20 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：Hashline 改为逐行哈希 + 编辑数据完整性（2026-11-22）
+
+1. **锚点只哈希本行内容**。删除 `(prev, current, next)` 上下文哈希，改为
+   `xxh32(normalize(line))`；行号负责定位，锚点只验证该行内容仍是模型看到的那一行。
+   相同内容的不同行共享锚点，哈希碰撞按设计接受，不再为了唯一性扩大宽度。
+   编辑一行只失效该行锚点，插入/删除后返回位移范围的 fresh anchors。
+2. **行内 CR 不再丢失**。`apply_edits` 不再对所有行执行 `replace('\r', "")`；
+   `str::lines()` 已经处理 CRLF，行内 CR 原样保留并参与往返重建。
+3. **严格 UTF-8 / binary 检测**。`is_binary` 对完整文件做 `from_utf8` 校验，任意非法
+   字节都拒绝；`read`/`edit`/`grep` 不再用 `from_utf8_lossy` 把坏字节变成 `U+FFFD`。
+4. **插入边界冲突**。`insert_after N` 与 `insert_before N + 1` 是同一个插入 slot，
+   同一 slot 多次插入现在返回 `E_OVERLAP`，不再由排序决定先后。
+5. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot 测试；README、
+   `docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
+
 ## 已完成：移除 LSP 校验机制 + 非流式 completion（2026-11-22）
 
 1. **P0：`Backend::complete` 修复**。`Provider` 现在按 `request.stream` 分流：流式仍走

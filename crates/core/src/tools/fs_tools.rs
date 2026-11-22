@@ -94,7 +94,12 @@ impl Tool for ReadTool {
                 ),
             ));
         }
-        let text = String::from_utf8_lossy(&bytes).to_string();
+        let text = String::from_utf8(bytes).map_err(|_| {
+            HarnessError::tool(
+                "E_BINARY",
+                format!("refusing to read non-UTF-8 file {}", ctx.rel(&path)),
+            )
+        })?;
         read_text(ctx, &path, &text, &args)
     }
 }
@@ -213,11 +218,7 @@ fn list_dir(ctx: &ToolContext, path: &Path, limit: Option<usize>) -> Result<Tool
 }
 
 pub fn is_binary(bytes: &[u8]) -> bool {
-    let sample = &bytes[..bytes.len().min(8_000)];
-    if sample.contains(&0) {
-        return true;
-    }
-    std::str::from_utf8(sample).is_err() && std::str::from_utf8(bytes).is_err()
+    bytes.contains(&0) || std::str::from_utf8(bytes).is_err()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -351,6 +352,9 @@ mod tests {
     #[test]
     fn binary_detection() {
         assert!(is_binary(b"abc\0def"));
+        let mut late_invalid = vec![b'a'; 9_000];
+        late_invalid.push(0xff);
+        assert!(is_binary(&late_invalid));
         assert!(!is_binary("hello 世界".as_bytes()));
         assert!(!is_binary(b""));
     }

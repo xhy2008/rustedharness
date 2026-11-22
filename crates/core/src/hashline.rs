@@ -10,16 +10,11 @@ pub fn normalize_line(line: &str) -> &str {
     line.trim_end_matches('\r').trim_end()
 }
 
-/// Hash of the local context triple (previous, current, next). Duplicate
-/// content in a different context therefore gets a different anchor.
-pub fn context_hash(prev: &str, current: &str, next: &str) -> u32 {
-    let mut buf = Vec::with_capacity(prev.len() + current.len() + next.len() + 2);
-    buf.extend_from_slice(normalize_line(prev).as_bytes());
-    buf.push(0x1e);
-    buf.extend_from_slice(normalize_line(current).as_bytes());
-    buf.push(0x1e);
-    buf.extend_from_slice(normalize_line(next).as_bytes());
-    xxh32(&buf, 0)
+/// Hash of one line's normalized content. Anchors deliberately ignore
+/// neighbouring lines: the line number selects the position, and the anchor
+/// only verifies that the line still has the content the model saw.
+pub fn line_hash(line: &str) -> u32 {
+    xxh32(normalize_line(line).as_bytes(), 0)
 }
 
 fn encode(mut hash: u32, width: usize) -> String {
@@ -35,19 +30,14 @@ fn encode(mut hash: u32, width: usize) -> String {
     out
 }
 
-/// Anchor for line `idx` (0-based) within `lines`.
-pub fn anchor_at(lines: &[&str], idx: usize, width: usize) -> String {
-    let prev = if idx > 0 { lines[idx - 1] } else { "" };
-    let current = lines.get(idx).copied().unwrap_or("");
-    let next = lines.get(idx + 1).copied().unwrap_or("");
-    encode(context_hash(prev, current, next), width)
+/// Anchor for one line's content.
+pub fn anchor(line: &str, width: usize) -> String {
+    encode(line_hash(line), width)
 }
 
 /// Anchors for all lines.
 pub fn anchors(lines: &[&str], width: usize) -> Vec<String> {
-    (0..lines.len())
-        .map(|i| anchor_at(lines, i, width))
-        .collect()
+    lines.iter().map(|line| anchor(line, width)).collect()
 }
 
 /// Anchors for a 1-based inclusive line range. Returns `(line_no, anchor)`.
@@ -63,7 +53,7 @@ pub fn anchors_range(
     let start = start.max(1).min(lines.len());
     let end = end.max(start).min(lines.len());
     (start..=end)
-        .map(|n| (n, anchor_at(lines, n - 1, width)))
+        .map(|n| (n, anchor(lines[n - 1], width)))
         .collect()
 }
 
@@ -162,10 +152,10 @@ mod tests {
     fn width_is_configurable_and_clamped() {
         let lines = lines_of("a\nb");
         for w in 2..=4 {
-            assert_eq!(anchor_at(&lines, 1, w).len(), w);
+            assert_eq!(anchor(lines[1], w).len(), w);
         }
-        assert_eq!(anchor_at(&lines, 1, 1).len(), 2);
-        assert_eq!(anchor_at(&lines, 1, 9).len(), 4);
+        assert_eq!(anchor(lines[1], 1).len(), 2);
+        assert_eq!(anchor(lines[1], 9).len(), 4);
     }
 
     #[test]
@@ -181,25 +171,26 @@ mod tests {
         let b = lines_of("fn main() {\n\tlet 世界 = \"🌍\";\n}");
         let c = lines_of("fn main() {\n\tlet 世界 = \"🌎\";\n}");
         assert_eq!(anchors(&a, 2), anchors(&b, 2));
-        assert_ne!(anchor_at(&a, 1, 2), anchor_at(&c, 1, 2));
+        assert_ne!(anchor(a[1], 2), anchor(c[1], 2));
     }
 
     #[test]
-    fn duplicate_lines_differ_by_context() {
+    fn identical_lines_share_an_anchor() {
         let lines = lines_of("x\nsame\ny\nsame\nz");
-        assert_ne!(anchor_at(&lines, 1, 2), anchor_at(&lines, 3, 2));
+        assert_eq!(anchor(lines[1], 2), anchor(lines[3], 2));
+        assert_ne!(anchor(lines[0], 2), anchor(lines[1], 2));
     }
 
     #[test]
-    fn editing_n_invalidates_only_n_minus_one_to_n_plus_one() {
+    fn editing_a_line_invalidates_only_that_line() {
         let before = lines_of("one\ntwo\nthree\nfour\nfive");
-        let after = lines_of("one\ntwo\nTHREE\nfour\nfive");
-        let a = anchors(&before, 2);
-        let b = anchors(&after, 2);
+        let after = lines_of("one\ntwo\nTHREE!\nfour\nfive");
+        let a = anchors(&before, 4);
+        let b = anchors(&after, 4);
         assert_eq!(a[0], b[0]);
-        assert_ne!(a[1], b[1]);
+        assert_eq!(a[1], b[1]);
         assert_ne!(a[2], b[2]);
-        assert_ne!(a[3], b[3]);
+        assert_eq!(a[3], b[3]);
         assert_eq!(a[4], b[4]);
     }
 
@@ -209,8 +200,8 @@ mod tests {
         let got = anchors_range(&lines, 2, 3, 2);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, 2);
-        assert_eq!(got[0].1, anchor_at(&lines, 1, 2));
-        assert_eq!(got[1].1, anchor_at(&lines, 2, 2));
+        assert_eq!(got[0].1, anchor(lines[1], 2));
+        assert_eq!(got[1].1, anchor(lines[2], 2));
     }
 
     #[test]
