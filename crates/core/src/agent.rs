@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::compact::{Compactor, SummaryMode};
-use crate::config::{model_display, CompactionSettings, Config};
+use crate::config::{model_display, CompactionSettings, Config, StripContent};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
 use crate::lsp::LspHub;
@@ -322,6 +322,25 @@ impl Agent {
         settings.compact_strip_context = on;
         self.config
             .save_setting(&["agent", "compactStripContext"], json!(on))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
+    pub fn set_send_recent_turns(&self, turns: usize) -> Result<()> {
+        let turns = turns.max(1);
+        let mut settings = self.compaction_settings();
+        settings.send_recent_turns = turns;
+        self.config
+            .save_setting(&["agent", "sendRecentTurns"], json!(turns))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
+    pub fn set_strip_content(&self, content: StripContent) -> Result<()> {
+        let mut settings = self.compaction_settings();
+        settings.strip_content = content;
+        self.config
+            .save_setting(&["agent", "stripContent"], json!(content))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
     }

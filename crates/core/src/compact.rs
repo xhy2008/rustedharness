@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::CompactionSettings;
+use crate::config::{CompactionSettings, StripContent};
 use crate::error::Result;
 use crate::provider::{Backend, ChatMessage, ChatRequest, Role, ToolDefinition};
 use crate::session::{COMPACTION_PREFIX, SUMMARY_SUFFIX};
@@ -39,8 +39,10 @@ pub enum SummaryMode {
 pub struct Compactor {
     pub threshold: f64,
     pub keep_recent_turns: usize,
+    pub send_recent_turns: usize,
     pub context_limit: u64,
     pub strip_context: bool,
+    pub strip_content: StripContent,
     pub counter: Arc<UsageTracker>,
 }
 
@@ -53,8 +55,10 @@ impl Compactor {
         Self {
             threshold: settings.compact_threshold,
             keep_recent_turns: settings.keep_recent_turns,
+            send_recent_turns: settings.send_recent_turns,
             context_limit,
             strip_context: settings.compact_strip_context,
+            strip_content: settings.strip_content,
             counter,
         }
     }
@@ -125,14 +129,13 @@ impl Compactor {
                     .iter()
                     .take_while(|message| message.role == Role::System)
                     .count();
+                let dropped = &messages[system_end..plan.keep_from];
                 let elide_before = if self.strip_context {
-                    recent_turn_start(messages, self.keep_recent_turns.saturating_mul(2))
-                        .saturating_sub(system_end)
+                    recent_turn_start(dropped, self.send_recent_turns)
                 } else {
                     0
                 };
-                let transcript =
-                    render_transcript(&messages[system_end..plan.keep_from], elide_before);
+                let transcript = render_transcript(dropped, elide_before, self.strip_content);
                 (
                     vec![
                         ChatMessage::system(SUMMARY_SYSTEM),
@@ -197,11 +200,14 @@ fn recent_turn_start(messages: &[ChatMessage], turns: usize) -> usize {
     }
 }
 
-/// Render the dropped prefix for a separate summary model. Tool calls, tool
-/// results and reasoning before `elide_before` are omitted; the prose stays so
-/// the summary still knows what happened without paying to re-read old machine
-/// output.
-fn render_transcript(messages: &[ChatMessage], elide_before: usize) -> String {
+/// Render the dropped prefix for a separate summary model. Messages before
+/// `elide_before` keep their prose, while `strip_content` decides whether their
+/// tool output and reasoning are removed.
+fn render_transcript(
+    messages: &[ChatMessage],
+    elide_before: usize,
+    strip_content: StripContent,
+) -> String {
     let mut out = String::new();
     for (index, message) in messages.iter().enumerate() {
         let role = match message.role {
@@ -210,14 +216,16 @@ fn render_transcript(messages: &[ChatMessage], elide_before: usize) -> String {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        let elide = index < elide_before;
-        if message.role == Role::Tool && elide {
+        let old = index < elide_before;
+        let strip_tool = old && strip_content != StripContent::Nothing;
+        let strip_thinking = old && strip_content == StripContent::ToolOutputAndThinking;
+        if message.role == Role::Tool && strip_tool {
             let id = message.tool_call_id.as_deref().unwrap_or("unknown");
             out.push_str(&format!("[tool_result {id}] (output omitted)\n"));
             continue;
         }
         if let Some(reasoning) = &message.reasoning_content {
-            if !elide && !reasoning.is_empty() {
+            if !strip_thinking && !reasoning.is_empty() {
                 out.push_str(&format!("[reasoning] {reasoning}\n"));
             }
         }
@@ -225,13 +233,11 @@ fn render_transcript(messages: &[ChatMessage], elide_before: usize) -> String {
             out.push_str(&format!("[{role}] {content}\n"));
         }
         if let Some(calls) = &message.tool_calls {
-            if !elide {
-                for call in calls {
-                    out.push_str(&format!(
-                        "[tool_call {}] {} {}\n",
-                        call.id, call.function.name, call.function.arguments
-                    ));
-                }
+            for call in calls {
+                out.push_str(&format!(
+                    "[tool_call {}] {} {}\n",
+                    call.id, call.function.name, call.function.arguments
+                ));
             }
         }
         if let Some(id) = &message.tool_call_id {
@@ -292,8 +298,10 @@ mod tests {
         Compactor {
             threshold: 0.8,
             keep_recent_turns: 2,
+            send_recent_turns: 4,
             context_limit: 1_000,
             strip_context: true,
+            strip_content: StripContent::ToolOutputAndThinking,
             counter: Arc::new(UsageTracker::new()),
         }
     }
@@ -421,6 +429,17 @@ mod tests {
         if let Some(last) = msgs.last_mut() {
             last.reasoning_content = Some("hidden chain".into());
         }
+        msgs.push(ChatMessage::assistant_tool_calls(
+            None,
+            vec![crate::provider::ToolCall {
+                id: "c1".into(),
+                kind: "function".into(),
+                function: crate::provider::FunctionCall {
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+        ));
         msgs.push(ChatMessage::tool("c1", "very long old tool output"));
         msgs.push(ChatMessage::user("u1"));
         msgs.push(ChatMessage::assistant("a1"));
@@ -442,7 +461,8 @@ mod tests {
         msgs.push(ChatMessage::assistant("a3"));
         msgs.push(ChatMessage::user("last"));
         msgs.push(ChatMessage::assistant("done"));
-        let compact = compactor();
+        let mut compact = compactor();
+        compact.send_recent_turns = 2;
         let plan = compact.plan(&msgs).unwrap();
         compact
             .summarize(
@@ -462,6 +482,32 @@ mod tests {
         assert!(!transcript.contains("hidden chain"));
         assert!(transcript.contains("recent tool output"));
         assert!(transcript.contains("[tool_call c2] read"));
+        assert!(transcript.contains("[tool_call c1] read"));
+    }
+
+    #[test]
+    fn strip_content_controls_what_older_turns_lose() {
+        let mut answer = ChatMessage::assistant("answer");
+        answer.reasoning_content = Some("hidden chain".into());
+        let msgs = vec![
+            answer,
+            ChatMessage::tool("c1", "tool output"),
+            ChatMessage::user("recent"),
+            ChatMessage::assistant("done"),
+        ];
+        let nothing = render_transcript(&msgs, 2, StripContent::Nothing);
+        assert!(nothing.contains("hidden chain"));
+        assert!(nothing.contains("tool output"));
+
+        let tools = render_transcript(&msgs, 2, StripContent::ToolOutput);
+        assert!(tools.contains("hidden chain"));
+        assert!(!tools.contains("tool output"));
+        assert!(tools.contains("(output omitted)"));
+
+        let both = render_transcript(&msgs, 2, StripContent::ToolOutputAndThinking);
+        assert!(!both.contains("hidden chain"));
+        assert!(!both.contains("tool output"));
+        assert!(both.contains("(output omitted)"));
     }
 
     #[test]

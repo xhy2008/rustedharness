@@ -317,11 +317,16 @@ pub struct AgentConfig {
     pub compact_threshold: f64,
     /// Recent user/assistant turns kept verbatim across a compaction.
     pub keep_recent_turns: usize,
-    /// With a separate summary model, omit tool calls, tool results and
-    /// reasoning older than the last `2 * keepRecentTurns` user turns. The
+    /// With a separate summary model, omit content from older turns. The
     /// main-model path ignores this: it must reuse the live prompt verbatim
     /// to hit the provider cache.
     pub compact_strip_context: bool,
+    /// How many recent user turns are sent to the separate summary model in
+    /// full. Older turns keep their prose but lose the content selected by
+    /// `stripContent`.
+    pub send_recent_turns: usize,
+    /// What to remove from turns older than `sendRecentTurns`.
+    pub strip_content: StripContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Max todo chase injections per stall event.
@@ -342,6 +347,8 @@ impl Default for AgentConfig {
             compact_threshold: 0.80,
             keep_recent_turns: 8,
             compact_strip_context: true,
+            send_recent_turns: 16,
+            strip_content: StripContent::ToolOutputAndThinking,
             temperature: Some(0.2),
             chase_limit: 3,
             max_output_tokens: 8_192,
@@ -359,6 +366,8 @@ pub struct CompactionSettings {
     pub compact_threshold: f64,
     pub keep_recent_turns: usize,
     pub compact_strip_context: bool,
+    pub send_recent_turns: usize,
+    pub strip_content: StripContent,
 }
 
 impl From<&AgentConfig> for CompactionSettings {
@@ -367,6 +376,37 @@ impl From<&AgentConfig> for CompactionSettings {
             compact_threshold: cfg.compact_threshold,
             keep_recent_turns: cfg.keep_recent_turns,
             compact_strip_context: cfg.compact_strip_context,
+            send_recent_turns: cfg.send_recent_turns,
+            strip_content: cfg.strip_content,
+        }
+    }
+}
+
+/// What a separate summary model may omit from older turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StripContent {
+    #[serde(rename = "none")]
+    Nothing,
+    ToolOutput,
+    #[default]
+    ToolOutputAndThinking,
+}
+
+impl StripContent {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nothing => "none",
+            Self::ToolOutput => "tool output",
+            Self::ToolOutputAndThinking => "tool output and thinking",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Nothing => Self::ToolOutput,
+            Self::ToolOutput => Self::ToolOutputAndThinking,
+            Self::ToolOutputAndThinking => Self::Nothing,
         }
     }
 }
@@ -709,6 +749,7 @@ impl Config {
         self.agent.rate_limit_interval_secs = self.agent.rate_limit_interval_secs.clamp(1, 300);
         self.agent.compact_threshold = self.agent.compact_threshold.clamp(0.1, 0.99);
         self.agent.keep_recent_turns = self.agent.keep_recent_turns.max(1);
+        self.agent.send_recent_turns = self.agent.send_recent_turns.max(1);
         // Never invent a provider or model. An unset model stays unset and the
         // frontends render it as `None` until the user configures one.
         if !self.model.trim().is_empty() {
@@ -1194,6 +1235,20 @@ mod tests {
         assert_eq!(model_display(&cfg.model), "None");
         assert_eq!(cfg.agent.compact_threshold, 0.8);
         assert!(cfg.agent.compact_strip_context);
+        assert_eq!(cfg.agent.send_recent_turns, 16);
+        assert_eq!(cfg.agent.strip_content, StripContent::ToolOutputAndThinking);
+    }
+
+    #[test]
+    fn separated_compaction_options_parse() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"agent":{"keepRecentTurns":4,"sendRecentTurns":6,"stripContent":"toolOutput"}}"#,
+        )
+        .unwrap();
+        let settings = CompactionSettings::from(&cfg.agent);
+        assert_eq!(settings.keep_recent_turns, 4);
+        assert_eq!(settings.send_recent_turns, 6);
+        assert_eq!(settings.strip_content, StripContent::ToolOutput);
     }
 
     #[test]

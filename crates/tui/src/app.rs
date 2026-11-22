@@ -1520,52 +1520,68 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path, op_tx);
             }
-            Overlay::Settings { page, sel } => match page {
-                SettingsPage::Root => {
-                    if self
-                        .settings_items_for(page)
-                        .get(sel)
-                        .is_some_and(|item| item.value == "compaction")
-                    {
-                        self.overlay = Overlay::Settings {
-                            page: SettingsPage::Compaction,
-                            sel: 0,
+            Overlay::Settings { page, sel } => {
+                // `overlay_confirm` cleared the overlay before dispatching.
+                // Keep the panel open for toggles and numeric adjustments, so
+                // `adjust_setting` can still see which row is selected.
+                self.overlay = Overlay::Settings { page, sel };
+                match page {
+                    SettingsPage::Root => {
+                        if self
+                            .settings_items_for(page)
+                            .get(sel)
+                            .is_some_and(|item| item.value == "compaction")
+                        {
+                            self.overlay = Overlay::Settings {
+                                page: SettingsPage::Compaction,
+                                sel: 0,
+                            };
+                        }
+                    }
+                    SettingsPage::Compaction => {
+                        let Some(item) = self.settings_items_for(page).get(sel).cloned() else {
+                            return Ok(());
                         };
-                    }
-                }
-                SettingsPage::Compaction => {
-                    let Some(value) = self
-                        .settings_items_for(page)
-                        .get(sel)
-                        .map(|item| item.value.clone())
-                    else {
-                        return Ok(());
-                    };
-                    match value.as_str() {
-                        "model" => self.open_model_picker(ModelTarget::Compact, true),
-                        "threshold" | "keep" => self.adjust_setting(true),
-                        "strip" if !self.compact_is_separate => {
-                            self.notice(
-                                "strip is disabled while compaction uses the main model: the full history is required for cache hits",
-                            );
+                        if item.disabled {
+                            let message = match item.value.as_str() {
+                            "strip" => "strip is disabled while compaction uses the main model: the full history is required for cache hits",
+                            "send" | "content" => "enable strip old context first",
+                            _ => "this option is disabled",
+                        };
+                            self.notice(message);
+                            return Ok(());
                         }
-                        "strip" => {
-                            let on = !self.compaction.compact_strip_context;
-                            match self.agent.set_compact_strip_context(on) {
-                                Ok(()) => {
-                                    self.compaction = self.agent.compaction_settings();
-                                    self.notice(format!(
-                                        "strip old context with a separate model: {}",
-                                        if on { "on" } else { "off" }
-                                    ));
+                        match item.value.as_str() {
+                            "model" => self.open_model_picker(ModelTarget::Compact, true),
+                            "threshold" | "keep" | "send" => self.adjust_setting(true),
+                            "strip" => {
+                                let on = !self.compaction.compact_strip_context;
+                                match self.agent.set_compact_strip_context(on) {
+                                    Ok(()) => {
+                                        self.compaction = self.agent.compaction_settings();
+                                        self.notice(format!(
+                                            "strip old context with a separate model: {}",
+                                            if on { "on" } else { "off" }
+                                        ));
+                                    }
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                                 }
-                                Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                             }
+                            "content" => {
+                                let content = self.compaction.strip_content.next();
+                                match self.agent.set_strip_content(content) {
+                                    Ok(()) => {
+                                        self.compaction = self.agent.compaction_settings();
+                                        self.notice(format!("strip content: {}", content.label()));
+                                    }
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            },
+            }
             other => self.overlay = other,
         }
         Ok(())
@@ -1812,27 +1828,41 @@ impl App {
                 },
                 PickerItem {
                     label: "keep recent turns".to_string(),
-                    detail: format!("{} turns", self.compaction.keep_recent_turns),
+                    detail: format!(
+                        "{} turns kept after compaction",
+                        self.compaction.keep_recent_turns
+                    ),
                     value: "keep".to_string(),
                     disabled: false,
                 },
                 PickerItem {
                     label: "strip old context".to_string(),
                     detail: if self.compact_is_separate {
-                        format!(
-                            "{} - omit tool calls and thinking older than {} turns",
-                            if self.compaction.compact_strip_context {
-                                "on"
-                            } else {
-                                "off"
-                            },
-                            self.compaction.keep_recent_turns.saturating_mul(2)
-                        )
+                        if self.compaction.compact_strip_context {
+                            "on - older turns may be trimmed".to_string()
+                        } else {
+                            "off - send the complete transcript".to_string()
+                        }
                     } else {
                         "disabled - the main model needs the complete history".to_string()
                     },
                     value: "strip".to_string(),
                     disabled: !self.compact_is_separate,
+                },
+                PickerItem {
+                    label: "send recent turns".to_string(),
+                    detail: format!(
+                        "{} full transcript turns sent to the compactor",
+                        self.compaction.send_recent_turns
+                    ),
+                    value: "send".to_string(),
+                    disabled: !self.compact_is_separate || !self.compaction.compact_strip_context,
+                },
+                PickerItem {
+                    label: "strip content".to_string(),
+                    detail: self.compaction.strip_content.label().to_string(),
+                    value: "content".to_string(),
+                    disabled: !self.compact_is_separate || !self.compaction.compact_strip_context,
                 },
             ],
         }
@@ -1860,8 +1890,12 @@ impl App {
             "model" => "None reuses the main model. The summary request then sends the same system prompt, tools and old messages as the live turn, so the provider can serve the whole prefix from prompt cache. A separate model starts with a cold cache; it is useful only when its lower price outweighs the uncached input.".to_string(),
             "threshold" => "Compaction starts when the provider-reported context reaches this share of the model's context window. Use Left/Right to change it by 5%. Lower values compact earlier and keep more headroom; higher values spend more context before summarising.".to_string(),
             "keep" => "After compaction this many recent user turns stay verbatim below the summary. They are the model's immediate working context. Use Left/Right to change the count.".to_string(),
-            "strip" if self.compact_is_separate => format!("With a separate model, omit tool calls, tool results and reasoning older than the last {} user turns. Recent turns keep their tool output and thinking so the summary still understands current work.", self.compaction.keep_recent_turns.saturating_mul(2)),
+            "strip" if self.compact_is_separate => "Turn trimming on for the separate model. When enabled, the two options below decide how many recent turns are sent in full and what is removed from older turns. When disabled, the complete transcript is sent.".to_string(),
             "strip" => "Disabled while the compaction model is None. Main-model compaction must send the complete live history so the provider prompt cache hits; removing old tool output or thinking would invalidate that prefix.".to_string(),
+            "send" if self.compact_is_separate && self.compaction.compact_strip_context => "How many recent user turns of the summarised transcript are sent to the separate model in full, including tool output and thinking. Older turns keep their user/assistant prose but lose the content selected by strip content. Use Left/Right to change the count.".to_string(),
+            "send" => "Disabled until strip old context is on. While trimming is off, the summariser receives the complete transcript.".to_string(),
+            "content" if self.compact_is_separate && self.compaction.compact_strip_context => "What to remove from turns older than send recent turns: none, tool output, or tool output and thinking. Enter cycles the value. Recent turns and user/assistant prose are always retained.".to_string(),
+            "content" => "Disabled until strip old context is on. While trimming is off, the summariser receives the complete transcript.".to_string(),
             _ => String::new(),
         }
     }
@@ -1878,14 +1912,13 @@ impl App {
             Overlay::Settings { sel, .. } => *sel,
             _ => return,
         };
-        let Some(value) = self
-            .settings_items()
-            .get(sel)
-            .map(|item| item.value.clone())
-        else {
+        let Some(item) = self.settings_items().get(sel).cloned() else {
             return;
         };
-        let result = match value.as_str() {
+        if item.disabled {
+            return;
+        }
+        let result = match item.value.as_str() {
             "threshold" => {
                 let next = self.compaction.compact_threshold + if up { 0.05 } else { -0.05 };
                 self.agent.set_compact_threshold(next)
@@ -1897,6 +1930,14 @@ impl App {
                     self.compaction.keep_recent_turns.saturating_sub(1).max(1)
                 };
                 self.agent.set_keep_recent_turns(next)
+            }
+            "send" => {
+                let next = if up {
+                    self.compaction.send_recent_turns + 1
+                } else {
+                    self.compaction.send_recent_turns.saturating_sub(1).max(1)
+                };
+                self.agent.set_send_recent_turns(next)
             }
             _ => return,
         };
@@ -2543,8 +2584,15 @@ mod tests {
             sel: 1,
         };
         let threshold = app.compaction.compact_threshold;
-        app.adjust_setting(true);
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(app.compaction.compact_threshold > threshold);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Settings {
+                page: SettingsPage::Compaction,
+                ..
+            }
+        ));
         assert_eq!(app.compaction, app.agent.compaction_settings());
 
         app.set_model("None", ModelTarget::Compact);
@@ -2556,11 +2604,39 @@ mod tests {
             sel: 3,
         };
         assert!(app.settings_items()[3].disabled);
+        assert!(app.settings_items()[4].disabled);
+        assert!(app.settings_items()[5].disabled);
+        assert!(app.settings_description().contains("complete live history"));
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(
             app.compaction.compact_strip_context,
             "the disabled item did nothing"
         );
+
+        app.compact_is_separate = true;
+        app.compaction.compact_strip_context = false;
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: 4,
+        };
+        assert!(!app.settings_items()[3].disabled);
+        assert!(app.settings_items()[4].disabled);
+        assert!(app.settings_items()[5].disabled);
+        let send = app.compaction.send_recent_turns;
+        app.adjust_setting(true);
+        assert_eq!(
+            app.compaction.send_recent_turns, send,
+            "left/right cannot change a disabled child"
+        );
+
+        app.compaction.compact_strip_context = true;
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: 5,
+        };
+        let content = app.compaction.strip_content;
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_ne!(app.compaction.strip_content, content);
     }
 
     #[test]

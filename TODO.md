@@ -4,17 +4,22 @@
 
 1. **移除 `anotherModelForCompact`**。`compactModel` 为空（默认）即使用主模型；
    显式设置则走独立模型。`/settings` 的 compaction 子菜单可选择 `None (main model)`、
-   独立模型、`compactThreshold`、`keepRecentTurns` 和 `compactStripContext`，改动
-   立即生效并写回 `config.json`。自动压缩恒为开启，不再提供开关或配置项。
+   独立模型、`compactThreshold`、`keepRecentTurns`、`compactStripContext`、
+   `sendRecentTurns` 和 `stripContent`，改动立即生效并写回 `config.json`。自动压缩恒为
+   开启，不再提供开关或配置项。
 2. **主模型压缩必须命中缓存**：`SummaryMode::Cached` 发送与 live 相同的 system prompt、
    tool catalog 和旧消息前缀，只追加摘要指令；不再使用独立的 summary system prompt。
    `model` 为 None 时 `strip old context` 变灰且不可修改，并显示必须发送完整历史的原因。
-3. **独立模型压缩可裁剪**：`compactStripContext` 为 on 时，摘要 transcript 只保留最近
-   `2 * keepRecentTurns` 用户轮的工具调用、工具结果和 reasoning；更早的省略，最近的
-   用户/助手文本保留。独立模型的 tools 为空。
+3. **独立模型压缩可裁剪**：`compactStripContext` 为 on 时，`sendRecentTurns` 指定摘要
+   transcript 中发送给独立模型的完整用户轮数；更早的轮次保留用户/助手正文，但按
+   `stripContent` 删除
+   `none` / `toolOutput` / `toolOutputAndThinking`。压缩后保留轮数仍由
+   `keepRecentTurns` 独立控制。独立模型的 tools 为空。
 4. **设置持久化**：`Config::save_setting` 支持嵌套路径，例如
    `["agent", "compactThreshold"]`，只改目标键并保留其他键。
-5. **详细说明**：compaction 子菜单在列表下方显示当前选项的多行说明；被禁用的选项灰显。
+5. **详细说明**：compaction 子菜单在列表下方显示当前选项的多行说明；`model` 为 None 时
+   `strip old context` 灰显，`compactStripContext` 关闭时 `sendRecentTurns` 与
+   `stripContent` 灰显。
 
 ## 已完成：Pi 可选字段自动处理（2026-11-22）
 

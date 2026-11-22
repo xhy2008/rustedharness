@@ -134,13 +134,16 @@ numbers cannot retrigger compaction.
 `None` in `/settings`), the summary call reuses the agent model's live system
 prompt, tool catalog and old messages, appending only the summary instruction:
 the provider sees the same prefix and can serve it from prompt cache. A
-separate summary model starts cold, so `compactStripContext` omits tool calls,
-tool results and reasoning older than the last `2 * keepRecentTurns` user
-turns; the recent turns keep them. `/settings` exposes the model, threshold,
-recent-turn count and strip option. Auto-compaction is always on, and each
-change applies to the running agent and is persisted under `agent` in
-`config.json`. While the model is `None`, stripping is disabled because the
-main-model path needs the complete live prefix for cache hits.
+separate summary model starts cold. `compactStripContext` enables trimming:
+`sendRecentTurns` recent user turns of the summarised transcript are sent in
+full, while older turns lose the content selected by `stripContent` (`none`,
+`toolOutput`, or
+`toolOutputAndThinking`). `keepRecentTurns` independently controls how many
+turns are kept verbatim after compaction. `/settings` exposes the model,
+threshold, both turn counts and the strip controls. Auto-compaction is always
+on, and each change applies to the running agent and is persisted under
+`agent` in `config.json`. While the model is `None` or
+`compactStripContext` is off, the dependent trim controls are disabled.
 
 ### Sessions
 
