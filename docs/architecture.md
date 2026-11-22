@@ -28,7 +28,8 @@ protocol.
 
 `agent.rs` implements the turn loop:
 
-1. Build the system prompt, including environment facts and edit rules.
+1. Build the minimal system prompt with cross-tool policy; tool-specific
+   details stay in each tool description.
 2. Stream a Chat Completions request, forwarding deltas and reasoning through
    an unbounded channel.
 3. Append the assistant message; execute each tool call through the registry

@@ -87,48 +87,20 @@ impl ShellSpec {
         }
     }
 
-    /// The `<env>` block injected into the system prompt and reused verbatim in
-    /// the tool description (single source of truth).
-    pub fn env_block(&self, cwd: &Path) -> String {
-        let cwd = cwd.display();
+    pub fn description(&self) -> String {
         match self.family {
-            ShellFamily::Bash => format!(
-                "<env>\nOS: {os}\nShell: {name} {ver}\ncwd: {cwd}\n\
-                 syntax: variables=$NAME, separator `;` and `&&`, quotes '...' \"...\", \
-                 paths `/a/b`, null `/dev/null`, heredoc `<<'EOF'`\n\
-                 note: every call starts a new process at cwd; `cd` does not persist.\n</env>",
-                os = self.os,
-                name = self.display_name,
-                ver = self.version,
-            ),
-            ShellFamily::PowerShell => format!(
-                "<env>\nOS: {os}\nShell: {name} {ver}\ncwd: {cwd}\n\
-                 syntax: variables=$env:NAME, separator `;`, chain `cmd1; if ($?) {{ cmd2 }}`, \
-                 quotes '...' \"...\", paths `C:\\a\\b`, null `$null`, here-string `@\"` ... `\"@`\n\
-                 note: every call starts a new process at cwd; `cd` does not persist.\n</env>",
-                os = self.os,
-                name = self.display_name,
-                ver = self.version,
-            ),
-        }
-    }
-
-    pub fn description(&self, cwd: &Path) -> String {
-        match self.family {
-            ShellFamily::Bash => format!(
-                "Execute a bash command in the session workspace. A new process is started for \
-                 every call; `cd` does not persist. Output is captured through a pty and returned \
-                 as the final screen lines, so progress bars collapse to one line. Set \
-                 run_in_background=true for long jobs, then use `await` with the returned pid.\n\n{}",
-                self.env_block(cwd)
-            ),
-            ShellFamily::PowerShell => format!(
-                "Execute a PowerShell command in the session workspace (native Windows shell; \
-                 do not use bash syntax). A new process is started for every call; `cd` does not \
-                 persist. Output is captured through ConPTY and returned as final screen lines. \
-                 Set run_in_background=true for long jobs, then use `await` with the returned pid.\n\n{}",
-                self.env_block(cwd)
-            ),
+            ShellFamily::Bash => "Execute a bash command in the session workspace. A new process \
+                 is started for every call; `cd` does not persist. Output is captured through a \
+                 pty and returned as the final screen lines, so progress bars collapse to one \
+                 line. Set run_in_background=true for long jobs, then use `await` with the \
+                 returned pid."
+                .to_string(),
+            ShellFamily::PowerShell => "Execute a PowerShell command in the session workspace \
+                 (native Windows shell; do not use bash syntax). A new process is started for \
+                 every call; `cd` does not persist. Output is captured through ConPTY and \
+                 returned as final screen lines. Set run_in_background=true for long jobs, then \
+                 use `await` with the returned pid."
+                .to_string(),
         }
     }
 
@@ -372,21 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn env_block_le_8_lines() {
+    fn descriptions_do_not_embed_environment_facts() {
         for family in [ShellFamily::Bash, ShellFamily::PowerShell] {
-            let block = spec(family).env_block(Path::new("/tmp/work"));
-            assert!(block.starts_with("<env>"));
-            assert!(block.ends_with("</env>"));
-            assert!(block.lines().count() <= 8, "{block}");
-        }
-    }
-
-    #[test]
-    fn description_contains_exact_env_block() {
-        for family in [ShellFamily::Bash, ShellFamily::PowerShell] {
-            let s = spec(family);
-            let cwd = Path::new("/tmp/work");
-            assert!(s.description(cwd).contains(&s.env_block(cwd)));
+            let description = spec(family).description();
+            assert!(!description.contains("<env>"));
+            assert!(!description.contains("cwd:"));
+            assert!(description.contains("run_in_background=true"));
         }
     }
 

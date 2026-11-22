@@ -166,7 +166,6 @@ impl ToolRegistry {
         insert(Arc::new(search::GlobTool));
         insert(Arc::new(shell_tool::ShellTool::new(
             ctx.proc.spec().clone(),
-            ctx.cwd.clone(),
         )));
         insert(Arc::new(shell_tool::AwaitTool));
         insert(Arc::new(lsp_tool::LspTool::new(ctx.cwd.clone())));

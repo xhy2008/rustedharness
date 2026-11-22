@@ -16,7 +16,11 @@
    的 `+/-` 标记；主路径是行号锚点，`replace_text` 只作为不熟悉锚点编辑的 fallback。
    `read`/`grep`/`edit` 的工具说明和 `lines` schema 改为强调：只把 `line#anchor`
    放进 `pos`/`end`，`lines[]` 只放新内容。
-6. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot 测试；README、
+6. **提示词减负 / 缓存前缀**。删除 shell 工具描述和 system prompt 里的 `<env>`
+   块；system prompt 只保留跨工具策略，不再重复 lsp/todo/shell/web 的工具描述。
+   tool catalog 每个 turn 只生成一次；新增测试验证连续请求（含进入下一 turn）
+   messages 前缀、tools、model、temperature、max_tokens 和 stream 均完全一致。
+7. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot、请求前缀测试；README、
    `docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
 
 ## 已完成：移除 LSP 校验机制 + 非流式 completion（2026-11-22）

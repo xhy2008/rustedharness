@@ -19,12 +19,11 @@ pub struct ShellArgs {
 
 pub struct ShellTool {
     spec: crate::shell::ShellSpec,
-    cwd: std::path::PathBuf,
 }
 
 impl ShellTool {
-    pub fn new(spec: crate::shell::ShellSpec, cwd: std::path::PathBuf) -> Self {
-        Self { spec, cwd }
+    pub fn new(spec: crate::shell::ShellSpec) -> Self {
+        Self { spec }
     }
 }
 
@@ -35,7 +34,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> String {
-        self.spec.description(&self.cwd)
+        self.spec.description()
     }
 
     fn schema(&self) -> Value {
