@@ -1,5 +1,18 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：压缩模型与 /settings compaction 子菜单（2026-11-22）
+
+1. **移除 `anotherModelForCompact`**。`compactModel` 为空（默认）即使用主模型；
+   显式设置则走独立模型。`/settings` 的 compaction 子菜单可选择 `None (main model)`、
+   独立模型、`autoCompact`、`compactThreshold`、`keepRecentTurns` 和
+   `compactStripContext`，改动立即生效并写回 `config.json`。
+2. **主模型压缩必须命中缓存**：`SummaryMode::Cached` 发送与 live 相同的 system prompt、
+   tool catalog 和旧消息前缀，只追加摘要指令；不再使用独立的 summary system prompt。
+3. **独立模型压缩可裁剪**：`compactStripContext` 为 on 时，摘要 transcript 省略旧的
+   tool 输出和 reasoning；off 时保留 reasoning。独立模型的 tools 为空。
+4. **设置持久化**：`Config::save_setting` 支持嵌套路径，例如
+   `["agent", "autoCompact"]`，只改目标键并保留其他键。
+
 ## 已完成：Pi 可选字段自动处理（2026-11-22）
 
 1. **删除 `reasoningContent` / `toolChoice` / `parallelToolCalls` 配置开关**。

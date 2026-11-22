@@ -203,12 +203,12 @@ and model selection loads unchanged.
 
 ```json
 {
-  "anotherModelForCompact": true,
   "agent": {
     "maxTurns": 100,
     "compactThreshold": 0.8,
     "keepRecentTurns": 8,
     "autoCompact": true,
+    "compactStripContext": true,
     "temperature": 0.2,
     "chaseLimit": 3,
     "maxOutputTokens": 8192,
@@ -258,10 +258,12 @@ whole URL (a mirror), `binary` and `archive` describe an unusual layout.
 `model` and `compactModel` may point at different providers; the backend routes
 each request independently. The example intentionally omits both: omit `model`
 to start without one, and the TUI shows `None` with a configuration prompt;
-headless `run` exits with the same prompt. `contextWindow` is an optional
-fallback for models that do not declare one. `agent.maxOutputTokens` is the fallback when a model has no
-`maxTokens`. Environment variables `RUSTEDHARNESS_MODEL`,
-`RUSTEDHARNESS_COMPACT_MODEL`, and `RUSTEDHARNESS_PROVIDER` override the file.
+headless `run` exits with the same prompt. `compactModel` is optional too:
+leaving it unset (or choosing `None` in `/settings`) summarises with the main
+model. `contextWindow` is an optional fallback for models that do not declare
+one. `agent.maxOutputTokens` is the fallback when a model has no `maxTokens`.
+Environment variables `RUSTEDHARNESS_MODEL`, `RUSTEDHARNESS_COMPACT_MODEL`, and
+`RUSTEDHARNESS_PROVIDER` override the file.
 
 `config show` redacts inline keys and header values.
 
@@ -272,14 +274,17 @@ results back, and repeats until the model stops or a limit is reached.
 Cancellation is cooperative. After edits, language-server diagnostics are
 appended to the tool result.
 
-- **Model routing**: `model` drives the loop; `compactModel` is used only for
-  summaries. Each request is routed to the provider that owns its model, so the
-  two roles can live on different providers. Setting `anotherModelForCompact`
-  to `false` drops the second model and summarises with `model`: the main
-  model's prompt cache is already warm, while a separate summary model starts
-  cold and the measured savings do not cover that. `/settings` toggles it for
-  the running session and writes the choice to `config.json`; the status line
-  stops showing a `compact` column, since there is nothing distinct to show.
+- **Model routing**: `model` drives the loop; an optional `compactModel` is
+  used only for summaries. Each request is routed to the provider that owns its
+  model, so the two roles can live on different providers. When
+  `compactModel` is unset (the default), compaction uses the main model and
+  sends the live system prompt, tool catalog and old messages unchanged, so
+  the provider can serve the whole prefix from prompt cache. A separate model
+  starts cold, so `agent.compactStripContext` can omit old tool output and
+  reasoning from the transcript before summarising. `/settings` opens a
+  compaction submenu for the model, auto-compaction, threshold, recent-turn
+  count and this stripping option; changes apply immediately and are written
+  to `config.json`.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).

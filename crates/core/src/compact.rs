@@ -1,36 +1,60 @@
 use std::sync::Arc;
 
-use crate::config::AgentConfig;
+use crate::config::CompactionSettings;
 use crate::error::Result;
-use crate::provider::{Backend, ChatMessage, ChatRequest, Role};
+use crate::provider::{Backend, ChatMessage, ChatRequest, Role, ToolDefinition};
 use crate::session::{COMPACTION_PREFIX, SUMMARY_SUFFIX};
 use crate::token::UsageTracker;
 
-pub const SUMMARY_SYSTEM: &str = "You compact an AI coding session. Produce a concise structured summary with exactly these five sections:\n\
-## 目标 (Goal)\n## 已完成 (Done)\n## 关键约束 (Constraints)\n## 待办 (Pending)\n## 踩坑 (Pitfalls)\n\
-Preserve file paths, commands, errors and decisions verbatim where they matter. No preamble.";
+pub const SUMMARY_SYSTEM: &str = concat!(
+    "You compact an AI coding session. Produce a concise structured summary with exactly these five sections:\n",
+    "## 目标 (Goal)\n## 已完成 (Done)\n## 关键约束 (Constraints)\n## 待办 (Pending)\n## 踩坑 (Pitfalls)\n",
+    "Preserve file paths, commands, errors and decisions verbatim where they matter. No preamble."
+);
+
+const SUMMARY_REQUEST: &str = concat!(
+    "Compact the conversation above into a handoff summary for a fresh context. ",
+    "Use exactly these five sections:\n",
+    "## 目标 (Goal)\n## 已完成 (Done)\n## 关键约束 (Constraints)\n## 待办 (Pending)\n## 踩坑 (Pitfalls)\n",
+    "Preserve file paths, commands, errors and decisions verbatim where they matter. No preamble."
+);
 
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
-    /// Messages sent to the compact model for summarisation (old prefix).
     pub keep_from: usize,
     pub dropped: usize,
-    pub transcript: String,
+}
+
+/// How the summary request is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryMode {
+    /// Same model, system prompt and tools as the live turn. Sending the old
+    /// messages unchanged lets the provider serve the whole prefix from cache.
+    Cached,
+    /// A separate model starts cold, so the transcript may omit tool output
+    /// and reasoning before it is sent.
+    Separate,
 }
 
 pub struct Compactor {
     pub threshold: f64,
     pub keep_recent_turns: usize,
     pub context_limit: u64,
+    pub strip_context: bool,
     pub counter: Arc<UsageTracker>,
 }
 
 impl Compactor {
-    pub fn from_config(cfg: &AgentConfig, context_limit: u64, counter: Arc<UsageTracker>) -> Self {
+    pub fn new(
+        settings: CompactionSettings,
+        context_limit: u64,
+        counter: Arc<UsageTracker>,
+    ) -> Self {
         Self {
-            threshold: cfg.compact_threshold,
-            keep_recent_turns: cfg.keep_recent_turns,
+            threshold: settings.compact_threshold,
+            keep_recent_turns: settings.keep_recent_turns,
             context_limit,
+            strip_context: settings.compact_strip_context,
             counter,
         }
     }
@@ -75,32 +99,49 @@ impl Compactor {
         if dropped == 0 {
             return None;
         }
-        let transcript = render_transcript(&messages[system_end..keep_from]);
-        Some(CompactionPlan {
-            keep_from,
-            dropped,
-            transcript,
-        })
+        Some(CompactionPlan { keep_from, dropped })
     }
 
-    /// Summarise the old prefix with the compact model. The agent model never
-    /// sees the raw transcript of the dropped prefix.
+    /// Summarise the old prefix. `Cached` reuses the live messages, system
+    /// prompt and tools verbatim so the main model reads them from its prompt
+    /// cache; `Separate` builds a smaller transcript for a cold summary model.
     pub async fn summarize(
         &self,
         backend: &dyn Backend,
-        compact_model: &str,
+        model: &str,
+        messages: &[ChatMessage],
         plan: &CompactionPlan,
+        tools: Vec<ToolDefinition>,
+        mode: SummaryMode,
     ) -> Result<String> {
+        let (messages, tools) = match mode {
+            SummaryMode::Cached => {
+                let mut prefix = messages[..plan.keep_from].to_vec();
+                prefix.push(ChatMessage::user(SUMMARY_REQUEST));
+                (prefix, tools)
+            }
+            SummaryMode::Separate => {
+                let system_end = messages
+                    .iter()
+                    .take_while(|message| message.role == Role::System)
+                    .count();
+                let transcript =
+                    render_transcript(&messages[system_end..plan.keep_from], self.strip_context);
+                (
+                    vec![
+                        ChatMessage::system(SUMMARY_SYSTEM),
+                        ChatMessage::user(format!(
+                            "Summarise this session transcript.\n\n<transcript>\n{transcript}\n</transcript>"
+                        )),
+                    ],
+                    Vec::new(),
+                )
+            }
+        };
         let request = ChatRequest {
-            model: compact_model.to_string(),
-            messages: vec![
-                ChatMessage::system(SUMMARY_SYSTEM),
-                ChatMessage::user(format!(
-                    "Summarise this session transcript.\n\n<transcript>\n{}\n</transcript>",
-                    plan.transcript
-                )),
-            ],
-            tools: Vec::new(),
+            model: model.to_string(),
+            messages,
+            tools,
             temperature: Some(0.0),
             max_tokens: Some(1_500),
             stream: false,
@@ -135,7 +176,7 @@ impl Compactor {
     }
 }
 
-fn render_transcript(messages: &[ChatMessage]) -> String {
+fn render_transcript(messages: &[ChatMessage], strip_context: bool) -> String {
     let mut out = String::new();
     for message in messages {
         let role = match message.role {
@@ -144,6 +185,16 @@ fn render_transcript(messages: &[ChatMessage]) -> String {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
+        if message.role == Role::Tool && strip_context {
+            let id = message.tool_call_id.as_deref().unwrap_or("unknown");
+            out.push_str(&format!("[tool_result {id}] (output omitted)\n"));
+            continue;
+        }
+        if let Some(reasoning) = &message.reasoning_content {
+            if !strip_context && !reasoning.is_empty() {
+                out.push_str(&format!("[reasoning] {reasoning}\n"));
+            }
+        }
         if let Some(content) = &message.content {
             out.push_str(&format!("[{role}] {content}\n"));
         }
@@ -180,8 +231,15 @@ mod tests {
         msgs
     }
 
+    #[derive(Default)]
     struct Fake {
-        seen_model: Mutex<String>,
+        seen: Mutex<Option<ChatRequest>>,
+    }
+
+    impl Fake {
+        fn request(&self) -> ChatRequest {
+            self.seen.lock().unwrap().take().expect("request")
+        }
     }
 
     #[async_trait]
@@ -193,7 +251,7 @@ mod tests {
             _cancel: CancellationToken,
         ) -> Result<Completion> {
             assert!(!request.stream, "summaries use the non-streaming path");
-            *self.seen_model.lock().unwrap() = request.model;
+            *self.seen.lock().unwrap() = Some(request);
             Ok(Completion {
                 content: "## 目标\nship it\n## 已完成\nx\n## 关键约束\ny\n## 待办\nz\n## 踩坑\nw"
                     .into(),
@@ -207,6 +265,7 @@ mod tests {
             threshold: 0.8,
             keep_recent_turns: 2,
             context_limit: 1_000,
+            strip_context: true,
             counter: Arc::new(UsageTracker::new()),
         }
     }
@@ -259,20 +318,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_uses_compact_model() {
-        let fake = Fake {
-            seen_model: Mutex::new(String::new()),
-        };
+    async fn a_separate_model_gets_a_transcript() {
+        let fake = Fake::default();
         let msgs = conv(6);
         let plan = compactor().plan(&msgs).unwrap();
         let summary = compactor()
-            .summarize(&fake, "compact-model", &plan)
+            .summarize(
+                &fake,
+                "compact-model",
+                &msgs,
+                &plan,
+                Vec::new(),
+                SummaryMode::Separate,
+            )
             .await
             .unwrap();
-        assert_eq!(*fake.seen_model.lock().unwrap(), "compact-model");
+        let request = fake.request();
+        assert_eq!(request.model, "compact-model");
+        assert_eq!(request.messages[0].content.as_deref(), Some(SUMMARY_SYSTEM));
+        assert!(request.tools.is_empty());
+        let transcript = request.messages[1].content.as_deref().unwrap();
+        assert!(transcript.contains("user 0"));
+        assert!(!transcript.contains("user 5"));
         assert!(summary.contains("## 目标"));
-        assert!(plan.transcript.contains("user 0"));
-        assert!(!plan.transcript.contains("user 5"));
+    }
+
+    #[tokio::test]
+    async fn the_main_model_reuses_the_live_prefix_and_tools() {
+        let fake = Fake::default();
+        let msgs = conv(6);
+        let plan = compactor().plan(&msgs).unwrap();
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        compactor()
+            .summarize(
+                &fake,
+                "main-model",
+                &msgs,
+                &plan,
+                tools.clone(),
+                SummaryMode::Cached,
+            )
+            .await
+            .unwrap();
+        let request = fake.request();
+        assert_eq!(request.model, "main-model");
+        for (sent, original) in request.messages[..plan.keep_from]
+            .iter()
+            .zip(&msgs[..plan.keep_from])
+        {
+            assert_eq!(sent.role, original.role);
+            assert_eq!(sent.content, original.content);
+            assert_eq!(sent.reasoning_content, original.reasoning_content);
+            assert_eq!(sent.tool_calls, original.tool_calls);
+            assert_eq!(sent.tool_call_id, original.tool_call_id);
+        }
+        assert_eq!(
+            request.messages.last().unwrap().content.as_deref(),
+            Some(SUMMARY_REQUEST)
+        );
+        assert_eq!(request.tools, tools);
+    }
+
+    #[tokio::test]
+    async fn a_separate_model_can_drop_tool_output_and_reasoning() {
+        let fake = Fake::default();
+        let mut msgs = conv(3);
+        msgs.push(ChatMessage::assistant("answer"));
+        if let Some(last) = msgs.last_mut() {
+            last.reasoning_content = Some("hidden chain".into());
+        }
+        msgs.push(ChatMessage::tool("c1", "very long tool output"));
+        msgs.push(ChatMessage::user("u3"));
+        msgs.push(ChatMessage::assistant("a3"));
+        msgs.push(ChatMessage::user("last"));
+        msgs.push(ChatMessage::assistant("done"));
+        let plan = compactor().plan(&msgs).unwrap();
+        compactor()
+            .summarize(
+                &fake,
+                "compact-model",
+                &msgs,
+                &plan,
+                Vec::new(),
+                SummaryMode::Separate,
+            )
+            .await
+            .unwrap();
+        let request = fake.request();
+        let transcript = request.messages[1].content.as_deref().unwrap();
+        assert!(!transcript.contains("very long tool output"));
+        assert!(transcript.contains("output omitted"));
+        assert!(!transcript.contains("hidden chain"));
     }
 
     #[test]

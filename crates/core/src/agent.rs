@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::compact::Compactor;
-use crate::config::{model_display, Config};
+use crate::compact::{Compactor, SummaryMode};
+use crate::config::{model_display, CompactionSettings, Config};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
 use crate::lsp::LspHub;
@@ -39,10 +39,11 @@ pub struct Agent {
     usage: Arc<UsageTracker>,
     events: UnboundedSender<HarnessEvent>,
     agent_model: RwLock<String>,
+    /// Actual model used for summaries: the configured compact model, or the
+    /// agent model when no separate model is selected.
     compact_model: RwLock<String>,
-    /// Whether compaction uses its own model. Off means the main model writes
-    /// the summary, which is usually cheaper: its prompt cache is already warm.
-    another_model_for_compact: AtomicBool,
+    separate_compact: AtomicBool,
+    compaction: RwLock<CompactionSettings>,
     cancel_token: Mutex<CancellationToken>,
     busy: AtomicBool,
 }
@@ -90,9 +91,6 @@ impl Agent {
         if config.model.trim().is_empty() && !meta.agent_model.trim().is_empty() {
             config.model = meta.agent_model.clone();
         }
-        if config.compact_model.trim().is_empty() && !meta.compact_model.trim().is_empty() {
-            config.compact_model = meta.compact_model.clone();
-        }
         // Append to the file the session was read from: it may live in a
         // per-project folder and carry pi's `<timestamp>_<id>` name.
         let path = loaded.path.clone();
@@ -132,21 +130,22 @@ impl Agent {
                 cwd.display()
             )));
         }
-        let another_model_for_compact = config.another_model_for_compact;
+        let compaction = CompactionSettings::from(&config.agent);
+        let separate_compact = !config.compact_model.trim().is_empty();
         let config = Arc::new(config);
         // A pi session may not name a model at all (no `model_change`, no
-        // assistant message yet), and pi has no compact model of its own:
-        // fall back to the configured ones rather than run with empty strings.
+        // assistant message yet). Use the transcript's model when config.json
+        // has none, and let an unset compactModel follow the agent model.
         let agent_model = resume
             .as_ref()
             .map(|r| r.meta.agent_model.clone())
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| config.model.clone());
-        let compact_model = resume
-            .as_ref()
-            .map(|r| r.meta.compact_model.clone())
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| config.compaction_model().to_string());
+        let compact_model = if separate_compact {
+            config.compact_model.clone()
+        } else {
+            agent_model.clone()
+        };
         let todos = Arc::new(TodoStore::new(
             resume
                 .as_ref()
@@ -198,7 +197,8 @@ impl Agent {
             events: events.clone(),
             agent_model: RwLock::new(agent_model),
             compact_model: RwLock::new(compact_model),
-            another_model_for_compact: AtomicBool::new(another_model_for_compact),
+            separate_compact: AtomicBool::new(separate_compact),
+            compaction: RwLock::new(compaction),
             cancel_token: Mutex::new(CancellationToken::new()),
             busy: AtomicBool::new(false),
         });
@@ -289,28 +289,50 @@ impl Agent {
         self.compact_model.read().unwrap().clone()
     }
 
-    pub fn another_model_for_compact(&self) -> bool {
-        self.another_model_for_compact.load(Ordering::Relaxed)
+    pub fn compact_is_separate(&self) -> bool {
+        self.separate_compact.load(Ordering::Relaxed)
     }
 
-    /// Turn the separate compaction model on or off. The choice is written to
-    /// `config.json`, so it survives the session, and the summary model takes
-    /// effect immediately.
-    pub fn set_another_model_for_compact(&self, on: bool) -> Result<()> {
-        self.another_model_for_compact.store(on, Ordering::Relaxed);
-        let agent = self.agent_model.read().unwrap().clone();
-        let compact = if on {
-            self.config.compact_model.clone()
-        } else {
-            agent.clone()
-        };
-        *self.compact_model.write().unwrap() = compact.clone();
-        if let Ok(mut ctx) = self.ctx.write() {
-            ctx.compact_model = compact.clone();
-        }
-        self.session.lock().unwrap().models(&agent, &compact)?;
+    pub fn compaction_settings(&self) -> CompactionSettings {
+        *self.compaction.read().unwrap()
+    }
+
+    /// Update one compaction option and persist it under `agent`.
+    pub fn set_auto_compact(&self, on: bool) -> Result<()> {
+        let mut settings = self.compaction_settings();
+        settings.auto_compact = on;
         self.config
-            .save_setting("anotherModelForCompact", json!(on))?;
+            .save_setting(&["agent", "autoCompact"], json!(on))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
+    pub fn set_compact_threshold(&self, threshold: f64) -> Result<()> {
+        let threshold = threshold.clamp(0.1, 0.99);
+        let mut settings = self.compaction_settings();
+        settings.compact_threshold = threshold;
+        self.config
+            .save_setting(&["agent", "compactThreshold"], json!(threshold))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
+    pub fn set_keep_recent_turns(&self, turns: usize) -> Result<()> {
+        let turns = turns.max(1);
+        let mut settings = self.compaction_settings();
+        settings.keep_recent_turns = turns;
+        self.config
+            .save_setting(&["agent", "keepRecentTurns"], json!(turns))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
+    pub fn set_compact_strip_context(&self, on: bool) -> Result<()> {
+        let mut settings = self.compaction_settings();
+        settings.compact_strip_context = on;
+        self.config
+            .save_setting(&["agent", "compactStripContext"], json!(on))?;
+        *self.compaction.write().unwrap() = settings;
         Ok(())
     }
 
@@ -388,22 +410,38 @@ impl Agent {
         let spec = self.config.resolve_model(model)?;
         let reference = spec.reference();
         *self.agent_model.write().unwrap() = reference.clone();
-        let compact = self.compact_model.read().unwrap().clone();
+        let compact = if self.compact_is_separate() {
+            self.compact_model.read().unwrap().clone()
+        } else {
+            *self.compact_model.write().unwrap() = reference.clone();
+            if let Ok(mut ctx) = self.ctx.write() {
+                ctx.compact_model = reference.clone();
+            }
+            reference.clone()
+        };
         self.session.lock().unwrap().models(&reference, &compact)?;
         self.refresh_system();
         Ok(())
     }
 
-    /// Switch the compaction model. Persisted like `set_agent_model` so the
-    /// choice survives a session resume.
+    /// Switch the compaction model. An empty reference selects the main model;
+    /// the choice is written to `config.json`.
     pub fn set_compact_model(&self, model: &str) -> Result<()> {
-        let spec = self.config.resolve_model(model)?;
-        let reference = spec.reference();
-        *self.compact_model.write().unwrap() = reference.clone();
         let agent = self.agent_model.read().unwrap().clone();
-        self.session.lock().unwrap().models(&agent, &reference)?;
-        let mut ctx = self.ctx.write().unwrap();
-        ctx.compact_model = reference;
+        let (stored, actual) = if model.trim().is_empty() {
+            (String::new(), agent.clone())
+        } else {
+            let reference = self.config.resolve_model(model)?.reference();
+            (reference.clone(), reference)
+        };
+        self.config.save_setting(&["compactModel"], json!(stored))?;
+        *self.compact_model.write().unwrap() = actual.clone();
+        self.separate_compact
+            .store(!stored.is_empty(), Ordering::Relaxed);
+        self.session.lock().unwrap().models(&agent, &actual)?;
+        if let Ok(mut ctx) = self.ctx.write() {
+            ctx.compact_model = actual;
+        }
         Ok(())
     }
 
@@ -565,7 +603,7 @@ impl Agent {
                 return Ok(());
             }
 
-            if let Err(err) = self.maybe_compact(&token).await {
+            if let Err(err) = self.maybe_compact(&token, &definitions).await {
                 let _ = self.events.send(HarnessEvent::Notice {
                     level: "warning".to_string(),
                     message: format!("compaction failed: {err}"),
@@ -864,12 +902,16 @@ impl Agent {
         });
     }
 
-    async fn maybe_compact(&self, token: &CancellationToken) -> Result<()> {
-        if !self.config.agent.auto_compact {
+    async fn maybe_compact(
+        &self,
+        token: &CancellationToken,
+        tools: &[crate::provider::ToolDefinition],
+    ) -> Result<()> {
+        let settings = self.compaction_settings();
+        if !settings.auto_compact {
             return Ok(());
         }
-        let compactor =
-            Compactor::from_config(&self.config.agent, self.context_limit(), self.usage.clone());
+        let compactor = Compactor::new(settings, self.context_limit(), self.usage.clone());
         let messages = self.messages.read().unwrap().clone();
         if !compactor.needs_compaction() {
             return Ok(());
@@ -881,8 +923,20 @@ impl Agent {
             return Ok(());
         }
         let compact_model = self.compact_model.read().unwrap().clone();
+        let mode = if self.compact_is_separate() {
+            SummaryMode::Separate
+        } else {
+            SummaryMode::Cached
+        };
         let summary = compactor
-            .summarize(self.backend.as_ref(), &compact_model, &plan)
+            .summarize(
+                self.backend.as_ref(),
+                &compact_model,
+                &messages,
+                &plan,
+                tools.to_vec(),
+                mode,
+            )
             .await?;
         let new_messages = compactor.apply(&messages, &plan, &summary);
         *self.messages.write().unwrap() = new_messages;

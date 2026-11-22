@@ -74,6 +74,9 @@ pub enum Overlay {
         sel: usize,
         filter: String,
         target: ModelTarget,
+        /// Opened from `/settings`; return to the compaction panel after a
+        /// choice instead of closing every overlay.
+        from_settings: bool,
     },
     Session {
         items: Vec<PickerItem>,
@@ -94,8 +97,8 @@ pub enum Overlay {
         scroll: usize,
         truncated: bool,
     },
-    /// One toggle, and the only setting that changes behaviour mid-session.
     Settings {
+        page: SettingsPage,
         sel: usize,
     },
     Hotkeys,
@@ -109,6 +112,13 @@ pub enum Overlay {
 pub enum ModelTarget {
     Agent,
     Compact,
+}
+
+/// `/settings` pages. The root links to the compaction submenu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Root,
+    Compaction,
 }
 
 /// A download in flight: the server, how far it got and what of.
@@ -162,10 +172,10 @@ pub struct App {
     pub cwd: String,
     pub agent_model: String,
     pub compact_model: String,
+    pub compact_is_separate: bool,
+    pub compaction: rustedharness_core::config::CompactionSettings,
     /// The download in flight, shown in the status line.
     pub download: Option<DownloadProgress>,
-    /// Mirrors `anotherModelForCompact`; the settings panel flips it.
-    pub another_model_for_compact: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub context_tokens: u64,
@@ -224,7 +234,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/new", "start a fresh session"),
     ("/resume", "pick a saved session"),
     ("/session", "show session id, models and context usage"),
-    ("/settings", "another model for compaction"),
+    ("/settings", "open settings (compaction model and limits)"),
     ("/files", "browse the workspace file tree"),
     ("/view <path>", "open a file read-only"),
     ("/lsp", "language server status"),
@@ -292,8 +302,11 @@ impl App {
             cwd: String::new(),
             agent_model: String::new(),
             compact_model: String::new(),
+            compact_is_separate: false,
+            compaction: rustedharness_core::config::CompactionSettings::from(
+                &rustedharness_core::config::AgentConfig::default(),
+            ),
             download: None,
-            another_model_for_compact: true,
             input_tokens: 0,
             output_tokens: 0,
             context_tokens: 0,
@@ -363,7 +376,8 @@ impl App {
         self.cwd = snapshot.cwd;
         self.agent_model = snapshot.agent_model;
         self.compact_model = snapshot.compact_model;
-        self.another_model_for_compact = self.agent.another_model_for_compact();
+        self.compact_is_separate = self.agent.compact_is_separate();
+        self.compaction = self.agent.compaction_settings();
         self.context_tokens = snapshot.context_tokens;
         self.context_limit = snapshot.context_limit;
         // A resumed session shows the numbers the provider last reported, so
@@ -956,7 +970,7 @@ impl App {
             Overlay::Model { items, filter, .. } => model_filtered(items, filter).len(),
             Overlay::Session { items, filter, .. } => session_filtered(items, filter).len(),
             Overlay::FileBrowser { entries, .. } => entries.len(),
-            Overlay::Settings { .. } => 1,
+            Overlay::Settings { .. } => self.settings_items().len(),
             _ => 0,
         };
         if len == 0 {
@@ -967,7 +981,7 @@ impl App {
             | Overlay::Model { sel, .. }
             | Overlay::Session { sel, .. }
             | Overlay::FileBrowser { sel, .. }
-            | Overlay::Settings { sel } => sel,
+            | Overlay::Settings { sel, .. } => sel,
             _ => return,
         };
         *sel = if down {
@@ -1219,6 +1233,12 @@ impl App {
                 self.overlay = Overlay::None;
                 self.open_file_browser(&rel);
             }
+            KeyCode::Left if matches!(self.overlay, Overlay::Settings { .. }) => {
+                self.adjust_setting(false);
+            }
+            KeyCode::Right if matches!(self.overlay, Overlay::Settings { .. }) => {
+                self.adjust_setting(true);
+            }
             KeyCode::Enter => return self.overlay_confirm(op_tx).await,
             KeyCode::Char(c) => match &mut self.overlay {
                 Overlay::Slash { .. } => {
@@ -1449,10 +1469,17 @@ impl App {
                 sel,
                 filter,
                 target,
+                from_settings,
             } => {
                 if let Some(item) = model_filtered(&items, &filter).get(sel) {
                     let model = item.value.clone();
                     self.set_model(&model, target);
+                    if from_settings {
+                        self.overlay = Overlay::Settings {
+                            page: SettingsPage::Compaction,
+                            sel: 0,
+                        };
+                    }
                 }
             }
             Overlay::Session { items, sel, filter } => {
@@ -1489,28 +1516,60 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path, op_tx);
             }
-            Overlay::Settings { .. } => {
-                let on = !self.another_model_for_compact;
-                match self.agent.set_another_model_for_compact(on) {
-                    Ok(()) => {
-                        self.another_model_for_compact = on;
-                        self.compact_model = self.agent.compact_model();
-                        self.notice(if on {
-                            format!(
-                                "compaction uses {} again",
-                                rustedharness_core::config::model_display(&self.compact_model)
-                            )
-                        } else {
-                            format!(
-                                "compaction uses {} (its prompt cache is already warm)",
-                                self.agent_model
-                            )
-                        });
-                        self.overlay = Overlay::Settings { sel: 0 };
+            Overlay::Settings { page, sel } => match page {
+                SettingsPage::Root => {
+                    if self
+                        .settings_items_for(page)
+                        .get(sel)
+                        .is_some_and(|item| item.value == "compaction")
+                    {
+                        self.overlay = Overlay::Settings {
+                            page: SettingsPage::Compaction,
+                            sel: 0,
+                        };
                     }
-                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                 }
-            }
+                SettingsPage::Compaction => {
+                    let Some(value) = self
+                        .settings_items_for(page)
+                        .get(sel)
+                        .map(|item| item.value.clone())
+                    else {
+                        return Ok(());
+                    };
+                    match value.as_str() {
+                        "model" => self.open_model_picker(ModelTarget::Compact, true),
+                        "auto" => {
+                            let on = !self.compaction.auto_compact;
+                            match self.agent.set_auto_compact(on) {
+                                Ok(()) => {
+                                    self.compaction = self.agent.compaction_settings();
+                                    self.notice(format!(
+                                        "auto compaction: {}",
+                                        if on { "on" } else { "off" }
+                                    ));
+                                }
+                                Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                            }
+                        }
+                        "threshold" | "keep" => self.adjust_setting(true),
+                        "strip" => {
+                            let on = !self.compaction.compact_strip_context;
+                            match self.agent.set_compact_strip_context(on) {
+                                Ok(()) => {
+                                    self.compaction = self.agent.compaction_settings();
+                                    self.notice(format!(
+                                        "strip old context with a separate model: {}",
+                                        if on { "on" } else { "off" }
+                                    ));
+                                }
+                                Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            },
             other => self.overlay = other,
         }
         Ok(())
@@ -1529,9 +1588,11 @@ impl App {
                 self.push(EntryKind::Notice, "commands", list.join("\n"));
             }
             "/hotkeys" => self.overlay = Overlay::Hotkeys,
-            "/model" if arg.is_empty() => self.open_model_picker(ModelTarget::Agent),
+            "/model" if arg.is_empty() => self.open_model_picker(ModelTarget::Agent, false),
             "/model" => self.set_model(&arg, ModelTarget::Agent),
-            "/compact-model" if arg.is_empty() => self.open_model_picker(ModelTarget::Compact),
+            "/compact-model" if arg.is_empty() => {
+                self.open_model_picker(ModelTarget::Compact, false)
+            }
             "/compact-model" => self.set_model(&arg, ModelTarget::Compact),
             "/cwd" if arg.is_empty() => self.notice(format!("cwd: {}", self.cwd)),
             "/cwd" => match self.agent.set_cwd(Path::new(&arg)).await {
@@ -1564,7 +1625,12 @@ impl App {
             "/files" => self.open_file_browser(&arg),
             "/view" if arg.is_empty() => self.notice("usage: /view <path>"),
             "/view" => self.open_file(&arg, op_tx),
-            "/settings" => self.overlay = Overlay::Settings { sel: 0 },
+            "/settings" => {
+                self.overlay = Overlay::Settings {
+                    page: SettingsPage::Root,
+                    sel: 0,
+                }
+            }
             "/procs" => self.overlay = Overlay::Processes,
             "/lsp" => self.lsp_command(&arg, op_tx),
             "/copy" => self.copy_last_assistant(),
@@ -1624,6 +1690,11 @@ impl App {
     }
 
     fn set_model(&mut self, model: &str, target: ModelTarget) {
+        let model = if target == ModelTarget::Compact && model.trim().eq_ignore_ascii_case("none") {
+            ""
+        } else {
+            model
+        };
         let result = match target {
             ModelTarget::Agent => self.agent.set_agent_model(model),
             ModelTarget::Compact => self.agent.set_compact_model(model),
@@ -1632,13 +1703,16 @@ impl App {
             Ok(()) => {
                 self.agent_model = self.agent.agent_model();
                 self.compact_model = self.agent.compact_model();
-                self.another_model_for_compact = self.agent.another_model_for_compact();
+                self.compact_is_separate = self.agent.compact_is_separate();
                 let label = match target {
                     ModelTarget::Agent => "model",
                     ModelTarget::Compact => "compact model",
                 };
                 let value = match target {
                     ModelTarget::Agent => self.agent_model.clone(),
+                    ModelTarget::Compact if !self.compact_is_separate => {
+                        "None (main model)".to_string()
+                    }
                     ModelTarget::Compact => self.compact_model.clone(),
                 };
                 self.notice(format!("{label}: {value}"));
@@ -1647,8 +1721,8 @@ impl App {
         }
     }
 
-    fn open_model_picker(&mut self, target: ModelTarget) {
-        let items: Vec<PickerItem> = self
+    fn open_model_picker(&mut self, target: ModelTarget, from_settings: bool) {
+        let mut items: Vec<PickerItem> = self
             .config
             .model_catalog()
             .into_iter()
@@ -1660,21 +1734,160 @@ impl App {
             .collect();
         if items.is_empty() {
             self.notice("no models configured — add providers to models.json");
-        } else {
-            let current = match target {
-                ModelTarget::Agent => &self.agent_model,
-                ModelTarget::Compact => &self.compact_model,
-            };
-            let sel = items
-                .iter()
-                .position(|item| item.value == *current)
-                .unwrap_or(0);
-            self.overlay = Overlay::Model {
-                items,
-                sel,
-                filter: String::new(),
-                target,
-            };
+            return;
+        }
+        if target == ModelTarget::Compact {
+            items.insert(
+                0,
+                PickerItem {
+                    label: "None (main model)".to_string(),
+                    detail: format!(
+                        "reuse {} and its cached prompt",
+                        rustedharness_core::config::model_display(&self.agent_model)
+                    ),
+                    value: String::new(),
+                },
+            );
+        }
+        let current = match target {
+            ModelTarget::Agent => &self.agent_model,
+            ModelTarget::Compact if self.compact_is_separate => &self.compact_model,
+            ModelTarget::Compact => "",
+        };
+        let sel = items
+            .iter()
+            .position(|item| item.value == *current)
+            .unwrap_or(0);
+        self.overlay = Overlay::Model {
+            items,
+            sel,
+            filter: String::new(),
+            target,
+            from_settings,
+        };
+    }
+
+    pub(crate) fn settings_items(&self) -> Vec<PickerItem> {
+        let page = match &self.overlay {
+            Overlay::Settings { page, .. } => *page,
+            _ => SettingsPage::Root,
+        };
+        self.settings_items_for(page)
+    }
+
+    fn settings_items_for(&self, page: SettingsPage) -> Vec<PickerItem> {
+        match page {
+            SettingsPage::Root => vec![PickerItem {
+                label: "compaction".to_string(),
+                detail: format!(
+                    "model {} | auto {} | {:.0}% | keep {}",
+                    if self.compact_is_separate {
+                        rustedharness_core::config::model_display(&self.compact_model).to_string()
+                    } else {
+                        "None (main model)".to_string()
+                    },
+                    if self.compaction.auto_compact {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                    self.compaction.compact_threshold * 100.0,
+                    self.compaction.keep_recent_turns
+                ),
+                value: "compaction".to_string(),
+            }],
+            SettingsPage::Compaction => vec![
+                PickerItem {
+                    label: "model".to_string(),
+                    detail: if self.compact_is_separate {
+                        rustedharness_core::config::model_display(&self.compact_model).to_string()
+                    } else {
+                        "None - reuse the main model and its cached prompt".to_string()
+                    },
+                    value: "model".to_string(),
+                },
+                PickerItem {
+                    label: "auto compact".to_string(),
+                    detail: if self.compaction.auto_compact {
+                        "on".to_string()
+                    } else {
+                        "off".to_string()
+                    },
+                    value: "auto".to_string(),
+                },
+                PickerItem {
+                    label: "threshold".to_string(),
+                    detail: format!(
+                        "{:.0}% of the context window (left/right)",
+                        self.compaction.compact_threshold * 100.0
+                    ),
+                    value: "threshold".to_string(),
+                },
+                PickerItem {
+                    label: "keep recent turns".to_string(),
+                    detail: format!("{} turns (left/right)", self.compaction.keep_recent_turns),
+                    value: "keep".to_string(),
+                },
+                PickerItem {
+                    label: "strip old context".to_string(),
+                    detail: format!(
+                        "{} - omit old tool output and reasoning when a separate model is selected",
+                        if self.compaction.compact_strip_context {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ),
+                    value: "strip".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn adjust_setting(&mut self, up: bool) {
+        let page = match &self.overlay {
+            Overlay::Settings { page, .. } => *page,
+            _ => return,
+        };
+        if page != SettingsPage::Compaction {
+            return;
+        }
+        let sel = match &self.overlay {
+            Overlay::Settings { sel, .. } => *sel,
+            _ => return,
+        };
+        let Some(value) = self
+            .settings_items()
+            .get(sel)
+            .map(|item| item.value.clone())
+        else {
+            return;
+        };
+        let result = match value.as_str() {
+            "threshold" => {
+                let next = self.compaction.compact_threshold + if up { 0.05 } else { -0.05 };
+                self.agent.set_compact_threshold(next)
+            }
+            "keep" => {
+                let next = if up {
+                    self.compaction.keep_recent_turns + 1
+                } else {
+                    self.compaction.keep_recent_turns.saturating_sub(1).max(1)
+                };
+                self.agent.set_keep_recent_turns(next)
+            }
+            _ => return,
+        };
+        match result {
+            Ok(()) => {
+                self.compaction = self.agent.compaction_settings();
+                self.notice(format!(
+                    "compaction: {:.0}% threshold, keep {} turns",
+                    self.compaction.compact_threshold * 100.0,
+                    self.compaction.keep_recent_turns
+                ));
+            }
+            Err(err) => self.push(EntryKind::Error, "", err.to_string()),
         }
     }
 
@@ -2273,14 +2486,14 @@ mod tests {
             assert_ne!(*command, "/clear", "/clear was removed");
             assert_ne!(*command, "/todo", "ctrl+t shows the todo list");
         }
-        // The settings panel is back, and it holds exactly one toggle.
+        // The settings panel is back and drives compaction.
         assert!(COMMANDS.iter().any(|(command, _)| *command == "/settings"));
     }
 
-    /// One key for the todo panel, and the settings panel holds one toggle
-    /// that round-trips through the agent and the config file.
+    /// ctrl+t owns the todo panel; `/settings` opens a root menu whose
+    /// compaction submenu edits the live agent and persists the change.
     #[test]
-    fn ctrl_t_toggles_todos_and_settings_toggles_the_compact_model() {
+    fn ctrl_t_toggles_todos_and_settings_edits_compaction() {
         let mut app = crate::ui_tests::demo_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -2290,11 +2503,40 @@ mod tests {
         runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
         assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
 
-        app.overlay = Overlay::Settings { sel: 0 };
-        let before = app.another_model_for_compact;
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: 0,
+        };
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
-        assert_eq!(app.another_model_for_compact, !before);
-        assert_eq!(app.compact_model, app.agent.compact_model());
+        assert!(matches!(
+            app.overlay,
+            Overlay::Settings {
+                page: SettingsPage::Compaction,
+                ..
+            }
+        ));
+        let before = app.compaction.auto_compact;
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: 1,
+        };
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.compaction.auto_compact, !before);
+        assert_eq!(app.compaction, app.agent.compaction_settings());
+
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: 2,
+        };
+        let threshold = app.compaction.compact_threshold;
+        app.adjust_setting(true);
+        assert!(app.compaction.compact_threshold > threshold);
+        assert_eq!(app.compaction, app.agent.compaction_settings());
+
+        app.set_model("None", ModelTarget::Compact);
+        assert!(!app.compact_is_separate);
+        assert_eq!(app.compact_model, app.agent_model);
+        assert_eq!(app.agent.compact_model(), app.agent_model);
     }
 
     #[test]

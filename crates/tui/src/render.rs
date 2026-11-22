@@ -969,6 +969,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             sel,
             filter,
             target,
+            ..
         } => {
             let shown: Vec<PickerItem> =
                 model_filtered(items, filter).into_iter().cloned().collect();
@@ -1043,20 +1044,13 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 area,
             );
         }
-        Overlay::Settings { sel } => {
-            let item = PickerItem {
-                label: "another model for compact".to_string(),
-                detail: if app.another_model_for_compact {
-                    format!(
-                        "on - summaries use {}",
-                        rustedharness_core::config::model_display(&app.compact_model)
-                    )
-                } else {
-                    "off - summaries use the main model".to_string()
-                },
-                value: String::new(),
+        Overlay::Settings { page, sel } => {
+            let title = match page {
+                crate::app::SettingsPage::Root => "settings",
+                crate::app::SettingsPage::Compaction => "settings / compaction",
             };
-            draw_picker(frame, body, "settings", &[item], *sel, "");
+            let items = app.settings_items();
+            draw_picker(frame, body, title, &items, *sel, "");
         }
         Overlay::Hotkeys => {
             let lines = vec![

@@ -15,26 +15,17 @@ use crate::error::{HarnessError, Result};
 /// `Config` is the merged runtime view. `providers` is normally loaded from
 /// `models.json`; keeping it on the struct also lets a single JSON file
 /// describe everything, which is convenient for tests and `--config`.
-/// Serde default for settings that are on unless the user turns them off.
-fn yes() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     /// Default model, either `provider/model` or a model id unique across all
     /// providers. Empty means no model is configured.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
-    /// Model used for compaction summaries; falls back to `model`.
+    /// Optional model for compaction summaries. Empty means the main model
+    /// writes them, so the live prompt prefix can be reused from cache.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub compact_model: String,
-    /// Compact with `compactModel`. Turning it off summarises with `model`
-    /// instead: the main model's prompt cache is already warm, while a second
-    /// model starts cold and rarely pays for itself.
-    #[serde(default = "yes")]
-    pub another_model_for_compact: bool,
     /// Fallback context window for models that do not declare one. Zero means
     /// the limit is unknown.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -65,28 +56,6 @@ pub struct Config {
     /// Directory the config was loaded from (set at load time, never serialized).
     #[serde(skip)]
     pub source: Option<PathBuf>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            model: String::new(),
-            compact_model: String::new(),
-            another_model_for_compact: true,
-            context_window: 0,
-            provider: String::new(),
-            providers: BTreeMap::new(),
-            agent: AgentConfig::default(),
-            edit: EditConfig::default(),
-            shell: ShellConfig::default(),
-            lsp: LspConfig::default(),
-            web: WebConfig::default(),
-            session: SessionConfig::default(),
-            mcp: McpConfig::default(),
-            deny_tools: Vec::new(),
-            source: None,
-        }
-    }
 }
 
 /// One provider entry in `models.json`.
@@ -349,6 +318,10 @@ pub struct AgentConfig {
     /// Recent user/assistant turns kept verbatim across a compaction.
     pub keep_recent_turns: usize,
     pub auto_compact: bool,
+    /// With a separate summary model, omit old tool output and reasoning from
+    /// the transcript. The main-model path ignores this: it must reuse the
+    /// live prompt verbatim to hit the provider cache.
+    pub compact_strip_context: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Max todo chase injections per stall event.
@@ -369,11 +342,34 @@ impl Default for AgentConfig {
             compact_threshold: 0.80,
             keep_recent_turns: 8,
             auto_compact: true,
+            compact_strip_context: true,
             temperature: Some(0.2),
             chase_limit: 3,
             max_output_tokens: 8_192,
             rate_limit_retries: None,
             rate_limit_interval_secs: 5,
+        }
+    }
+}
+
+/// Runtime-tunable compaction settings. The TUI edits these through
+/// `/settings` without rebuilding the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionSettings {
+    pub auto_compact: bool,
+    pub compact_threshold: f64,
+    pub keep_recent_turns: usize,
+    pub compact_strip_context: bool,
+}
+
+impl From<&AgentConfig> for CompactionSettings {
+    fn from(cfg: &AgentConfig) -> Self {
+        Self {
+            auto_compact: cfg.auto_compact,
+            compact_threshold: cfg.compact_threshold,
+            keep_recent_turns: cfg.keep_recent_turns,
+            compact_strip_context: cfg.compact_strip_context,
         }
     }
 }
@@ -714,6 +710,8 @@ impl Config {
     fn normalize(&mut self) {
         self.edit.anchor_width = self.edit.anchor_width.clamp(2, 4);
         self.agent.rate_limit_interval_secs = self.agent.rate_limit_interval_secs.clamp(1, 300);
+        self.agent.compact_threshold = self.agent.compact_threshold.clamp(0.1, 0.99);
+        self.agent.keep_recent_turns = self.agent.keep_recent_turns.max(1);
         // Never invent a provider or model. An unset model stays unset and the
         // frontends render it as `None` until the user configures one.
         if !self.model.trim().is_empty() {
@@ -729,33 +727,52 @@ impl Config {
         }
     }
 
-    /// Model that writes compaction summaries. `compactModel` is kept as
-    /// configured so the choice survives toggling the setting off and on.
+    /// Model that writes compaction summaries. Empty `compactModel` means the
+    /// main model; an explicit model is routed independently.
     pub fn compaction_model(&self) -> &str {
-        if self.another_model_for_compact && !self.compact_model.trim().is_empty() {
-            &self.compact_model
-        } else {
+        if self.compact_model.trim().is_empty() {
             &self.model
+        } else {
+            &self.compact_model
         }
     }
 
-    /// Persist one top-level setting into `config.json`, leaving every other
-    /// key (including ones this version does not model) untouched.
-    pub fn save_setting(&self, key: &str, value: Value) -> Result<()> {
+    /// Persist one setting into `config.json`, leaving every other key
+    /// (including ones this version does not model) untouched. `path` is a
+    /// JSON object path, e.g. `["agent", "autoCompact"]`.
+    pub fn save_setting(&self, path: &[&str], value: Value) -> Result<()> {
+        let (last, parents) = path
+            .split_last()
+            .ok_or_else(|| HarnessError::Config("empty settings path".to_string()))?;
         let dir = self.source_dir();
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join("config.json");
-        let mut root: Value = std::fs::read_to_string(&path)
+        let path_on_disk = dir.join("config.json");
+        let mut root: Value = std::fs::read_to_string(&path_on_disk)
             .ok()
             .and_then(|raw| {
                 serde_json::from_str(&strip_trailing_commas(&strip_json_comments(&raw))).ok()
             })
             .filter(Value::is_object)
             .unwrap_or_else(|| Value::Object(Default::default()));
-        root[key] = value;
+        let mut slot = &mut root;
+        for key in parents {
+            if !slot.is_object() {
+                *slot = Value::Object(Default::default());
+            }
+            let object = slot.as_object_mut().expect("object inserted above");
+            slot = object
+                .entry((*key).to_string())
+                .or_insert_with(|| Value::Object(Default::default()));
+        }
+        if !slot.is_object() {
+            *slot = Value::Object(Default::default());
+        }
+        slot.as_object_mut()
+            .expect("object inserted above")
+            .insert((*last).to_string(), value);
         let mut text = serde_json::to_string_pretty(&root)?;
         text.push('\n');
-        std::fs::write(&path, text)?;
+        std::fs::write(&path_on_disk, text)?;
         Ok(())
     }
 
@@ -1179,6 +1196,7 @@ mod tests {
         assert_eq!(cfg.context_window, 0);
         assert_eq!(model_display(&cfg.model), "None");
         assert_eq!(cfg.agent.compact_threshold, 0.8);
+        assert!(cfg.agent.compact_strip_context);
     }
 
     #[test]
@@ -1316,47 +1334,41 @@ mod tests {
         std::env::remove_var("RUSTEDHARNESS_TEST_KEY");
     }
 
-    /// Compaction can run on the main model, and the configured summary model
-    /// is kept so the setting can be turned back on.
+    /// Empty `compactModel` means the main model; a value routes summaries to
+    /// that separate model.
     #[test]
-    fn another_model_for_compact_decides_which_model_summarises() {
-        let raw =
-            r#"{"model":"amd/big","compactModel":"amd/small","anotherModelForCompact":false}"#;
-        let mut cfg: Config = serde_json::from_str(raw).unwrap();
-        cfg.normalize();
-        assert!(!cfg.another_model_for_compact);
-        assert_eq!(cfg.compaction_model(), cfg.model);
-        assert_ne!(cfg.compact_model, cfg.model, "the choice is remembered");
-
+    fn an_empty_compact_model_means_the_main_model() {
         let mut cfg: Config =
             serde_json::from_str(r#"{"model":"amd/big","compactModel":"amd/small"}"#).unwrap();
         cfg.normalize();
-        assert!(
-            cfg.another_model_for_compact,
-            "the default keeps them apart"
-        );
         assert_eq!(cfg.compaction_model(), cfg.compact_model);
+
+        let mut cfg: Config = serde_json::from_str(r#"{"model":"amd/big"}"#).unwrap();
+        cfg.normalize();
+        assert!(cfg.compact_model.is_empty());
+        assert_eq!(cfg.compaction_model(), cfg.model);
     }
 
-    /// The toggle writes one key and leaves the rest of the file alone.
+    /// A nested setting writes one key and leaves the rest of the file alone.
     #[test]
     fn saving_a_setting_edits_only_that_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(
             &path,
-            r#"{"model":"m","denyTools":["bash"],"note":"keep me"}"#,
+            r#"{"model":"m","denyTools":["bash"],"note":"keep me","agent":{"maxTurns":7}}"#,
         )
         .unwrap();
         let cfg = Config {
             source: Some(dir.path().to_path_buf()),
             ..Config::default()
         };
-        cfg.save_setting("anotherModelForCompact", serde_json::json!(false))
+        cfg.save_setting(&["agent", "autoCompact"], serde_json::json!(false))
             .unwrap();
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["anotherModelForCompact"], serde_json::json!(false));
+        assert_eq!(saved["agent"]["autoCompact"], serde_json::json!(false));
+        assert_eq!(saved["agent"]["maxTurns"], 7);
         assert_eq!(saved["denyTools"][0], "bash");
         assert_eq!(saved["note"], "keep me");
     }
