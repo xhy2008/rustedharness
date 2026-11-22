@@ -26,7 +26,8 @@ pub struct EditOpArgs {
     pub pos: Value,
     /// Last line for replace/delete (defaults to pos).
     pub end: Option<Value>,
-    /// Replacement/inserted lines. Omit for delete.
+    /// Replacement/inserted raw lines. Omit for delete. Never include a
+    /// `line#anchor|` prefix or unified-diff `+/-` markers.
     pub lines: Option<Vec<String>>,
     /// Unique substring for op=replace_text.
     #[serde(rename = "oldText")]
@@ -60,8 +61,10 @@ impl Tool for EditTool {
          the whole batch with E_STALE_ANCHOR and the current anchor table. replace_text \
          uses oldText/newText and must be the ONLY edit in a call; mixing it with any \
          other edit (or several replace_text ops) fails with E_INVALID_PATCH. `lines[]` is \
-         the new content only. Returns a unified diff, fresh anchors, and LSP diagnostics \
-         when available. dry_run=true writes nothing."
+         the new content only: never paste the `line#anchor|` prefix from `read`/`grep`, \
+         or unified-diff `+/-` markers, into it. Anchors belong only in `pos`/`end` as \
+         `\"12#AB\"`. Returns a unified diff, fresh anchors, and LSP diagnostics when \
+         available. dry_run=true writes nothing."
             .to_string()
     }
 

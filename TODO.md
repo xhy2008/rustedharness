@@ -14,6 +14,8 @@
    同一 slot 多次插入现在返回 `E_OVERLAP`，不再由排序决定先后。
 5. **移除 `looks_decorated` 卫生检查**。`lines[]` 不再检测 `read` 前缀或 unified-diff
    的 `+/-` 标记；主路径是行号锚点，`replace_text` 只作为不熟悉锚点编辑的 fallback。
+   `read`/`grep`/`edit` 的工具说明和 `lines` schema 改为强调：只把 `line#anchor`
+   放进 `pos`/`end`，`lines[]` 只放新内容。
 6. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot 测试；README、
    `docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
 

@@ -37,7 +37,8 @@ pub struct GrepArgs {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub output_mode: Option<OutputMode>,
-    /// Emit `file:line#anchor|content` so matches can feed edit directly.
+    /// Emit `file:line#anchor|content` so matches can feed edit directly;
+    /// pass only `line#anchor` to edit, not the matched line.
     pub anchors: Option<bool>,
     /// Treat pattern as a literal string.
     pub literal: Option<bool>,
@@ -53,9 +54,9 @@ impl Tool for GrepTool {
 
     fn description(&self) -> String {
         "Search file contents with gitignore-aware traversal. Modes: content \
-         (default), files_with_matches, count. Set anchors=true to get `line#anchor` \
-         prefixes that can be passed straight to `edit`. Output paths are relative to \
-         the session cwd."
+         (default), files_with_matches, count. Set anchors=true to get `file:line#anchor` \
+         prefixes; pass only the `line#anchor` part to `edit` as pos/end, never the \
+         matched line itself. Output paths are relative to the session cwd."
             .to_string()
     }
 
