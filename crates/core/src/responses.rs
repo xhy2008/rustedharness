@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, ProviderConfig, SystemRole};
+use crate::config::{Compat, ProviderConfig};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
     Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall, Usage,
@@ -76,9 +76,10 @@ impl ResponsesProvider {
                     if index == 0 && !content.is_empty() {
                         instructions = Some(content);
                     } else if !content.is_empty() {
-                        let role = match self.compat.system_role {
-                            SystemRole::System => "system",
-                            SystemRole::Developer => "developer",
+                        let role = if self.compat.uses_developer_role() {
+                            "developer"
+                        } else {
+                            "system"
                         };
                         input.push(message_item(role, "input_text", &content));
                     }

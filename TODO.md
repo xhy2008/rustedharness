@@ -5,9 +5,12 @@
 1. **Chat Completions 和 Responses 都只发一次请求**。删除
    `degradation_candidates`、`degraded_without`、`is_compat_rejection` 以及
    `all compatibility fallbacks failed` 路径；网关拒绝字段时直接返回 provider 错误。
-2. **可选兼容字段默认关闭**。`Compat` 的 `reasoningContent`、`toolChoice`、
-   `parallelToolCalls`、`streamUsage` 默认改为 `false`，只有 `models.json` 明确开启才写入
-   request body。`maxTokensField` 默认仍为 `max_tokens`，可用 `omit` 完全省略。
+2. **可选兼容字段默认关闭，并对齐 Pi 字段名**。`maxTokensField` 默认
+   `max_tokens`；`supportsDeveloperRole`、`supportsUsageInStreaming`、
+   `requiresToolResultName`、`requiresNonNullAssistantContent`、
+   `requiresToolsWithToolHistory`、`requiresReasoningContentOnAssistantMessages`
+   按 Pi 的 `models.json` 位置解析，默认不发送。`reasoningContent`、`toolChoice`、
+   `parallelToolCalls` 保留为 harness 扩展。
 3. **测试与文档**。新增默认字段省略测试；更新 README、`docs/architecture.md`，删除
    fallback 描述。
 

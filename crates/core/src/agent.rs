@@ -714,10 +714,9 @@ impl Agent {
                     let items = self.todos.snapshot();
                     let _ = self.session.lock().unwrap().todos(&items);
                 }
-                self.messages
-                    .write()
-                    .unwrap()
-                    .push(ChatMessage::tool(call.id.clone(), content));
+                let mut tool_message = ChatMessage::tool(call.id.clone(), content);
+                tool_message.name = Some(call.function.name.clone());
+                self.messages.write().unwrap().push(tool_message);
             }
             if token.is_cancelled() {
                 let _ = self.events.send(HarnessEvent::TurnComplete {

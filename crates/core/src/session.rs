@@ -1240,15 +1240,15 @@ fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<C
         }
         AgentMessage::ToolResult {
             tool_call_id,
-            tool_name: _,
+            tool_name,
             content,
             is_error,
             ..
         } => {
-            // Live tool results are created with `ChatMessage::tool`, which has
-            // no `name`; keep the resumed shape identical so the prompt prefix
-            // (and its cache) does not change after `/resume`.
             let mut chat = ChatMessage::tool(tool_call_id, content.text());
+            // The name is internal; `provider.rs` emits it only when
+            // `requiresToolResultName` is set.
+            chat.name = Some(tool_name.clone());
             chat.images = content.images();
             let _ = is_error;
             Some(chat)
@@ -1300,10 +1300,11 @@ fn edited_message(message: &AgentMessage, replacement: &Value) -> Option<ChatMes
         }
         AgentMessage::ToolResult {
             tool_call_id,
-            tool_name: _,
+            tool_name,
             ..
         } => {
             let mut chat = ChatMessage::tool(tool_call_id, parsed.text());
+            chat.name = Some(tool_name.clone());
             chat.content = Some(parsed.text());
             Some(chat)
         }
@@ -1446,11 +1447,9 @@ mod tests {
         drop(writer);
 
         let loaded = SessionStore::new(&cfg).load(&id).unwrap();
-        let live = vec![
-            ChatMessage::user("hello"),
-            assistant,
-            ChatMessage::tool("call_1", "file contents"),
-        ];
+        let mut tool = ChatMessage::tool("call_1", "file contents");
+        tool.name = Some("read".into());
+        let live = vec![ChatMessage::user("hello"), assistant, tool];
         assert_eq!(
             serde_json::to_string(&loaded.messages).unwrap(),
             serde_json::to_string(&live).unwrap(),
@@ -1564,10 +1563,7 @@ mod tests {
         assert_eq!(calls[0].function.arguments, r#"{"path":"src/main.rs"}"#);
         assert_eq!(loaded.messages[2].content.as_deref(), Some("file contents"));
         assert_eq!(loaded.messages[2].tool_call_id.as_deref(), Some("call_1"));
-        assert!(
-            loaded.messages[2].name.is_none(),
-            "live tool results have no name; resume must not add one"
-        );
+        assert_eq!(loaded.messages[2].name.as_deref(), Some("read"));
         assert_eq!(loaded.todos.len(), 1);
         let meta = loaded.meta.unwrap();
         assert_eq!(meta.agent_model, "openai/gpt-5");

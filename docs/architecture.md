@@ -67,9 +67,10 @@ back into the same `Completion`. A `Router` selects the provider that owns each
 request's model, so the agent and compaction models can use different endpoints
 and different protocols in one session. `Compat` controls `max_tokens` vs
 `max_completion_tokens`, `system` vs `developer`, `reasoning_content`,
-`tool_choice`, `parallel_tool_calls`, and `stream_options.include_usage`.
-Optional switches default off and must be enabled in `models.json`; the
-provider never retries a rejected request with fields removed.
+`supportsDeveloperRole`, `supportsUsageInStreaming`, and the Pi compatibility
+flags for tool result names and assistant content. Optional switches default
+off and must be enabled in `models.json`; the provider never retries a rejected
+request with fields removed.
 
 ### Path anchoring
 

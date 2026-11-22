@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, Config, MaxTokensField, ProviderConfig, SystemRole};
+use crate::config::{Compat, Config, MaxTokensField, ProviderConfig};
 use crate::error::{HarnessError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -440,9 +440,10 @@ impl Provider {
         for (i, message) in request.messages.iter().enumerate() {
             let mut out = serde_json::Map::new();
             let role = if i == 0 && message.role == Role::System {
-                match self.compat.system_role {
-                    SystemRole::System => "system",
-                    SystemRole::Developer => "developer",
+                if self.compat.uses_developer_role() {
+                    "developer"
+                } else {
+                    "system"
                 }
             } else {
                 match message.role {
@@ -456,12 +457,21 @@ impl Provider {
             if let Some(content) = &message.content {
                 out.insert("content".into(), json!(content));
             } else if message.role == Role::Assistant && message.tool_calls.is_some() {
-                out.insert("content".into(), Value::Null);
+                let content = if self.compat.requires_non_null_assistant_content {
+                    json!("")
+                } else {
+                    Value::Null
+                };
+                out.insert("content".into(), content);
             }
-            if self.compat.reasoning_content {
-                if let Some(reasoning) = &message.reasoning_content {
+            if let Some(reasoning) = &message.reasoning_content {
+                if self.compat.reasoning_content {
                     out.insert("reasoning_content".into(), json!(reasoning));
                 }
+            } else if self.compat.requires_reasoning_content_on_assistant_messages
+                && message.role == Role::Assistant
+            {
+                out.insert("reasoning_content".into(), json!(""));
             }
             if let Some(calls) = &message.tool_calls {
                 let calls: Vec<Value> = calls
@@ -483,7 +493,9 @@ impl Provider {
                 out.insert("tool_call_id".into(), json!(id));
             }
             if let Some(name) = &message.name {
-                out.insert("name".into(), json!(name));
+                if message.role != Role::Tool || self.compat.requires_tool_result_name {
+                    out.insert("name".into(), json!(name));
+                }
             }
             messages.push(Value::Object(out));
         }
@@ -492,7 +504,7 @@ impl Provider {
         body.insert("model".into(), json!(request.model));
         body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), json!(request.stream));
-        if request.stream && self.compat.stream_usage {
+        if request.stream && self.compat.uses_stream_usage() {
             body.insert("stream_options".into(), json!({ "include_usage": true }));
         }
         if let Some(temperature) = request.temperature {
@@ -531,6 +543,13 @@ impl Provider {
             if self.compat.parallel_tool_calls {
                 body.insert("parallel_tool_calls".into(), json!(true));
             }
+        } else if self.compat.requires_tools_with_tool_history
+            && request
+                .messages
+                .iter()
+                .any(|message| message.role == Role::Tool || message.tool_calls.is_some())
+        {
+            body.insert("tools".into(), Value::Array(Vec::new()));
         }
         Value::Object(body)
     }
@@ -1175,10 +1194,48 @@ mod tests {
     }
 
     #[test]
+    fn pi_compat_flags_shape_the_body() {
+        let mut p = provider();
+        p.compat.supports_developer_role = Some(true);
+        p.compat.supports_usage_in_streaming = Some(true);
+        p.compat.requires_tool_result_name = true;
+        p.compat.requires_non_null_assistant_content = true;
+        p.compat.requires_tools_with_tool_history = true;
+        p.compat.requires_reasoning_content_on_assistant_messages = true;
+
+        let mut tool = ChatMessage::tool("call_1", "result");
+        tool.name = Some("read".into());
+        let request = ChatRequest::new(
+            "m",
+            vec![
+                ChatMessage::system("sys"),
+                ChatMessage::assistant_tool_calls(
+                    None,
+                    vec![ToolCall {
+                        id: "call_1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                    }],
+                ),
+                tool,
+            ],
+        );
+        let body = p.body(&request);
+        assert_eq!(body["messages"][0]["role"], "developer");
+        assert_eq!(body["messages"][1]["content"], "");
+        assert_eq!(body["messages"][1]["reasoning_content"], "");
+        assert_eq!(body["messages"][2]["name"], "read");
+        assert_eq!(body["tools"], json!([]));
+    }
+
+    #[test]
     fn body_honours_compat_switches() {
         let mut p = provider();
         p.compat.max_tokens_field = MaxTokensField::MaxCompletionTokens;
-        p.compat.system_role = SystemRole::Developer;
+        p.compat.supports_developer_role = Some(true);
         p.compat.reasoning_content = true;
         p.compat.tool_choice = true;
         let mut request = ChatRequest::new(

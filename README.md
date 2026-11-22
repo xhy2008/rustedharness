@@ -123,8 +123,8 @@ prefixed with their provider.
       "apiKey": "$DEEPSEEK_API_KEY",
       "headers": { "X-Title": "RustedHarness" },
       "compat": {
-        "maxTokensField": "max_tokens",
-        "reasoningContent": true
+        "supportsDeveloperRole": false,
+        "maxTokensField": "max_tokens"
       },
       "models": [
         { "id": "deepseek-chat", "contextWindow": 128000 },
@@ -163,12 +163,20 @@ treated as disabled.
   `output_tokens` from `usage`. Reasoning items are not replayed between turns,
   so stateless use does not require server-side response storage.
 
-`compat` defaults are `maxTokensField: "max_tokens"` and
-`systemRole: "system"`. The optional switches `reasoningContent`, `toolChoice`,
-`parallelToolCalls`, and `streamUsage` default to `false`; enable them in
-`models.json` only for gateways that support those fields. There is no
+`compat` uses Pi's field names: `maxTokensField`, `supportsDeveloperRole`,
+`supportsUsageInStreaming`, `requiresToolResultName`,
+`requiresNonNullAssistantContent`, `requiresToolsWithToolHistory`, and
+`requiresReasoningContentOnAssistantMessages`. `maxTokensField` defaults to
+`"max_tokens"`; the optional switches default off and are only emitted when
+`models.json` opts in. `reasoningContent`, `toolChoice`, and
+`parallelToolCalls` are harness extensions, not Pi fields. There is no
 automatic field-degradation retry: if a gateway rejects a field, the provider
 returns the error and the request is not retried.
+
+Pi's advanced model fields (`input`, `inputLimits`, `cost`, `promptCache`,
+`samplingParams`, model-level `api`/`baseUrl`/`headers`/`compat`) and provider
+`oauth`/`authHeader`/`modelOverrides` are currently ignored; basic provider
+and model selection loads unchanged.
 
 ### config.json
 

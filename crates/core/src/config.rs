@@ -247,36 +247,69 @@ impl ModelSpec {
     }
 }
 
-/// Compatibility switches for OpenAI-compatible endpoints.
+/// Compatibility switches for OpenAI-compatible endpoints. The names and
+/// positions mirror Pi's `models.json` `compat` object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Compat {
-    /// `max_tokens`, `max_completion_tokens`, or `omit` (model picks its default).
+    /// `max_tokens`, `max_completion_tokens`, or `omit` (our extension).
     pub max_tokens_field: MaxTokensField,
-    /// `system` or `developer` for the first message.
-    pub system_role: SystemRole,
-    /// Round-trip `reasoning_content` deltas (DeepSeek-style endpoints).
+    /// `supportsDeveloperRole`: use the developer role for the leading system message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
+    /// `supportsUsageInStreaming`: request `stream_options.include_usage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_usage_in_streaming: Option<bool>,
+    /// `requiresToolResultName`: include the tool name on tool results.
+    #[serde(skip_serializing_if = "is_false")]
+    pub requires_tool_result_name: bool,
+    /// `requiresNonNullAssistantContent`: send `""` instead of `null` for
+    /// tool-call-only assistant messages.
+    #[serde(skip_serializing_if = "is_false")]
+    pub requires_non_null_assistant_content: bool,
+    /// `requiresToolsWithToolHistory`: send `"tools": []` when the transcript
+    /// contains tool calls/results but the request has no current tools.
+    #[serde(skip_serializing_if = "is_false")]
+    pub requires_tools_with_tool_history: bool,
+    /// `requiresReasoningContentOnAssistantMessages`: always emit an empty
+    /// `reasoning_content` on assistant messages when reasoning is enabled.
+    #[serde(skip_serializing_if = "is_false")]
+    pub requires_reasoning_content_on_assistant_messages: bool,
+    /// Round-trip `reasoning_content` deltas (our extension).
+    #[serde(skip_serializing_if = "is_false")]
     pub reasoning_content: bool,
-    /// Send `tool_choice: "auto"` (opt-in).
+    /// Send `tool_choice: "auto"` (our extension).
+    #[serde(skip_serializing_if = "is_false")]
     pub tool_choice: bool,
-    /// Send `parallel_tool_calls: true` (opt-in).
+    /// Send `parallel_tool_calls: true` (our extension).
+    #[serde(skip_serializing_if = "is_false")]
     pub parallel_tool_calls: bool,
-    /// Ask for `stream_options.include_usage` (opt-in).
-    pub stream_usage: bool,
+}
+
+impl Compat {
+    pub fn uses_developer_role(&self) -> bool {
+        self.supports_developer_role.unwrap_or(false)
+    }
+
+    pub fn uses_stream_usage(&self) -> bool {
+        self.supports_usage_in_streaming.unwrap_or(false)
+    }
 }
 
 impl Default for Compat {
     fn default() -> Self {
         Self {
             max_tokens_field: MaxTokensField::MaxTokens,
-            system_role: SystemRole::System,
-            // Optional OpenAI knobs stay off unless models.json opts in. A
-            // gateway that rejects one of them should fail visibly instead of
-            // being retried with a subtly different request.
+            // Pi-style optional overrides stay off unless models.json opts in.
+            supports_developer_role: None,
+            supports_usage_in_streaming: None,
+            requires_tool_result_name: false,
+            requires_non_null_assistant_content: false,
+            requires_tools_with_tool_history: false,
+            requires_reasoning_content_on_assistant_messages: false,
             reasoning_content: false,
             tool_choice: false,
             parallel_tool_calls: false,
-            stream_usage: false,
         }
     }
 }
@@ -287,13 +320,6 @@ pub enum MaxTokensField {
     MaxTokens,
     MaxCompletionTokens,
     Omit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SystemRole {
-    System,
-    Developer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1109,6 +1135,42 @@ mod tests {
         assert_eq!(cfg.compact_model, "openai/gpt-4o-mini");
         assert!(cfg.providers.contains_key("openai"));
         assert_eq!(cfg.agent.compact_threshold, 0.8);
+    }
+
+    #[test]
+    fn pi_style_compat_and_model_fields_parse() {
+        let file: ModelsFile = serde_json::from_str(
+            r#"{
+              "providers": {
+                "proxy": {
+                  "baseUrl": "https://example.com/v1",
+                  "api": "openai-completions",
+                  "compat": {
+                    "supportsDeveloperRole": false,
+                    "supportsUsageInStreaming": true,
+                    "maxTokensField": "max_completion_tokens",
+                    "requiresToolResultName": true,
+                    "requiresNonNullAssistantContent": true
+                  },
+                  "models": [
+                    { "id": "m", "contextWindow": 64000, "maxTokens": 4096, "input": ["text", "image"] }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let provider = &file.providers["proxy"];
+        assert_eq!(provider.compat.supports_developer_role, Some(false));
+        assert_eq!(provider.compat.supports_usage_in_streaming, Some(true));
+        assert_eq!(
+            provider.compat.max_tokens_field,
+            MaxTokensField::MaxCompletionTokens
+        );
+        assert!(provider.compat.requires_tool_result_name);
+        assert!(provider.compat.requires_non_null_assistant_content);
+        assert_eq!(provider.models[0].context_window, 64_000);
+        assert_eq!(provider.models[0].max_tokens, Some(4096));
     }
 
     #[test]
