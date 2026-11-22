@@ -1,5 +1,23 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：Pi 可选字段自动处理（2026-11-22）
+
+1. **删除 `reasoningContent` / `toolChoice` / `parallelToolCalls` 配置开关**。
+   reasoning 非空时自动回放；空 reasoning 在 `requiresReasoningContentOnAssistantMessages`
+   和 reasoning 模型下自动补空；没有 content/tool_calls 的 assistant 跳过。
+   `tool_choice`、`parallel_tool_calls` 不再由 `models.json` 控制，默认请求不发送
+   （Pi 只从调用方 request option 发送）。
+2. **可选 compat 按 Pi 自动检测**：`supportsStore`、`supportsDeveloperRole`、
+   `supportsUsageInStreaming`、`supportsFinishReason`、`maxTokensField`、
+   `requiresToolResultName`、`requiresAssistantAfterToolResult`、
+   `requiresNonNullAssistantContent`、`requiresToolsWithToolHistory`、
+   `requiresReasoningContentOnAssistantMessages`。默认值、URL 检测和偏移逻辑与 Pi
+   对应实现一致。
+3. **仍不映射的高级字段**：`thinkingFormat`、`chatTemplate*`、`openRouterRouting`、
+   `vercelGatewayRouting`、`zaiToolStream`、`cacheControlFormat`、
+   `promptCacheKeyMode`、session-affinity headers、`thinkingTokenBudget*`、
+   strict/grammar tools、mid-conversation tool/system 标志。它们被忽略，不猜测发送。
+
 ## 已完成：移除默认模型硬编码（2026-11-22）
 
 1. **无内置 provider/model**。`Config::default()` 不再注入 OpenAI provider、
@@ -20,25 +38,25 @@
    `requiresNonNullAssistantContent`、`requiresToolsWithToolHistory`、
    `requiresReasoningContentOnAssistantMessages`、`maxTokensField`。删除了我们的
    `systemRole`/`streamUsage` 写法；`reasoningContent`、`toolChoice`、
-   `parallelToolCalls` 保留为 harness 扩展。
+   `parallelToolCalls` 也已删除，改为 Pi 的自动行为。
 2. **JSONC**。`models.json`/`config.json` 现在接受 `//`、`/* ... */` 注释和尾随逗号。
 3. **已知未映射的 Pi 字段**（会被忽略，但不会导致加载失败）：provider 的
    `oauth`/`authHeader`/`modelOverrides`；model 的 `api`/`baseUrl`/`input`/
    `inputLimits`/`cost`/`promptCache`/`samplingParams*`/`thinkingLevelMap`/`headers`/
-   `compat`；以及多数高级 compat 标志。provider/model 基本选择与 OpenAI-compatible
-   请求可互通。
+   `compat`；以及上节列出的高级 compat 标志。provider/model 基本选择与
+   OpenAI-compatible 请求可互通。
 
 ## 已完成：移除 provider degradation retry（2026-11-22）
 
 1. **Chat Completions 和 Responses 都只发一次请求**。删除
    `degradation_candidates`、`degraded_without`、`is_compat_rejection` 以及
    `all compatibility fallbacks failed` 路径；网关拒绝字段时直接返回 provider 错误。
-2. **可选兼容字段默认关闭，并对齐 Pi 字段名**。`maxTokensField` 默认
-   `max_tokens`；`supportsDeveloperRole`、`supportsUsageInStreaming`、
-   `requiresToolResultName`、`requiresNonNullAssistantContent`、
-   `requiresToolsWithToolHistory`、`requiresReasoningContentOnAssistantMessages`
-   按 Pi 的 `models.json` 位置解析，默认不发送。`reasoningContent`、`toolChoice`、
-   `parallelToolCalls` 保留为 harness 扩展。
+2. **可选兼容字段对齐 Pi 字段名**。`maxTokensField`、`supportsDeveloperRole`、
+   `supportsUsageInStreaming`、`requiresToolResultName`、
+   `requiresNonNullAssistantContent`、`requiresToolsWithToolHistory`、
+   `requiresReasoningContentOnAssistantMessages` 按 Pi 的位置解析；默认值后来
+   由“Pi 可选字段自动处理”改为 Pi 的自动检测。`reasoningContent`、
+   `toolChoice`、`parallelToolCalls` 已删除。
 3. **测试与文档**。新增默认字段省略测试；更新 README、`docs/architecture.md`，删除
    fallback 描述。
 
@@ -62,7 +80,8 @@
    块；system prompt 只保留跨工具策略，不再重复 lsp/todo/shell/web 的工具描述。
    tool catalog 每个 turn 只生成一次；新增测试验证连续请求（含进入下一 turn）
    messages 前缀、tools、model、temperature、max_tokens 和 stream 均完全一致。
-7. **`/resume` 前缀对齐**。session replay 不再给 tool result 加 `name`；tool_call
+7. **`/resume` 前缀对齐**。session replay 为 tool result 恢复 `name`，但 provider 只在
+   `requiresToolResultName` 时发送；tool_call
    arguments 统一为 canonical JSON；只有 reasoning/tool_calls 的 assistant 保持
    `content=None`；compaction summary 使用与 live 相同的 pi 文案。新增
    `resume_replays_the_live_message_shape` 测试。system prompt 和 tools 不存 session，

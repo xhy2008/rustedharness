@@ -67,12 +67,23 @@ literals, `$ENV`/`${ENV}` interpolation, and `!command`.
 `instructions` and flat function tools, and folding `response.*` SSE events
 back into the same `Completion`. A `Router` selects the provider that owns each
 request's model, so the agent and compaction models can use different endpoints
-and different protocols in one session. `Compat` resolves Pi's defaults from the endpoint: `max_tokens` vs
-`max_completion_tokens`, `system` vs `developer`, streaming usage,
+and different protocols in one session. `Compat` resolves Pi's defaults from
+the endpoint: `max_tokens` vs `max_completion_tokens`, `system` vs `developer`,
+streaming usage,
 `finish_reason`, `store`, tool-result names, assistant content, and DeepSeek's
 empty `reasoning_content`. `reasoning_content` is replayed automatically when
-present; `tool_choice`/`parallel_tool_calls` are left to request options. The
-provider never retries a rejected request with fields removed.
+present; `tool_choice`/`parallel_tool_calls` are left to request options, so
+the default request omits them. The provider never retries a rejected request
+with fields removed.
+
+Advanced Pi compat fields that require thinking levels, strict/grammar tools,
+cache markers, routing, or Anthropic message blocks are not implemented:
+`thinkingFormat`, `chatTemplate*`, `openRouterRouting`, `vercelGatewayRouting`,
+`zaiToolStream`, `cacheControlFormat`, `promptCacheKeyMode`, session-affinity
+headers, `thinkingTokenBudget*`, `supportsStrictMode`,
+`supportsOpenAIGrammarTools`, and mid-conversation tool/system flags. They are
+ignored, not guessed, so a request never contains a field the endpoint did not
+opt into through a supported switch.
 
 ### Path anchoring
 

@@ -24,8 +24,8 @@ excluded from `default-members` so a normal build needs no webview libraries.
 ## Requirements
 
 - Rust 1.85 or newer (edition 2021).
-- An OpenAI-compatible endpoint and an API key in `OPENAI_API_KEY`, or a local
-  server such as Ollama added to `models.json`.
+- A provider and model in `models.json`; API keys may be literals or use
+  `$ENV` interpolation. There is no built-in provider or default model.
 - Optional: language servers for semantic code intelligence. The agent falls
   back to a built-in name-based index when none is available.
 
@@ -38,6 +38,7 @@ export OPENAI_API_KEY=sk-...
 # Create ~/.rustedharness/config.json and models.json
 ./target/release/rustedharness config init
 # Then add a provider/model to models.json and set `model` in config.json.
+# Without a model, the TUI shows `None` and `run` exits with a prompt.
 
 # One-shot, headless
 ./target/release/rustedharness run "Add a test for the parser and run it"
@@ -69,7 +70,7 @@ servers together:
 
 | Path | Purpose |
 | --- | --- |
-| `config.json` | Default model and harness settings |
+| `config.json` | Model choice (optional) and harness settings |
 | `models.json` | Providers, endpoints and their models (Pi-style) |
 | `mcp.json` | Optional MCP servers shared by every project |
 | `sessions/` | Append-only JSONL sessions |
@@ -97,7 +98,8 @@ containing both.
 Declare as many providers as you like. A model is selected as
 `provider/model`; bare ids are accepted when they are unique. Model ids that
 contain slashes (for example OpenRouter ids) can be used as-is when unique, or
-prefixed with their provider.
+prefixed with their provider. The example below is illustrative; this harness
+does not ship any of these providers or models by default.
 
 ```json
 {
@@ -180,9 +182,17 @@ the developer role is used for OpenAI Chat Completions reasoning models (and
 for Responses), and DeepSeek gets empty `reasoning_content` on replayed
 assistant messages. `reasoning_content` is replayed automatically when present.
 `tool_choice` and `parallel_tool_calls` are not emitted from `models.json`;
-Pi only sends them from request options. There is no automatic
-field-degradation retry: if a gateway rejects a field, the provider returns the
-error and the request is not retried.
+Pi only sends them from request options, so the default request omits them.
+There is no automatic field-degradation retry: if a gateway rejects a field,
+the provider returns the error and the request is not retried.
+
+Higher-level Pi compat fields that depend on thinking levels, strict/grammar
+tools, prompt-cache markers, routing, or Anthropic-specific message blocks are
+not implemented yet: `thinkingFormat`, `chatTemplate*`, `openRouterRouting`,
+`vercelGatewayRouting`, `zaiToolStream`, `cacheControlFormat`,
+`promptCacheKeyMode`, session-affinity headers, `thinkingTokenBudget*`,
+`supportsStrictMode`, `supportsOpenAIGrammarTools`, and the mid-conversation
+tool/system flags. They are ignored rather than emitted with guessed values.
 
 Pi's advanced model fields (`input`, `inputLimits`, `cost`, `promptCache`,
 `samplingParams`, model-level `api`/`baseUrl`/`headers`/`compat`) and provider
@@ -246,10 +256,10 @@ and model selection loads unchanged.
 whole URL (a mirror), `binary` and `archive` describe an unusual layout.
 
 `model` and `compactModel` may point at different providers; the backend routes
-each request independently. Omit `model` to start without one: the TUI shows
-`None` and prompts you to configure a provider; headless `run` exits with the
-same prompt. `contextWindow` is an optional fallback for models that do not
-declare one. `agent.maxOutputTokens` is the fallback when a model has no
+each request independently. The example intentionally omits both: omit `model`
+to start without one, and the TUI shows `None` with a configuration prompt;
+headless `run` exits with the same prompt. `contextWindow` is an optional
+fallback for models that do not declare one. `agent.maxOutputTokens` is the fallback when a model has no
 `maxTokens`. Environment variables `RUSTEDHARNESS_MODEL`,
 `RUSTEDHARNESS_COMPACT_MODEL`, and `RUSTEDHARNESS_PROVIDER` override the file.
 
