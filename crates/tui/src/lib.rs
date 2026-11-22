@@ -9,10 +9,14 @@
 mod app;
 mod entries;
 mod markdown;
-#[cfg(test)]
-mod preview;
+
+/// Highlighting entry point for the `highlight` benchmark.
+#[doc(hidden)]
+pub use markdown::highlight;
 mod render;
 mod theme;
+#[cfg(test)]
+mod ui_tests;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

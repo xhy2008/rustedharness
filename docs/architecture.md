@@ -205,3 +205,9 @@ recovery, terminal emulation, LSP position conversion, tree-sitter extraction
 across all bundled grammars, download URL validation, MCP naming, web
 extraction, and tool schema/no-op guards. CLI/web/TUI end-to-end behavior is
 exercised manually against a mock OpenAI-compatible SSE server.
+
+Performance probes live in `benches/` and run with `cargo bench`: session
+load/resume (`core/benches/resume.rs`), syntax highlighting
+(`tui/benches/highlight.rs`), and live LSP cold/warm latency
+(`core/benches/lsp_latency.rs`). The LSP probe skips when `rust-analyzer` is not
+on PATH.

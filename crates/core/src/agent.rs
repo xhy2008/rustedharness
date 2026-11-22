@@ -1087,54 +1087,6 @@ mod tests {
         agent.shutdown().await;
     }
 
-    /// Where does a resume spend its time? Loads a synthetic transcript and
-    /// times each stage of `Agent::resume` separately.
-    #[tokio::test]
-    #[ignore = "benchmark; run on demand"]
-    async fn resume_timing() {
-        use crate::provider::ChatMessage as Msg;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = test_config(dir.path());
-        config.session.dir = Some(dir.path().join("sessions"));
-        std::fs::create_dir_all(config.session.dir.as_ref().unwrap()).unwrap();
-
-        let body = "fn main() {\n    println!(\"hello\");\n}\n".repeat(20);
-        let mut writer =
-            crate::session::SessionWriter::create(&config.session, dir.path(), "agent", "compact")
-                .unwrap();
-        for turn in 0..800 {
-            writer.user(&format!("turn {turn}")).unwrap();
-            writer.assistant(&Msg::assistant("Looking.")).unwrap();
-            writer
-                .tool_result(&format!("call_{turn}"), "read", true, &body)
-                .unwrap();
-        }
-        let id = writer.id().to_string();
-        let path = writer.path().to_path_buf();
-        drop(writer);
-        let size = std::fs::metadata(&path).unwrap().len();
-
-        let started = std::time::Instant::now();
-        let loaded = crate::session::SessionStore::new(&config.session)
-            .load(&id)
-            .unwrap();
-        let load = started.elapsed();
-        println!(
-            "session {:.1} MiB / {} messages: load={:?}",
-            size as f64 / 1_048_576.0,
-            loaded.messages.len(),
-            load
-        );
-
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let started = std::time::Instant::now();
-        let agent = Agent::resume(config, &id, None, tx).await.unwrap();
-        let resume = started.elapsed();
-        println!("Agent::resume total={resume:?}");
-        agent.shutdown().await;
-    }
-
     #[tokio::test]
     async fn rate_limit_retries_stop_at_the_configured_limit() {
         let dir = tempfile::tempdir().unwrap();

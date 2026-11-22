@@ -1,9 +1,6 @@
-//! Offline UI preview: builds an `App` full of representative entries and
-//! dumps the rendered cell grid so the layout can be inspected (and turned
-//! into an image) without a live provider or a real terminal.
-//!
-//! Run with `cargo test -p rustedharness-tui -- --ignored preview`. The dump
-//! lands in `target/ui-preview.json`.
+//! Rendering tests: builds an `App` full of representative entries, draws it
+//! through a `TestBackend`, and asserts on the resulting cell grid. No live
+//! provider or real terminal is involved.
 
 use std::sync::Arc;
 
@@ -33,10 +30,10 @@ impl Backend for Stub {
 }
 
 pub(crate) fn demo_app() -> App {
-    // Everything this harness writes while a preview runs - sessions, and any
+    // Everything this harness writes while a test runs - sessions, and any
     // setting a test toggles - has to land in the temp directory, never in the
     // real one.
-    let scratch = std::env::temp_dir().join("rustedharness-ui-preview");
+    let scratch = std::env::temp_dir().join("rustedharness-ui-tests");
     let config = Config {
         model: "anthropic/claude-sonnet-4.5".into(),
         compact_model: "anthropic/claude-haiku-4.5".into(),
@@ -229,85 +226,6 @@ fn dump(app: &mut App, width: u16, height: u16) -> String {
     .to_string()
 }
 
-#[test]
-#[ignore = "writes target/ui-preview.json; run on demand"]
-fn preview() {
-    let mut app = demo_app();
-    let json = dump(&mut app, 108, 52);
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-preview.json");
-    std::fs::write(&path, json).expect("write preview");
-
-    let mut app = demo_app();
-    let json = dump(&mut app, 64, 24);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/ui-preview-narrow.json");
-    std::fs::write(&path, json).expect("write preview");
-    println!("wrote previews");
-}
-
-#[test]
-#[ignore = "writes target/ui-preview-picker.json; run on demand"]
-fn preview_picker() {
-    let mut app = demo_app();
-    app.overlay = Overlay::Slash {
-        prefix: String::new(),
-        items: vec![
-            PickerItem {
-                label: "/help".into(),
-                detail: "show this command list".into(),
-                value: "/help".into(),
-            },
-            PickerItem {
-                label: "/model".into(),
-                detail: "open the model picker".into(),
-                value: "/model".into(),
-            },
-            PickerItem {
-                label: "/compact-model".into(),
-                detail: "switch the compaction model".into(),
-                value: "/compact-model".into(),
-            },
-            PickerItem {
-                label: "/settings".into(),
-                detail: "model, compact model, workspace, session".into(),
-                value: "/settings".into(),
-            },
-            PickerItem {
-                label: "/resume".into(),
-                detail: "pick a saved session".into(),
-                value: "/resume".into(),
-            },
-        ],
-        sel: 2,
-    };
-    app.input = "/".chars().collect();
-    app.cursor = 1;
-    let json = dump(&mut app, 108, 26);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/ui-preview-picker.json");
-    std::fs::write(&path, json).expect("write preview");
-    println!("wrote {}", path.display());
-}
-
-#[test]
-#[ignore = "writes target/ui-preview-panel.json; run on demand"]
-fn preview_panel() {
-    let mut app = demo_app();
-    app.overlay = Overlay::Hotkeys;
-    parent_dump(&mut app, "ui-preview-panel.json", 100, 34);
-
-    let mut app = demo_app();
-    app.consent = Some(crate::app::ConsentCard {
-        id: "rust".into(),
-        display_name: "rust-analyzer".into(),
-        version: "2026-11-12".into(),
-        url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-12/rust-analyzer-x86_64-pc-windows-msvc.zip".into(),
-        runtime_hint: Some("extract to ~/.rustedharness/lsp".into()),
-    });
-    parent_dump(&mut app, "ui-preview-consent.json", 100, 30);
-}
-
 /// The click-to-fold path end to end: render (which fills the owner map),
 /// click a tool row, then click a separator row that owns nothing.
 /// Text of one rendered row, for asserting on what the screen really shows.
@@ -441,23 +359,6 @@ fn streaming_blocks_open_themselves_and_fold_on_completion() {
     assert!(!app.entries[tool].expanded, "a finished tool folds");
 }
 
-#[test]
-#[ignore = "writes target/ui-preview-selection.json; run on demand"]
-fn preview_selection() {
-    let mut app = demo_app();
-    app.selection = Some(((10, 2), (30, 6)));
-    parent_dump(&mut app, "ui-preview-selection.json", 108, 26);
-}
-
-/// The file browser takes the whole screen instead of a 12-row popup.
-#[test]
-#[ignore = "writes target/ui-preview-files.json; run on demand"]
-fn preview_files_fullscreen() {
-    let mut app = demo_app();
-    app.open_file_browser("");
-    parent_dump(&mut app, "ui-preview-files.json", 100, 24);
-}
-
 /// With compaction on the main model there is no second column to show.
 #[test]
 fn the_compact_column_disappears_when_it_is_the_same_model() {
@@ -476,100 +377,6 @@ fn the_compact_column_disappears_when_it_is_the_same_model() {
         "{}",
         row_text(&json, 19)
     );
-}
-
-/// A download in flight: the status line, not the transcript.
-#[test]
-#[ignore = "writes target/ui-preview-download.json; run on demand"]
-fn preview_download() {
-    let mut app = demo_app();
-    app.download = Some(crate::app::DownloadProgress {
-        server: "clangd".into(),
-        percent: Some(42),
-        detail: Some("42% 12.3/29.4 MB".into()),
-    });
-    parent_dump(&mut app, "ui-preview-download.json", 100, 20);
-}
-
-/// The settings panel: one toggle for the compaction model.
-#[test]
-#[ignore = "writes target/ui-preview-settings.json; run on demand"]
-fn preview_settings() {
-    let mut app = demo_app();
-    app.overlay = Overlay::Settings { sel: 0 };
-    parent_dump(&mut app, "ui-preview-settings.json", 100, 20);
-
-    let mut app = demo_app();
-    app.another_model_for_compact = false;
-    app.compact_model = app.agent_model.clone();
-    app.overlay = Overlay::Settings { sel: 0 };
-    parent_dump(&mut app, "ui-preview-settings-off.json", 100, 20);
-}
-
-/// The `/lsp` panel: installed version, live state, and the subcommands.
-#[test]
-#[ignore = "writes target/ui-preview-lsp.json; run on demand"]
-fn preview_lsp_panel() {
-    let mut app = demo_app();
-    app.lsp = vec![
-        rustedharness_core::lsp::ServerStatus {
-            language: "rust".into(),
-            server: "rust-analyzer".into(),
-            version: Some("2026-11-12".into()),
-            state: "running".into(),
-            detail: None,
-            pid: Some(4242),
-            restarts: 0,
-            install_hint: "rustup component add rust-analyzer".into(),
-            runtime_deps: Vec::new(),
-        },
-        rustedharness_core::lsp::ServerStatus {
-            language: "lua".into(),
-            server: "lua-language-server".into(),
-            version: Some("3.19.2".into()),
-            state: "available".into(),
-            detail: Some("newer release available".into()),
-            pid: None,
-            restarts: 0,
-            install_hint: "download from github.com/LuaLS/lua-language-server/releases".into(),
-            runtime_deps: Vec::new(),
-        },
-    ];
-    app.overlay = Overlay::Lsp;
-    parent_dump(&mut app, "ui-preview-lsp.json", 100, 20);
-}
-
-/// Completing a server id after `/lsp install`: the menu switches from command
-/// names to registry ids and says what each one needs.
-#[test]
-#[ignore = "writes target/ui-preview-lsp-ids.json; run on demand"]
-fn preview_lsp_id_completion() {
-    let mut app = demo_app();
-    app.input = "/lsp install ".chars().collect();
-    app.cursor = app.input.len();
-    app.refresh_slash();
-    parent_dump(&mut app, "ui-preview-lsp-ids.json", 100, 24);
-}
-
-#[test]
-#[ignore = "writes target/ui-preview-idle.json; run on demand"]
-fn preview_idle() {
-    let mut app = demo_app();
-    app.entries.clear();
-    app.input.clear();
-    app.cursor = 0;
-    app.busy = true;
-    app.queue.push_back("and drop the old card borders".into());
-    parent_dump(&mut app, "ui-preview-idle.json", 100, 16);
-}
-
-fn parent_dump(app: &mut crate::app::App, name: &str, width: u16, height: u16) {
-    let json = dump(app, width, height);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target")
-        .join(name);
-    std::fs::write(&path, json).expect("write preview");
-    println!("wrote {}", path.display());
 }
 
 #[test]
@@ -1193,40 +1000,6 @@ fn highlighting_keeps_one_row_per_source_line() {
             && crate::markdown::language_for("notes.zzz").is_empty(),
         "extension mapping is wrong"
     );
-}
-
-#[test]
-#[ignore = "writes target/ui-preview-file.json; run on demand"]
-fn preview_file_view() {
-    let mut app = demo_app();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs");
-    let source = std::fs::read_to_string(path).expect("theme.rs");
-    let lines = crate::markdown::highlight(&source, "rust");
-    app.overlay = Overlay::FileView {
-        path: "crates/tui/src/theme.rs".into(),
-        lines,
-        scroll: 6,
-        truncated: false,
-    };
-    parent_dump(&mut app, "ui-preview-file.json", 100, 30);
-}
-
-/// Opening a file must not stall the UI: the viewer highlights once, when the
-/// file is opened, so this is the budget that matters.
-#[test]
-#[ignore = "timing; run on demand"]
-fn highlight_budget() {
-    let unit = "pub const TEXT: Color = Color::Rgb(0xe4, 0xe5, 0xea); // reading colour\n";
-    for count in [100usize, 400, 1_600] {
-        let source = unit.repeat(count);
-        let started = std::time::Instant::now();
-        let lines = crate::markdown::highlight(&source, "rust");
-        println!(
-            "{count} lines -> {} rows in {:?}",
-            lines.len(),
-            started.elapsed()
-        );
-    }
 }
 
 /// Highlighting is asynchronous, so the result can arrive after the user closed

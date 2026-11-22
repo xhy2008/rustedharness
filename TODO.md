@@ -18,7 +18,11 @@
 4. **文档**。README 与 `docs/architecture.md` 删除 checksum 流程，更新 CLI/TUI 命令和信任模型。
 5. **验证**。安装 `rustfmt` / `rust-clippy`（1.93.1）后跑通
    `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
-   `cargo test --workspace`；core 154 passed，tui 36 passed，web 4 passed，lsp_live 3 ignored。
+   `cargo test --workspace`；core 154 passed，tui 36 passed，web 4 passed。
+6. **测试归类**。`resume_timing`、`highlight_budget`、`prewarm_takes...` 移到 `benches/`
+   （`cargo bench`，不再随 `cargo test` 跑）；删除 11 个只写 JSON 的 `ui-preview` 快照
+   测试，`preview` 模块改名为 `ui_tests`，只保留有断言的渲染测试。当前 ignored 只剩
+   2 个需要 rust-analyzer 的 live 探针和 1 个会覆盖剪贴板的测试。
 
 ## 已完成：LSP 下载进度 + 失败不再静默（2026-11-15 第二十七轮）
 

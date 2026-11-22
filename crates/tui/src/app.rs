@@ -2057,7 +2057,7 @@ mod tests {
 
     #[test]
     fn the_status_line_summarises_live_servers() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
 
         app.lsp.clear();
         assert!(app.lsp_summary().is_none(), "no servers, no segment");
@@ -2092,7 +2092,7 @@ mod tests {
 
     #[test]
     fn the_removed_control_keys_do_nothing() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for key in [ctrl('l'), ctrl('r'), ctrl('x'), ctrl('g')] {
@@ -2112,7 +2112,7 @@ mod tests {
     /// leaves the list.
     #[test]
     fn esc_walks_back_out_of_the_file_viewer() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         app.overlay = Overlay::FileView {
@@ -2145,7 +2145,7 @@ mod tests {
     /// when it fails without a final status.
     #[test]
     fn a_download_shows_its_progress_on_the_status_line() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         app.lsp.clear();
         let entries = app.entries.len();
         app.on_harness_event(HarnessEvent::DownloadStatus {
@@ -2204,7 +2204,7 @@ mod tests {
     /// Typing after the verb offers server ids instead of command names.
     #[test]
     fn server_ids_complete_after_the_verb() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         app.input = "/lsp install rust".chars().collect();
         app.cursor = app.input.len();
         app.refresh_slash();
@@ -2218,7 +2218,7 @@ mod tests {
 
     #[test]
     fn the_verb_alone_lists_every_server() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         app.input = "/lsp update".chars().collect();
         app.cursor = app.input.len();
         app.refresh_slash();
@@ -2231,7 +2231,7 @@ mod tests {
 
     #[test]
     fn confirming_an_id_fills_the_command_line() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         app.input = "/lsp install lua".chars().collect();
         app.cursor = app.input.len();
         app.refresh_slash();
@@ -2253,7 +2253,7 @@ mod tests {
 
     #[test]
     fn ids_do_not_leak_into_other_commands() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         app.input = "/model ru".chars().collect();
         app.cursor = app.input.len();
         app.refresh_slash();
@@ -2278,7 +2278,7 @@ mod tests {
     /// that round-trips through the agent and the config file.
     #[test]
     fn ctrl_t_toggles_todos_and_settings_toggles_the_compact_model() {
-        let mut app = crate::preview::demo_app();
+        let mut app = crate::ui_tests::demo_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 

@@ -22,3 +22,7 @@ tracing.workspace = true
 tui-markdown.workspace = true
 unicode-width.workspace = true
 xxhash-rust.workspace = true
+
+[[bench]]
+name = "highlight"
+harness = false
