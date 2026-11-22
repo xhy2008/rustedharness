@@ -67,9 +67,9 @@ back into the same `Completion`. A `Router` selects the provider that owns each
 request's model, so the agent and compaction models can use different endpoints
 and different protocols in one session. `Compat` controls `max_tokens` vs
 `max_completion_tokens`, `system` vs `developer`, `reasoning_content`,
-`tool_choice`, `parallel_tool_calls`, and `stream_options.include_usage`. If a
-gateway rejects one of these fields, the provider retries without the offending
-knob, one at a time.
+`tool_choice`, `parallel_tool_calls`, and `stream_options.include_usage`.
+Optional switches default off and must be enabled in `models.json`; the
+provider never retries a rejected request with fields removed.
 
 ### Path anchoring
 
@@ -205,7 +205,7 @@ that URL.
 
 Unit tests live beside the modules. They cover path escapes (including
 symlinks), anchor stability/staleness, batch atomicity, CRLF preservation,
-provider compatibility fallbacks, usage-only accounting, compaction, session
+provider compatibility switches, usage-only accounting, compaction, session
 recovery, terminal emulation, LSP position conversion, tree-sitter extraction
 across all bundled grammars, download URL validation, MCP naming, web
 extraction, and tool schema/no-op guards. CLI/web/TUI end-to-end behavior is

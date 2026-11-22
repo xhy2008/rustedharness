@@ -1,5 +1,16 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：移除 provider degradation retry（2026-11-22）
+
+1. **Chat Completions 和 Responses 都只发一次请求**。删除
+   `degradation_candidates`、`degraded_without`、`is_compat_rejection` 以及
+   `all compatibility fallbacks failed` 路径；网关拒绝字段时直接返回 provider 错误。
+2. **可选兼容字段默认关闭**。`Compat` 的 `reasoningContent`、`toolChoice`、
+   `parallelToolCalls`、`streamUsage` 默认改为 `false`，只有 `models.json` 明确开启才写入
+   request body。`maxTokensField` 默认仍为 `max_tokens`，可用 `omit` 完全省略。
+3. **测试与文档**。新增默认字段省略测试；更新 README、`docs/architecture.md`，删除
+   fallback 描述。
+
 ## 已完成：Hashline 改为逐行哈希 + 编辑数据完整性（2026-11-22）
 
 1. **锚点只哈希本行内容**。删除 `(prev, current, next)` 上下文哈希，改为

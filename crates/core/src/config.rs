@@ -257,10 +257,11 @@ pub struct Compat {
     pub system_role: SystemRole,
     /// Round-trip `reasoning_content` deltas (DeepSeek-style endpoints).
     pub reasoning_content: bool,
-    /// Send `tool_choice: "auto"` and fall back when rejected.
+    /// Send `tool_choice: "auto"` (opt-in).
     pub tool_choice: bool,
+    /// Send `parallel_tool_calls: true` (opt-in).
     pub parallel_tool_calls: bool,
-    /// Ask for `stream_options.include_usage`; disabled for older gateways.
+    /// Ask for `stream_options.include_usage` (opt-in).
     pub stream_usage: bool,
 }
 
@@ -269,10 +270,13 @@ impl Default for Compat {
         Self {
             max_tokens_field: MaxTokensField::MaxTokens,
             system_role: SystemRole::System,
-            reasoning_content: true,
-            tool_choice: true,
-            parallel_tool_calls: true,
-            stream_usage: true,
+            // Optional OpenAI knobs stay off unless models.json opts in. A
+            // gateway that rejects one of them should fail visibly instead of
+            // being retried with a subtly different request.
+            reasoning_content: false,
+            tool_choice: false,
+            parallel_tool_calls: false,
+            stream_usage: false,
         }
     }
 }

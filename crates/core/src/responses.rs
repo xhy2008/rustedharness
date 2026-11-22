@@ -18,8 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{Compat, ProviderConfig, SystemRole};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
-    is_compat_rejection, Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent,
-    ToolCall, Usage,
+    Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall, Usage,
 };
 
 #[derive(Clone)]
@@ -66,7 +65,7 @@ impl ResponsesProvider {
         self
     }
 
-    fn body(&self, request: &ChatRequest, degraded_without: Option<&str>) -> Value {
+    fn body(&self, request: &ChatRequest) -> Value {
         let mut instructions: Option<String> = None;
         let mut input: Vec<Value> = Vec::with_capacity(request.messages.len());
 
@@ -127,21 +126,16 @@ impl ResponsesProvider {
         body.insert("model".into(), json!(request.model));
         body.insert("input".into(), Value::Array(input));
         body.insert("stream".into(), json!(request.stream));
-        if degraded_without != Some("store") {
-            body.insert("store".into(), json!(false));
-        }
+        // Stateless by default: do not ask the server to retain the response.
+        body.insert("store".into(), json!(false));
         if let Some(instructions) = instructions {
             body.insert("instructions".into(), json!(instructions));
         }
         if let Some(temperature) = request.temperature {
-            if degraded_without != Some("temperature") {
-                body.insert("temperature".into(), json!(temperature));
-            }
+            body.insert("temperature".into(), json!(temperature));
         }
         if let Some(max_tokens) = request.max_tokens {
-            if degraded_without != Some("max_output_tokens") {
-                body.insert("max_output_tokens".into(), json!(max_tokens));
-            }
+            body.insert("max_output_tokens".into(), json!(max_tokens));
         }
         if !request.tools.is_empty() {
             let tools: Vec<Value> = request
@@ -157,32 +151,14 @@ impl ResponsesProvider {
                 })
                 .collect();
             body.insert("tools".into(), Value::Array(tools));
-            if self.compat.tool_choice && degraded_without != Some("tool_choice") {
+            if self.compat.tool_choice {
                 body.insert("tool_choice".into(), json!("auto"));
             }
-            if self.compat.parallel_tool_calls && degraded_without != Some("parallel_tool_calls") {
+            if self.compat.parallel_tool_calls {
                 body.insert("parallel_tool_calls".into(), json!(true));
             }
         }
         Value::Object(body)
-    }
-
-    fn degradation_candidates(&self, request: &ChatRequest) -> Vec<Option<&'static str>> {
-        let mut out = vec![None];
-        if self.compat.parallel_tool_calls && !request.tools.is_empty() {
-            out.push(Some("parallel_tool_calls"));
-        }
-        if self.compat.tool_choice && !request.tools.is_empty() {
-            out.push(Some("tool_choice"));
-        }
-        if request.temperature.is_some() {
-            out.push(Some("temperature"));
-        }
-        if request.max_tokens.is_some() {
-            out.push(Some("max_output_tokens"));
-        }
-        out.push(Some("store"));
-        out
     }
 
     async fn send(&self, body: &Value, stream: bool) -> Result<reqwest::Response> {
@@ -291,45 +267,25 @@ impl Backend for ResponsesProvider {
         sink: Option<UnboundedSender<StreamEvent>>,
         cancel: CancellationToken,
     ) -> Result<Completion> {
-        let mut last_error = String::new();
+        let body = self.body(&request);
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+            response = self.send(&body, request.stream) => response,
+        }?;
 
-        for degraded in self.degradation_candidates(&request) {
-            let body = self.body(&request, degraded);
-            let response = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                response = self.send(&body, request.stream) => response,
-            };
-            let response = match response {
-                Ok(response) => response,
-                Err(err) => {
-                    let text = err.to_string();
-                    if is_compat_rejection(&text) {
-                        last_error = text;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            };
-
-            if request.stream {
-                return self.stream_response(response, sink, cancel).await;
-            }
-
-            let value: Value = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                value = response.json() => value.map_err(|e| {
-                    HarnessError::Provider(format!("{}: invalid response body: {e}", self.name))
-                })?,
-            };
-            let mut acc = ResponsesAccumulator::default();
-            acc.absorb_response(&value);
-            return acc.finish(&self.name);
+        if request.stream {
+            return self.stream_response(response, sink, cancel).await;
         }
 
-        Err(HarnessError::Provider(format!(
-            "{}: all compatibility fallbacks failed: {last_error}",
-            self.name
-        )))
+        let value: Value = tokio::select! {
+            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+            value = response.json() => value.map_err(|e| {
+                HarnessError::Provider(format!("{}: invalid response body: {e}", self.name))
+            })?,
+        };
+        let mut acc = ResponsesAccumulator::default();
+        acc.absorb_response(&value);
+        acc.finish(&self.name)
     }
 }
 
@@ -660,7 +616,7 @@ mod tests {
             stream: true,
         };
 
-        let body = provider.body(&request, None);
+        let body = provider.body(&request);
         assert_eq!(body["model"], "gpt-5");
         assert_eq!(body["instructions"], "sys");
         assert_eq!(body["stream"], true);
@@ -686,24 +642,15 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert!(body["tools"][0].get("function").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+
+        let mut opted_in = provider.clone();
+        opted_in.compat.tool_choice = true;
+        opted_in.compat.parallel_tool_calls = true;
+        let body = opted_in.body(&request);
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
-    }
-
-    #[test]
-    fn degradation_drops_temperature() {
-        let provider = provider();
-        let request = ChatRequest {
-            model: "gpt-5".into(),
-            messages: vec![crate::provider::ChatMessage::user("hi")],
-            tools: Vec::new(),
-            temperature: Some(0.2),
-            max_tokens: Some(100),
-            stream: true,
-        };
-        let body = provider.body(&request, Some("temperature"));
-        assert!(body.get("temperature").is_none());
-        assert_eq!(body["max_output_tokens"], 100);
     }
 
     #[test]

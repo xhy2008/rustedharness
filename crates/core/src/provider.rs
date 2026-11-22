@@ -435,7 +435,7 @@ impl Provider {
         self
     }
 
-    fn body(&self, request: &ChatRequest, degraded_without: Option<&str>) -> Value {
+    fn body(&self, request: &ChatRequest) -> Value {
         let mut messages = Vec::with_capacity(request.messages.len());
         for (i, message) in request.messages.iter().enumerate() {
             let mut out = serde_json::Map::new();
@@ -492,7 +492,7 @@ impl Provider {
         body.insert("model".into(), json!(request.model));
         body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), json!(request.stream));
-        if request.stream && self.compat.stream_usage && degraded_without != Some("stream_usage") {
+        if request.stream && self.compat.stream_usage {
             body.insert("stream_options".into(), json!({ "include_usage": true }));
         }
         if let Some(temperature) = request.temperature {
@@ -500,15 +500,13 @@ impl Provider {
         }
         if let Some(max_tokens) = request.max_tokens {
             match self.compat.max_tokens_field {
-                MaxTokensField::MaxTokens if degraded_without != Some("max_tokens") => {
+                MaxTokensField::MaxTokens => {
                     body.insert("max_tokens".into(), json!(max_tokens));
                 }
-                MaxTokensField::MaxCompletionTokens
-                    if degraded_without != Some("max_completion_tokens") =>
-                {
+                MaxTokensField::MaxCompletionTokens => {
                     body.insert("max_completion_tokens".into(), json!(max_tokens));
                 }
-                _ => {}
+                MaxTokensField::Omit => {}
             }
         }
         if !request.tools.is_empty() {
@@ -527,33 +525,14 @@ impl Provider {
                 })
                 .collect();
             body.insert("tools".into(), Value::Array(tools));
-            if self.compat.tool_choice && degraded_without != Some("tool_choice") {
+            if self.compat.tool_choice {
                 body.insert("tool_choice".into(), json!("auto"));
             }
-            if self.compat.parallel_tool_calls && degraded_without != Some("parallel_tool_calls") {
+            if self.compat.parallel_tool_calls {
                 body.insert("parallel_tool_calls".into(), json!(true));
             }
         }
         Value::Object(body)
-    }
-
-    /// Drop compatibility knobs that a gateway rejected, then retry once each.
-    fn degradation_candidates(&self, request: &ChatRequest) -> Vec<Option<&'static str>> {
-        let mut out = vec![None];
-        if self.compat.parallel_tool_calls {
-            out.push(Some("parallel_tool_calls"));
-        }
-        if self.compat.tool_choice {
-            out.push(Some("tool_choice"));
-        }
-        if self.compat.stream_usage {
-            out.push(Some("stream_usage"));
-        }
-        if request.max_tokens.is_some() {
-            out.push(Some("max_tokens"));
-            out.push(Some("max_completion_tokens"));
-        }
-        out
     }
 }
 
@@ -859,30 +838,7 @@ impl Backend for Provider {
         sink: Option<UnboundedSender<StreamEvent>>,
         cancel: CancellationToken,
     ) -> Result<Completion> {
-        let candidates = self.degradation_candidates(&request);
-        let mut last_error = String::new();
-
-        for degraded in candidates {
-            match self
-                .send_once(&request, degraded, sink.as_ref(), &cancel)
-                .await
-            {
-                Ok(completion) => return Ok(completion),
-                Err(err) => {
-                    let text = err.to_string();
-                    if is_compat_rejection(&text) {
-                        last_error = text;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
-        Err(HarnessError::Provider(format!(
-            "{}: all compatibility fallbacks failed: {last_error}",
-            self.name
-        )))
+        self.send_once(&request, sink.as_ref(), &cancel).await
     }
 }
 
@@ -890,11 +846,10 @@ impl Provider {
     async fn send_once(
         &self,
         request: &ChatRequest,
-        degraded_without: Option<&str>,
         sink: Option<&UnboundedSender<StreamEvent>>,
         cancel: &CancellationToken,
     ) -> Result<Completion> {
-        let body = self.body(request, degraded_without);
+        let body = self.body(request);
         let chat = self.client.chat();
         if request.stream {
             // Guard the request itself with cancellation: the client awaits the
@@ -1028,17 +983,6 @@ pub fn is_quota_exhausted(message: &str) -> bool {
         || m.contains("购买")
         || m.contains("余额")
         || m.contains("欠费")
-}
-
-pub(crate) fn is_compat_rejection(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("max_tokens")
-        || m.contains("max_completion_tokens")
-        || m.contains("tool_choice")
-        || m.contains("parallel_tool_calls")
-        || m.contains("stream_options")
-        || m.contains("400")
-        || m.contains("422")
 }
 
 #[cfg(test)]
@@ -1215,11 +1159,28 @@ mod tests {
     }
 
     #[test]
+    fn optional_compat_fields_are_off_by_default() {
+        let p = provider();
+        let mut request = ChatRequest::new("m", vec![ChatMessage::user("x")]);
+        request.stream = true;
+        request.tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "d".into(),
+            parameters: json!({ "type": "object" }),
+        }];
+        let body = p.body(&request);
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
     fn body_honours_compat_switches() {
         let mut p = provider();
         p.compat.max_tokens_field = MaxTokensField::MaxCompletionTokens;
         p.compat.system_role = SystemRole::Developer;
         p.compat.reasoning_content = true;
+        p.compat.tool_choice = true;
         let mut request = ChatRequest::new(
             "m",
             vec![ChatMessage::system("sys"), ChatMessage::user("hi")],
@@ -1230,7 +1191,7 @@ mod tests {
             description: "d".into(),
             parameters: json!({"type":"object"}),
         }];
-        let body = p.body(&request, None);
+        let body = p.body(&request);
         assert_eq!(body["messages"][0]["role"], "developer");
         assert_eq!(body["max_completion_tokens"], 10);
         assert!(body.get("max_tokens").is_none());
@@ -1243,31 +1204,11 @@ mod tests {
         let mut assistant = ChatMessage::assistant("x");
         assistant.reasoning_content = Some("why".into());
         let request = ChatRequest::new("m", vec![assistant]);
-        assert_eq!(
-            p.body(&request, None)["messages"][0]["reasoning_content"],
-            "why"
-        );
-        p.compat.reasoning_content = false;
-        assert!(p.body(&request, None)["messages"][0]
+        assert!(p.body(&request)["messages"][0]
             .get("reasoning_content")
             .is_none());
-    }
-
-    #[test]
-    fn degraded_body_removes_fields() {
-        let p = provider();
-        let mut request = ChatRequest::new("m", vec![ChatMessage::user("x")]);
-        request.max_tokens = Some(5);
-        request.tools = vec![ToolDefinition {
-            name: "t".into(),
-            description: "d".into(),
-            parameters: json!({}),
-        }];
-        let body = p.body(&request, Some("tool_choice"));
-        assert!(body.get("tool_choice").is_none());
-        assert_eq!(body["parallel_tool_calls"], true);
-        let body = p.body(&request, Some("max_tokens"));
-        assert!(body.get("max_tokens").is_none());
+        p.compat.reasoning_content = true;
+        assert_eq!(p.body(&request)["messages"][0]["reasoning_content"], "why");
     }
 
     /// Serve one HTTP request and return the bound base URL. The caller only

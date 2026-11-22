@@ -160,14 +160,15 @@ treated as disabled.
   the agent transcript to `input` items and `instructions`, flattens function
   tools, streams `response.output_text.*`, `response.reasoning_*` and
   `response.function_call_arguments.*` events, and reads `input_tokens` /
-  `output_tokens` from `usage`. Rejected knobs (`temperature`, `tool_choice`,
-  `parallel_tool_calls`, `store`, `max_output_tokens`) are retried without that
-  field. Reasoning items are not replayed between turns, so stateless use does
-  not require server-side response storage.
+  `output_tokens` from `usage`. Reasoning items are not replayed between turns,
+  so stateless use does not require server-side response storage.
 
-`compat` defaults are `maxTokensField: "max_tokens"`, `systemRole: "system"`,
-and `reasoningContent`, `toolChoice`, `parallelToolCalls`, `streamUsage` all
-enabled. Rejected knobs are retried one at a time.
+`compat` defaults are `maxTokensField: "max_tokens"` and
+`systemRole: "system"`. The optional switches `reasoningContent`, `toolChoice`,
+`parallelToolCalls`, and `streamUsage` default to `false`; enable them in
+`models.json` only for gateways that support those fields. There is no
+automatic field-degradation retry: if a gateway rejects a field, the provider
+returns the error and the request is not retried.
 
 ### config.json
 
