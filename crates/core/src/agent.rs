@@ -19,7 +19,9 @@ use crate::paths::WorkspacePathResolver;
 use crate::proc::ProcRegistry;
 use crate::protocol::{HarnessEvent, SessionSnapshot};
 use crate::provider::{Backend, ChatMessage, ChatRequest, Completion, Role, StreamEvent};
-use crate::session::{LoadedSession, SessionMeta, SessionStore, SessionWriter};
+use crate::session::{
+    canonical_tool_arguments, LoadedSession, SessionMeta, SessionStore, SessionWriter,
+};
 use crate::shell::ShellSpec;
 use crate::token::UsageTracker;
 use crate::tools::todo::TodoStore;
@@ -588,11 +590,19 @@ impl Agent {
             let reasoning = completion.reasoning.clone();
             let calls = completion.tool_calls.clone();
 
+            let message_calls: Vec<_> = calls
+                .iter()
+                .map(|call| {
+                    let mut call = call.clone();
+                    call.function.arguments = canonical_tool_arguments(&call.function.arguments);
+                    call
+                })
+                .collect();
             let assistant = ChatMessage {
                 role: Role::Assistant,
                 content: (!content.is_empty()).then_some(content.clone()),
                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning.clone()),
-                tool_calls: (!calls.is_empty()).then_some(calls.clone()),
+                tool_calls: (!message_calls.is_empty()).then_some(message_calls),
                 ..Default::default()
             };
             if assistant.content.is_some() || assistant.tool_calls.is_some() {
@@ -974,7 +984,7 @@ mod tests {
                         kind: "function".into(),
                         function: FunctionCall {
                             name: "write".into(),
-                            arguments: json!({ "path": "stable.txt", "content": "ok\n" })
+                            arguments: r#"{ "path" : "stable.txt", "content" : "ok\n" }"#
                                 .to_string(),
                         },
                     }],
@@ -1089,6 +1099,17 @@ mod tests {
         agent.shutdown().await;
 
         assert_eq!(requests.len(), 3);
+        let assistant = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .expect("assistant tool call");
+        assert_eq!(
+            assistant.tool_calls.as_ref().unwrap()[0].function.arguments,
+            r#"{"content":"ok\n","path":"stable.txt"}"#,
+            "live tool-call arguments use the same canonical shape as session replay"
+        );
         for pair in requests.windows(2) {
             let first = &pair[0];
             let second = &pair[1];

@@ -1146,11 +1146,11 @@ fn merge_usage(
 
 /// Prefixes pi puts around a compaction summary. Using its exact wording keeps
 /// the context identical whichever tool resumes the session.
-const COMPACTION_PREFIX: &str = "The conversation history before this point was \
+pub(crate) const COMPACTION_PREFIX: &str = "The conversation history before this point was \
 compacted into the following summary:\n\n<summary>\n";
 const BRANCH_PREFIX: &str = "The following is a summary of a branch that this \
 conversation came back from:\n\n<summary>\n";
-const SUMMARY_SUFFIX: &str = "\n</summary>";
+pub(crate) const SUMMARY_SUFFIX: &str = "\n</summary>";
 
 /// A user line that is a frontend command (`/model`, `/settings`,
 /// `/compact ...`) rather than a prompt. Both tools handle commands outside the
@@ -1189,6 +1189,14 @@ fn bash_execution_text(
     text
 }
 
+/// Canonical JSON arguments used both for live assistant messages and for
+/// session replay, so a resumed request has the same tool-call bytes.
+pub(crate) fn canonical_tool_arguments(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Convert one stored message, collecting the model it names.
 fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<ChatMessage> {
     match message {
@@ -1215,6 +1223,11 @@ fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<C
                 agent_model.get_or_insert_with(|| join_model(provider, model));
             }
             let mut chat = ChatMessage::assistant(content.text());
+            // A tool-only assistant turn has no `content` on the live message
+            // (`None`, serialized as null), not an empty string.
+            if chat.content.as_deref().is_some_and(|text| text.is_empty()) {
+                chat.content = None;
+            }
             let thinking = content.thinking();
             if !thinking.is_empty() {
                 chat.reasoning_content = Some(thinking);
@@ -1227,13 +1240,15 @@ fn to_chat(message: &AgentMessage, agent_model: &mut Option<String>) -> Option<C
         }
         AgentMessage::ToolResult {
             tool_call_id,
-            tool_name,
+            tool_name: _,
             content,
             is_error,
             ..
         } => {
+            // Live tool results are created with `ChatMessage::tool`, which has
+            // no `name`; keep the resumed shape identical so the prompt prefix
+            // (and its cache) does not change after `/resume`.
             let mut chat = ChatMessage::tool(tool_call_id, content.text());
-            chat.name = Some(tool_name.clone());
             chat.images = content.images();
             let _ = is_error;
             Some(chat)
@@ -1274,6 +1289,9 @@ fn edited_message(message: &AgentMessage, replacement: &Value) -> Option<ChatMes
         AgentMessage::User { .. } => Some(ChatMessage::user(parsed.text())),
         AgentMessage::Assistant { content, .. } => {
             let mut chat = ChatMessage::assistant(parsed.text());
+            if chat.content.as_deref().is_some_and(|text| text.is_empty()) {
+                chat.content = None;
+            }
             let calls = content.tool_calls();
             if !calls.is_empty() {
                 chat.tool_calls = Some(calls);
@@ -1282,11 +1300,10 @@ fn edited_message(message: &AgentMessage, replacement: &Value) -> Option<ChatMes
         }
         AgentMessage::ToolResult {
             tool_call_id,
-            tool_name,
+            tool_name: _,
             ..
         } => {
             let mut chat = ChatMessage::tool(tool_call_id, parsed.text());
-            chat.name = Some(tool_name.clone());
             chat.content = Some(parsed.text());
             Some(chat)
         }
@@ -1393,6 +1410,55 @@ mod tests {
     }
 
     #[test]
+    fn canonical_tool_arguments_are_compact_and_stable() {
+        assert_eq!(
+            canonical_tool_arguments(r#"{ "path" : "src/main.rs", "limit": 10 }"#),
+            r#"{"limit":10,"path":"src/main.rs"}"#
+        );
+        assert_eq!(canonical_tool_arguments("not json"), "{}");
+    }
+
+    #[test]
+    fn resume_replays_the_live_message_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "openai/gpt-5", "openai/mini").unwrap();
+        writer.user("hello").unwrap();
+
+        let mut assistant = ChatMessage::assistant_tool_calls(
+            None,
+            vec![ToolCall {
+                id: "call_1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "read".into(),
+                    arguments: canonical_tool_arguments(r#"{ "path" : "src/main.rs" }"#),
+                },
+            }],
+        );
+        assistant.reasoning_content = Some("thinking".into());
+        writer.assistant(&assistant).unwrap();
+        writer
+            .tool_result("call_1", "read", true, "file contents")
+            .unwrap();
+        let id = writer.id().to_string();
+        drop(writer);
+
+        let loaded = SessionStore::new(&cfg).load(&id).unwrap();
+        let live = vec![
+            ChatMessage::user("hello"),
+            assistant,
+            ChatMessage::tool("call_1", "file contents"),
+        ];
+        assert_eq!(
+            serde_json::to_string(&loaded.messages).unwrap(),
+            serde_json::to_string(&live).unwrap(),
+            "replay must not add or reshape fields in the model prefix"
+        );
+    }
+
+    #[test]
     fn writes_the_pi_v3_shape() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config(dir.path());
@@ -1469,7 +1535,7 @@ mod tests {
             kind: "function".into(),
             function: FunctionCall {
                 name: "read".into(),
-                arguments: r#"{"path":"src/main.rs"}"#.into(),
+                arguments: r#"{ "path" : "src/main.rs" }"#.into(),
             },
         }]);
         writer.assistant(&assistant).unwrap();
@@ -1495,8 +1561,13 @@ mod tests {
         );
         let calls = loaded.messages[1].tool_calls.as_ref().unwrap();
         assert_eq!(calls[0].function.name, "read");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"src/main.rs"}"#);
         assert_eq!(loaded.messages[2].content.as_deref(), Some("file contents"));
         assert_eq!(loaded.messages[2].tool_call_id.as_deref(), Some("call_1"));
+        assert!(
+            loaded.messages[2].name.is_none(),
+            "live tool results have no name; resume must not add one"
+        );
         assert_eq!(loaded.todos.len(), 1);
         let meta = loaded.meta.unwrap();
         assert_eq!(meta.agent_model, "openai/gpt-5");

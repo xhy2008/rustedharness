@@ -20,8 +20,13 @@
    块；system prompt 只保留跨工具策略，不再重复 lsp/todo/shell/web 的工具描述。
    tool catalog 每个 turn 只生成一次；新增测试验证连续请求（含进入下一 turn）
    messages 前缀、tools、model、temperature、max_tokens 和 stream 均完全一致。
-7. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot、请求前缀测试；README、
-   `docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
+7. **`/resume` 前缀对齐**。session replay 不再给 tool result 加 `name`；tool_call
+   arguments 统一为 canonical JSON；只有 reasoning/tool_calls 的 assistant 保持
+   `content=None`；compaction summary 使用与 live 相同的 pi 文案。新增
+   `resume_replays_the_live_message_shape` 测试。system prompt 和 tools 不存 session，
+   跨版本/配置/MCP 变化时前缀仍会变。
+8. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot、请求前缀、resume 回放测试；
+   README、`docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
 
 ## 已完成：移除 LSP 校验机制 + 非流式 completion（2026-11-22）
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::config::AgentConfig;
 use crate::error::Result;
 use crate::provider::{Backend, ChatMessage, ChatRequest, Role};
+use crate::session::{COMPACTION_PREFIX, SUMMARY_SUFFIX};
 use crate::token::UsageTracker;
 
 pub const SUMMARY_SYSTEM: &str = "You compact an AI coding session. Produce a concise structured summary with exactly these five sections:\n\
@@ -126,8 +127,7 @@ impl Compactor {
             .count();
         let mut out = messages[..system_end].to_vec();
         out.push(ChatMessage::user(format!(
-            "<session_summary>\n{summary}\n</session_summary>\n\
-             The summary above replaces earlier turns. Continue the task; use tools to verify any detail you are unsure about."
+            "{COMPACTION_PREFIX}{summary}{SUMMARY_SUFFIX}"
         )));
         out.extend_from_slice(&messages[plan.keep_from..]);
         out
@@ -220,7 +220,10 @@ mod tests {
         let summary = "S";
         let out = compactor().apply(&msgs, &plan, summary);
         assert_eq!(out[0].role, Role::System);
-        assert!(out[1].content.as_deref().unwrap().contains("S"));
+        assert_eq!(
+            out[1].content.as_deref(),
+            Some(format!("{COMPACTION_PREFIX}S{SUMMARY_SUFFIX}").as_str())
+        );
         assert_eq!(out.last().unwrap().content.as_deref(), Some("assistant 4"));
     }
 
