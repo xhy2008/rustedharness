@@ -490,10 +490,12 @@ impl Provider {
                 };
                 out.insert("content".into(), content);
             }
-            if let Some(reasoning) = &message.reasoning_content {
-                if !reasoning.is_empty() {
-                    out.insert("reasoning_content".into(), json!(reasoning));
-                }
+            if let Some(reasoning) = message
+                .reasoning_content
+                .as_deref()
+                .filter(|reasoning| !reasoning.is_empty())
+            {
+                out.insert("reasoning_content".into(), json!(reasoning));
             } else if compat.requires_reasoning_content_on_assistant_messages
                 && request.model_reasoning
                 && message.role == Role::Assistant
@@ -523,6 +525,12 @@ impl Provider {
                 if message.role != Role::Tool || compat.requires_tool_result_name {
                     out.insert("name".into(), json!(name));
                 }
+            }
+            if message.role == Role::Assistant
+                && out.get("content").is_none()
+                && out.get("tool_calls").is_none()
+            {
+                continue;
             }
             messages.push(Value::Object(out));
             last_role = Some(message.role);
