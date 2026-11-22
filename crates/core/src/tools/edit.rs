@@ -59,9 +59,9 @@ impl Tool for EditTool {
          validated against one pre-edit snapshot and applied bottom-up; any stale anchor rejects \
          the whole batch with E_STALE_ANCHOR and the current anchor table. replace_text \
          uses oldText/newText and must be the ONLY edit in a call; mixing it with any \
-         other edit (or several replace_text ops) fails with E_INVALID_PATCH. Never include \
-         `read` prefixes or diff +/- markers in `lines`. Returns a unified diff, fresh \
-         anchors, and LSP diagnostics when available. dry_run=true writes nothing."
+         other edit (or several replace_text ops) fails with E_INVALID_PATCH. `lines[]` is \
+         the new content only. Returns a unified diff, fresh anchors, and LSP diagnostics \
+         when available. dry_run=true writes nothing."
             .to_string()
     }
 
@@ -349,15 +349,6 @@ pub fn apply_edits(
                 "op=delete must not include lines[]",
             ));
         }
-        if let Some(lines) = &edit.lines {
-            if let Some(reason) = hashline::looks_decorated(lines) {
-                return Err(HarnessError::tool(
-                    "E_INVALID_PATCH",
-                    format!("lines[] must contain raw content only: {reason}"),
-                ));
-            }
-        }
-
         // Anchor validation against the frozen pre-edit snapshot.
         let mut stale = Vec::new();
         for spec in [Some(&pos), end_pos.as_ref()].into_iter().flatten() {
@@ -718,18 +709,6 @@ mod tests {
         ];
         let err = apply_edits(SRC, &edits, 2, true).unwrap_err();
         assert_eq!(err.code(), "E_OVERLAP");
-    }
-
-    #[test]
-    fn decorated_lines_are_rejected() {
-        let err = apply_edits(
-            SRC,
-            &[op(EditOpKind::Replace, 2, None, &["2#AB|two"])],
-            2,
-            true,
-        )
-        .unwrap_err();
-        assert_eq!(err.code(), "E_INVALID_PATCH");
     }
 
     #[test]

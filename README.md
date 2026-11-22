@@ -317,8 +317,9 @@ the model saw. `edit` accepts a batch:
 ```
 
 Anchor width defaults to 2 characters and can be raised to 4 with
-`edit.anchorWidth`. Ops are `replace`, `insert_before`, `insert_after`,
-`delete`, and `replace_text`.
+`edit.anchorWidth`. The primary ops are `replace`, `insert_before`,
+`insert_after`, and `delete`; `replace_text` with a unique `oldText`/`newText`
+is the fallback for agents that cannot use line anchors.
 
 If any anchor is stale, the whole batch is rejected with `E_STALE_ANCHOR`; no
 partial write occurs. Editing a line changes only that line's anchor; inserts

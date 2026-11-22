@@ -12,7 +12,9 @@
    字节都拒绝；`read`/`edit`/`grep` 不再用 `from_utf8_lossy` 把坏字节变成 `U+FFFD`。
 4. **插入边界冲突**。`insert_after N` 与 `insert_before N + 1` 是同一个插入 slot，
    同一 slot 多次插入现在返回 `E_OVERLAP`，不再由排序决定先后。
-5. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot 测试；README、
+5. **移除 `looks_decorated` 卫生检查**。`lines[]` 不再检测 `read` 前缀或 unified-diff
+   的 `+/-` 标记；主路径是行号锚点，`replace_text` 只作为不熟悉锚点编辑的 fallback。
+6. **验证**。新增逐行哈希、CR 往返、非法 UTF-8、插入 slot 测试；README、
    `docs/architecture.md`、system prompt 同步为“行号定位、锚点验内容”。
 
 ## 已完成：移除 LSP 校验机制 + 非流式 completion（2026-11-22）

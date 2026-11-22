@@ -885,12 +885,12 @@ pub fn system_prompt(cwd: &Path, spec: &ShellSpec, model: &str) -> String {
          edit position; the anchor verifies that line's content. Pass it, e.g. \
          pos=\"12#AB\", to `edit`. An edit changes only that line's anchor; inserts \
          and deletes shift line numbers, so use the anchors returned by the edit.\n\
-         3. Editing: prefer `edit` with a batch of edits[] applied bottom-up. Never \
-         include the `line#anchor|` prefix or diff markers in `lines`. A stale \
-         anchor rejects the whole batch (E_STALE_ANCHOR) and returns the current \
-         anchor table; write nothing in that case and re-read. `replace_text` needs \
-         a unique match. `write` creates a file, appends when it exists (the result \
-         says so), or replaces with overwrite=true.\n\
+         3. Editing: prefer `edit` with line-numbered edits[] applied bottom-up. \
+         `lines` is the new content only. A stale anchor rejects the whole batch \
+         (E_STALE_ANCHOR) and returns the current anchor table; write nothing in that \
+         case and re-read. `replace_text` with a unique oldText/newText is the fallback \
+         for agents that cannot use line anchors. `write` creates a file, appends when \
+         it exists (the result says so), or replaces with overwrite=true.\n\
          4. Code intelligence: use `lsp` for definition/references/hover/rename/
          diagnostics. Results are labelled lsp-precise or name-based. Rename is a \
          dry-run preview unless apply=true.\n\

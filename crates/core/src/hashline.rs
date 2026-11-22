@@ -115,22 +115,6 @@ impl PosSpec {
     }
 }
 
-/// Reject content that still carries read/diff decorations. Feeding
-/// `12#AB|...` or unified-diff lines back into `edit` is a common failure mode.
-pub fn looks_decorated(lines: &[String]) -> Option<String> {
-    let anchor_re = regex::Regex::new(r"^\s*\d+#[A-Za-z]{2,4}\|").unwrap();
-    if let Some(line) = lines.iter().find(|l| anchor_re.is_match(l)) {
-        return Some(format!("line looks like a `read` anchor line: {line:?}"));
-    }
-    let plus = lines.iter().filter(|l| l.starts_with('+')).count();
-    let minus = lines.iter().filter(|l| l.starts_with('-')).count();
-    let nonempty = lines.iter().filter(|l| !l.trim().is_empty()).count();
-    if nonempty >= 2 && (plus + minus) == nonempty && (plus > 0 || minus > 0) {
-        return Some("lines contain unified-diff +/- markers".to_string());
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,14 +198,6 @@ mod tests {
         assert_eq!(p.anchor.as_deref(), Some("ZP"));
         assert!(PosSpec::parse(&serde_json::json!("0")).is_err());
         assert!(PosSpec::parse(&serde_json::json!("3#0O")).is_err());
-    }
-
-    #[test]
-    fn decorative_prefixes_are_rejected() {
-        assert!(looks_decorated(&["1#AB|hello".to_string()]).is_some());
-        assert!(looks_decorated(&["+added".into(), "-removed".into()]).is_some());
-        assert!(looks_decorated(&["normal".into()]).is_none());
-        assert!(looks_decorated(&["+1".into()]).is_none());
     }
 
     #[test]
