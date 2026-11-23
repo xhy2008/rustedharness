@@ -115,23 +115,7 @@ fn display_url(addr: SocketAddr) -> String {
 }
 
 fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let command = "open";
-    #[cfg(target_os = "windows")]
-    let command = "cmd";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let command = "xdg-open";
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = std::process::Command::new(command);
-    #[cfg(target_os = "windows")]
-    cmd.arg("/C").arg("start").arg("").arg(url);
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = std::process::Command::new(command);
-    #[cfg(not(target_os = "windows"))]
-    cmd.arg(url);
-
-    if let Err(err) = cmd.spawn() {
+    if let Err(err) = webbrowser::open(url) {
         eprintln!("could not open a browser automatically: {err}");
     }
 }

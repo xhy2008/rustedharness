@@ -149,7 +149,8 @@ does not ship any of these providers or models by default.
 ```
 
 `apiKey` and header values accept a literal, `$NAME`/`${NAME}` environment
-interpolation, or `!command` output. `$$` and `$!` produce literal `$` and `!`.
+interpolation (`${NAME:-default}` for a fallback, unset variables expand to
+nothing), or `!command` output. `$$` and `$!` produce literal `$` and `!`.
 Local endpoints may use a dummy key or omit it.
 
 Provider fields: `name`, `baseUrl`, `api` (`openai-completions` or

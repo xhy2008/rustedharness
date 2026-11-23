@@ -58,7 +58,8 @@ or default model: an unset choice stays empty, displays as `None`, and the TUI
 prompts for configuration; headless runs fail before the first turn. Model
 references are `provider/model` or a bare unique id, and each model carries its
 own optional context window and output cap. API keys and header values support
-literals, `$ENV`/`${ENV}` interpolation, and `!command`.
+literals, `$ENV`/`${ENV}` interpolation (`shellexpand`, with unset variables
+expanding to nothing), and `!command`.
 
 ### Provider compatibility
 
@@ -188,6 +189,9 @@ node kinds and references from identifier leaves, so comments, strings, and
 keywords are not mistaken for symbols. L0 is used while a server warms up or
 when none is installed. `lsp_tool.rs` exposes both through a single `lsp` tool
 and labels L0 answers as name-based.
+
+A server binary is found through `which` (PATH with `PATHEXT` on Windows) or
+the per-language/id `lsp.servers` override before the cache is consulted.
 
 Language servers are installed from their GitHub releases after consent. The
 registry stores no version: `ServerSpec::repo` names the project and

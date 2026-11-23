@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_openai::{config::OpenAIConfig, Client};
+use base64::prelude::BASE64_STANDARD as BASE64;
+use base64::Engine as _;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -49,13 +51,18 @@ impl ImagePart {
         format!("data:{};base64,{}", self.mime_type, self.data)
     }
 
+    /// Accept any RFC 2397 data URL: base64 or percent-encoded, with any
+    /// parameters. The payload is re-encoded to base64 because that is what the
+    /// providers and the session format carry.
     pub fn from_data_url(url: &str) -> Option<Self> {
-        let rest = url.strip_prefix("data:")?;
-        let (meta, data) = rest.split_once(',')?;
-        let mime_type = meta.strip_suffix(";base64").unwrap_or(meta);
+        let parsed = data_url::DataUrl::process(url).ok()?;
+        let (bytes, _fragment) = parsed.decode_to_vec().ok()?;
+        // The essence is `type/subtype`; data URL parameters are not part of
+        // what the providers receive.
+        let mime_type = parsed.mime_type();
         Some(Self {
-            mime_type: mime_type.to_string(),
-            data: data.to_string(),
+            mime_type: format!("{}/{}", mime_type.type_, mime_type.subtype),
+            data: BASE64.encode(bytes),
         })
     }
 
@@ -1104,6 +1111,35 @@ pub fn is_quota_exhausted(message: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
+
+    #[test]
+    fn image_data_urls_round_trip() {
+        let image = ImagePart {
+            mime_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        };
+        assert_eq!(ImagePart::from_data_url(&image.data_url()), Some(image));
+
+        // A percent-encoded body and a parameterised media type are valid data
+        // URLs too; the payload is normalised back to base64 and the media type
+        // is reduced to its essence.
+        assert_eq!(
+            ImagePart::from_data_url("data:image/png;charset=utf-8,%FF"),
+            Some(ImagePart {
+                mime_type: "image/png".into(),
+                data: "/w==".into(),
+            })
+        );
+        assert_eq!(
+            ImagePart::from_data_url("data:text/plain,hello%20world"),
+            Some(ImagePart {
+                mime_type: "text/plain".into(),
+                data: "aGVsbG8gd29ybGQ=".into(),
+            })
+        );
+        assert_eq!(ImagePart::from_data_url("https://example.com/a.png"), None);
+        assert_eq!(ImagePart::from_data_url("data:image/png;base64,!!!"), None);
+    }
 
     #[test]
     fn wire_usage_accepts_cache_token_aliases() {

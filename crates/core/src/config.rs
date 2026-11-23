@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1002,16 +1003,14 @@ fn parse_jsonc<T: DeserializeOwned>(
     jsonc_parser::parse_to_serde_value(raw, &options)
 }
 
-/// Expand `~` in paths supplied through `--config` or environment variables.
+/// Expand a leading `~` in paths supplied through `--config` or environment
+/// variables. Only a bare `~` and `~/…` are expanded, with the same home
+/// directory the rest of the config uses.
 pub fn expand_tilde(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    if text == "~" {
-        return home_dir();
+    match shellexpand::path::tilde_with_context(path, || Some(home_dir())) {
+        Cow::Owned(expanded) => expanded,
+        Cow::Borrowed(_) => path.to_path_buf(),
     }
-    if let Some(rest) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
-        return home_dir().join(rest);
-    }
-    path.to_path_buf()
 }
 
 fn home_dir() -> PathBuf {
@@ -1033,56 +1032,15 @@ pub fn resolve_config_value(raw: &str) -> String {
 }
 
 pub(crate) fn interpolate_env(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.char_indices().peekable();
-    while let Some((_, ch)) = chars.next() {
-        if ch != '$' {
-            out.push(ch);
-            continue;
-        }
-        match chars.peek().copied() {
-            Some((_, '$')) => {
-                chars.next();
-                out.push('$');
-            }
-            Some((_, '!')) => {
-                chars.next();
-                out.push('!');
-            }
-            Some((_, '{')) => {
-                chars.next();
-                let mut name = String::new();
-                let mut closed = false;
-                for (_, c) in chars.by_ref() {
-                    if c == '}' {
-                        closed = true;
-                        break;
-                    }
-                    name.push(c);
-                }
-                if closed {
-                    out.push_str(&std::env::var(&name).unwrap_or_default());
-                } else {
-                    out.push_str("${");
-                    out.push_str(&name);
-                }
-            }
-            Some((_, c)) if c.is_ascii_alphanumeric() || c == '_' => {
-                let mut name = String::new();
-                while let Some((_, c)) = chars.peek().copied() {
-                    if c.is_ascii_alphanumeric() || c == '_' {
-                        name.push(c);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                out.push_str(&std::env::var(&name).unwrap_or_default());
-            }
-            _ => out.push('$'),
-        }
-    }
-    out
+    // `$!` is this config's escape for a literal `!`; shell expansion only
+    // knows `$$`, so it is rewritten before the expansion runs.
+    let escaped = raw.replace("$!", "!");
+    // An unset variable expands to the empty string rather than staying
+    // literal, which is what shell expansion does by default.
+    shellexpand::env_with_context_no_errors(&escaped, |name| {
+        Some(std::env::var(name).unwrap_or_default())
+    })
+    .into_owned()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1299,7 +1257,28 @@ mod tests {
         );
         assert_eq!(resolve_config_value("$$literal"), "$literal");
         assert_eq!(resolve_config_value("$!literal"), "!literal");
+        // Unset variables expand to nothing, and an unterminated expression is
+        // left as written instead of swallowing the rest of the value.
+        assert_eq!(resolve_config_value("a-$RUSTEDHARNESS_UNSET-b"), "a--b");
+        assert_eq!(
+            resolve_config_value("a-${RUSTEDHARNESS_UNSET-b"),
+            "a-${RUSTEDHARNESS_UNSET-b"
+        );
         std::env::remove_var("RUSTEDHARNESS_TEST_KEY");
+    }
+
+    #[test]
+    fn only_a_leading_tilde_is_expanded() {
+        let home = home_dir();
+        assert_eq!(expand_tilde(Path::new("~")), home);
+        assert_eq!(
+            expand_tilde(Path::new("~/config.json")),
+            home.join("config.json")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("/tmp/~backup")),
+            PathBuf::from("/tmp/~backup")
+        );
     }
 
     /// Empty `compactModel` means the main model; a value routes summaries to

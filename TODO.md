@@ -946,3 +946,9 @@ rm -rf target/debug/incremental                                       # 顺手�
    再把同一棵树交给 `html2md::walk` 转 Markdown（不再序列化后二次解析）；
    标题取 `<title>` 元素的文本；标签剥离和实体解码分别改用 DOM 文本遍历和
    `html-escape`（此前只认 10 个命名实体）。
+10. **小工具**：服务器二进制查找改用 `which`（旧实现自己拼 `PATHEXT`）；`~` 展开和
+    `$ENV` 插值改用 `shellexpand`（旧实现是手写扫描，`$!` 转义在展开前重写）；
+    `data:` URL 用 `data-url` 解析并统一重新编码为 base64（旧实现只认 `;base64,`，
+    百分号编码的 URL 会被当成 base64 发出去）；浏览器打开改用 `webbrowser`；
+    `config edit` 用 `shell-words` 切分 `$VISUAL`/`$EDITOR`——它们存的是命令行而不是
+    程序名，旧代码把整串交给 `Command::new`，`EDITOR="code -w"` 直接 ENOENT。

@@ -774,31 +774,78 @@ fn config_command(config: Config, args: ConfigArgs) -> Result<()> {
             if !path.exists() {
                 Config::write_default_in(&source_dir)?;
             }
-            let editor = std::env::var("VISUAL")
-                .or_else(|_| std::env::var("EDITOR"))
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| {
-                    if cfg!(windows) {
-                        "notepad".to_string()
-                    } else if cfg!(target_os = "macos") {
-                        "open".to_string()
-                    } else {
-                        "xdg-open".to_string()
-                    }
-                });
-            let mut command = std::process::Command::new(&editor);
-            if editor == "open" && cfg!(target_os = "macos") {
-                command.arg("-e");
-            }
-            let status = command
+            let (program, args) = editor_command()?;
+            let status = std::process::Command::new(&program)
+                .args(&args)
                 .arg(&path)
                 .status()
-                .with_context(|| format!("cannot open editor `{editor}`"))?;
+                .with_context(|| format!("cannot open editor `{program}`"))?;
             if !status.success() {
-                anyhow::bail!("editor `{editor}` exited with {status}");
+                anyhow::bail!("editor `{program}` exited with {status}");
             }
             Ok(())
         }
+    }
+}
+
+/// Split `$VISUAL`/`$EDITOR` into a program and its arguments. The variable
+/// holds a command line, not a program name, so the platform default is written
+/// the same way (`open -e`).
+fn editor_command() -> anyhow::Result<(String, Vec<String>)> {
+    let raw = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else if cfg!(target_os = "macos") {
+                "open -e".to_string()
+            } else {
+                "xdg-open".to_string()
+            }
+        });
+    split_editor(&raw)
+}
+
+fn split_editor(raw: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let mut words =
+        shell_words::split(raw).with_context(|| format!("cannot parse editor command `{raw}`"))?;
+    if words.is_empty() {
+        anyhow::bail!("editor command `{raw}` has no program name");
+    }
+    let program = words.remove(0);
+    Ok((program, words))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_editor;
+
+    /// The old code passed the whole variable to `Command::new`, so
+    /// `EDITOR="code -w"` failed with ENOENT.
+    #[test]
+    fn editor_command_lines_are_split_like_a_shell() {
+        assert_eq!(
+            split_editor("code -w").unwrap(),
+            ("code".to_string(), vec!["-w".to_string()])
+        );
+        assert_eq!(
+            split_editor("nvim -c 'set ft=json'").unwrap(),
+            (
+                "nvim".to_string(),
+                vec!["-c".to_string(), "set ft=json".to_string()]
+            )
+        );
+        assert_eq!(
+            split_editor("notepad").unwrap(),
+            ("notepad".to_string(), vec![])
+        );
+    }
+
+    #[test]
+    fn empty_or_unbalanced_editor_commands_are_errors() {
+        assert!(split_editor("   ").is_err());
+        assert!(split_editor("code 'unbalanced").is_err());
     }
 }

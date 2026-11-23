@@ -9,7 +9,6 @@
 //! transparently answers from the name-based index in that case.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -482,34 +481,6 @@ fn exe_name(name: &str) -> String {
     } else {
         name.to_string()
     }
-}
-
-fn find_in_path(command: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(command);
-    if candidate.components().count() > 1 {
-        return candidate.is_file().then_some(candidate);
-    }
-    let path = std::env::var_os("PATH")?;
-    let names: Vec<OsString> = if cfg!(windows) {
-        let pathext =
-            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        let mut names = vec![OsString::from(command)];
-        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
-            names.push(OsString::from(format!("{command}{ext}")));
-        }
-        names
-    } else {
-        vec![OsString::from(command)]
-    };
-    for dir in std::env::split_paths(&path) {
-        for name in &names {
-            let full = dir.join(name);
-            if full.is_file() {
-                return Some(full);
-            }
-        }
-    }
-    None
 }
 
 fn cache_root() -> PathBuf {
@@ -1120,7 +1091,7 @@ impl LspHub {
                 return Some(p);
             }
         }
-        if let Some(p) = find_in_path(spec.command) {
+        if let Ok(p) = which::which(spec.command) {
             return Some(p);
         }
         installed(spec).map(|(_, path)| path)
