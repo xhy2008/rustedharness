@@ -335,7 +335,10 @@ appended to the tool result.
 | `mcp__server__tool` | Tools exposed by configured MCP servers. |
 
 Remote `read` results are wrapped as untrusted external content so fetched pages
-cannot impersonate instructions. `web_search` uses `BRAVE_API_KEY` and
+cannot impersonate instructions. HTML is parsed once with `html5ever`; the
+boilerplate subtrees are pruned from that DOM and the same tree is handed to
+`html2md`, so scripts, styles and `<head>` metadata never reach the Markdown and
+every named entity is decoded. `web_search` uses `BRAVE_API_KEY` and
 `TAVILY_API_KEY` when present and always falls back to keyless DuckDuckGo.
 
 ### Anchored editing (Hashline)
@@ -543,5 +546,5 @@ MIT. See `LICENSE`.
 `html2md` (used for `read(URL)` HTML conversion) is **GPL-3.0+**. Building and
 distributing a binary that links it means the combined distribution must comply
 with GPL-3.0; the project's own source remains MIT. If a fully permissive build
-is required, replace the one call in `crates/core/src/web.rs` with a converter
-that has compatible licensing.
+is required, replace `html_to_markdown` in `crates/core/src/web.rs` with a
+converter that has compatible licensing.

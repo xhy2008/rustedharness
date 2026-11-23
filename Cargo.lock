@@ -2109,6 +2109,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "html-escape"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d45ed4d99334da2a2f221504e8ffc8ad09baf2a452b154465a976bfde697b004"
+
+[[package]]
 name = "html2md"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4430,11 +4436,14 @@ dependencies = [
  "globset",
  "grep-regex",
  "grep-searcher",
+ "html-escape",
  "html2md",
+ "html5ever",
  "ignore",
  "jsonc-parser",
  "line-index",
  "lsp-types",
+ "markup5ever_rcdom",
  "nix 0.30.1",
  "portable-pty",
  "rayon",

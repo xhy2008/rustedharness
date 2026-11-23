@@ -941,3 +941,8 @@ rm -rf target/debug/incremental                                       # 顺手�
 7. **二进制检测**：改用 `content_inspector`。
 8. **内部重复**：统一三套折行逻辑；`SKIP_DIRS` 移到 `core::paths`；MCP 复用
    `config::interpolate_env`。
+9. **HTML**：`read(URL)` 的 HTML 处理不再用正则。`html5ever` 解析一次，直接在
+   DOM 上剪掉 `script`/`style`/`noscript`/`svg`/`head`/`iframe`/`template` 子树，
+   再把同一棵树交给 `html2md::walk` 转 Markdown（不再序列化后二次解析）；
+   标题取 `<title>` 元素的文本；标签剥离和实体解码分别改用 DOM 文本遍历和
+   `html-escape`（此前只认 10 个命名实体）。

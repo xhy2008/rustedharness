@@ -211,6 +211,19 @@ with `latest_tag` and emits `update_available` when they differ. Installs write
 `lsp/<server>/<tag>/` and `prune_other_versions` deletes the directory they
 replaced, so `installed` always describes a single copy.
 
+### Web fetching
+
+`web.rs` fetches a page, decides whether the body is HTML, and converts it for
+the model. HTML is parsed once with `html5ever`; the boilerplate subtrees
+(`script`, `style`, `noscript`, `svg`, `head`, `iframe`, `template`) are pruned
+from that DOM, and the same tree is walked by `html2md` to produce Markdown, so
+nothing is serialized and re-parsed on the way. Titles come from the `<title>`
+element's text, which the parser has already entity-decoded, and search-result
+titles and snippets are reduced to text with the same walk. Entity decoding uses
+`html-escape`, so every named reference is understood rather than a fixed list.
+Bodies over `MAX_BODY_BYTES` are rejected before parsing and the Markdown is
+truncated to `MAX_MARKDOWN_CHARS`.
+
 ### Processes
 
 `proc.rs` spawns commands in a pty for foreground or background execution,

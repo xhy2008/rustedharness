@@ -41,12 +41,15 @@ futures-util = "0.3"
 globset = "0.4"
 grep-regex = "=0.1.14"
 grep-searcher = "=0.1.17"
+html-escape = "0.3"
 html2md = "0.2.17"
+html5ever = "0.39"
 jsonc-parser = { version = "0.34", features = ["serde"] }
 ignore = "0.4"
-nix = { version = "0.30", features = ["signal", "process"] }
 line-index = "0.1"
 lsp-types = "0.97"
+markup5ever_rcdom = "0.39"
+nix = { version = "0.30", features = ["signal", "process"] }
 portable-pty = "0.9"
 rmcp = { version = "2.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 ratatui = "0.30"

@@ -6,6 +6,10 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use html5ever::tendril::TendrilSink;
+use html5ever::{parse_document, ParseOpts};
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
+
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
 use crate::provider::{Backend, ChatMessage, ChatRequest};
@@ -375,10 +379,10 @@ impl WebTools {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 continue;
             }
-            let title = strip_tags(&html_unescape(&link[2]));
+            let title = strip_tags(&link[2]);
             let snippet = p_re
                 .captures(block)
-                .map(|c| strip_tags(&html_unescape(&c[1])))
+                .map(|c| strip_tags(&c[1]))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default();
             if title.is_empty() {
@@ -461,71 +465,99 @@ fn looks_like_html(body: &str) -> bool {
     start.starts_with("<!doctype html") || start.starts_with("<html") || start.contains("<body")
 }
 
-pub fn extract_title(html: &str) -> Option<String> {
-    let re = Regex::new(r"(?is)<title[^>]*>(.*?)</title>").ok()?;
-    let cap = re.captures(html)?;
-    let title = strip_tags(&html_unescape(&cap[1]));
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
+/// Elements whose contents never become readable text: they are dropped from
+/// the DOM before conversion, including their subtrees.
+const BOILERPLATE: [&str; 7] = [
+    "script", "style", "noscript", "svg", "head", "iframe", "template",
+];
+
+/// Parse with the spec-compliant HTML5 parser that `html2md` itself uses, so
+/// pruned trees and converted trees see the same document.
+fn parse_html(html: &str) -> RcDom {
+    parse_document(RcDom::default(), ParseOpts::default()).one(html.to_string())
+}
+
+/// Drop boilerplate subtrees in place. Pruning before conversion is what keeps
+/// `<head>` metadata, scripts and styles out of the Markdown.
+fn prune_boilerplate(node: &Handle) {
+    let children: Vec<Handle> = node.children.borrow().clone();
+    let mut kept = Vec::with_capacity(children.len());
+    for child in children {
+        let boilerplate = matches!(&child.data, NodeData::Element { name, .. }
+            if BOILERPLATE.iter().any(|tag| name.local.as_ref() == *tag));
+        if boilerplate {
+            child.parent.set(None);
+            continue;
+        }
+        prune_boilerplate(&child);
+        kept.push(child);
+    }
+    *node.children.borrow_mut() = kept;
+}
+
+fn element_text(node: &Handle, out: &mut String) {
+    if let NodeData::Text { contents } = &node.data {
+        out.push_str(&contents.borrow());
+    }
+    for child in node.children.borrow().iter() {
+        element_text(child, out);
     }
 }
 
-/// Remove elements that never contribute readable text. This runs before
-/// html2md so scripts, styles and document metadata cannot leak into Markdown.
-fn strip_boilerplate(html: &str) -> String {
-    let mut text = html.to_string();
-    for tag in [
-        "script", "style", "noscript", "svg", "head", "iframe", "template",
-    ] {
-        let re = Regex::new(&format!(r"(?is)<{tag}[^>]*>.*?</{tag}>")).unwrap();
-        text = re.replace_all(&text, " ").to_string();
+/// First element with this local name in tree order.
+fn find_element(node: &Handle, tag: &str) -> Option<Handle> {
+    for child in node.children.borrow().iter() {
+        if matches!(&child.data, NodeData::Element { name, .. } if name.local.as_ref() == tag) {
+            return Some(child.clone());
+        }
+        if let Some(found) = find_element(child, tag) {
+            return Some(found);
+        }
     }
-    text
+    None
+}
+
+/// Collapse whitespace runs to single spaces. One-line search titles and
+/// snippets carry markup padding otherwise.
+fn squeeze(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `<title>` is an RCDATA element: entity references are decoded but angle
+/// brackets are text, which is why the markup a site puts there is shown
+/// literally by browsers too. Re-parsing the decoded text to strip fake tags
+/// would swallow a genuinely escaped `&lt;div&gt;`, so it is kept verbatim.
+pub fn extract_title(html: &str) -> Option<String> {
+    let dom = parse_html(html);
+    let mut text = String::new();
+    element_text(&find_element(&dom.document, "title")?, &mut text);
+    let title = squeeze(&text);
+    (!title.is_empty()).then_some(title)
 }
 
 /// HTML → Markdown via `html2md` (GPL-3.0+; see the licensing note in the
-/// README). Boilerplate is stripped first because html2md converts the whole
-/// document tree, including `<head>` text, otherwise.
+/// README). The document is parsed once, boilerplate is pruned from that tree,
+/// and the tree is handed straight to `html2md`'s walker instead of being
+/// re-parsed from a regex-scrubbed string.
 pub fn html_to_markdown(html: &str) -> String {
-    let cleaned = strip_boilerplate(html);
-    let markdown = html2md::parse_html(&cleaned);
-    collapse_blank_lines(&markdown)
+    let dom = parse_html(html);
+    prune_boilerplate(&dom.document);
+    let mut printer = html2md::StructuredPrinter::default();
+    html2md::walk(&dom.document, &mut printer, &HashMap::new());
+    collapse_blank_lines(&printer.data)
 }
 
+/// Visible text of an HTML fragment.
 pub fn strip_tags(html: &str) -> String {
-    let re = Regex::new(r"(?is)<[^>]+>").unwrap();
-    re.replace_all(html, " ").to_string()
+    let dom = parse_html(html);
+    let mut text = String::new();
+    element_text(&dom.document, &mut text);
+    squeeze(&text)
 }
 
+/// Decode every named and numeric character reference, not just a fixed list.
 pub fn html_unescape(text: &str) -> String {
-    let mut out = text
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&mdash;", "—")
-        .replace("&ndash;", "–")
-        .replace("&hellip;", "…");
-    let re = Regex::new(r"&#(x?[0-9a-fA-F]+);").unwrap();
-    out = re
-        .replace_all(&out, |caps: &regex::Captures| {
-            let raw = &caps[1];
-            let code = if let Some(hex) = raw.strip_prefix('x').or_else(|| raw.strip_prefix('X')) {
-                u32::from_str_radix(hex, 16).ok()
-            } else {
-                raw.parse::<u32>().ok()
-            };
-            code.and_then(char::from_u32)
-                .map(|c| c.to_string())
-                .unwrap_or_default()
-        })
-        .to_string();
-    out
+    html_escape::decode_html_entities(text).into_owned()
 }
 
 fn collapse_blank_lines(text: &str) -> String {
@@ -635,6 +667,53 @@ mod tests {
             html_unescape("a &amp; b &#39;c&#39; &#x4e2d;"),
             "a & b 'c' 中"
         );
+    }
+
+    /// The old fixed table only knew a handful of entities and passed every
+    /// other named reference through untouched.
+    #[test]
+    fn every_named_entity_is_decoded() {
+        assert_eq!(
+            html_unescape("Caf&eacute; &frac12; &hellip; &bogus; &#x1F600;"),
+            "Café ½ … &bogus; 😀"
+        );
+    }
+
+    #[test]
+    fn title_survives_attributes_entities_and_inline_markup() {
+        let html = r#"<html><head><title lang="en" data-x="1">
+            A &amp; B &lt;Bold&gt;</title></head><body>x</body></html>"#;
+        assert_eq!(extract_title(html).as_deref(), Some("A & B <Bold>"));
+        assert_eq!(extract_title("<body>no title</body>"), None);
+        assert_eq!(extract_title("<title> </title>"), None);
+    }
+
+    /// Nesting broke the regex stripper, which ran one pattern per tag over the
+    /// whole document in a fixed order.
+    #[test]
+    fn boilerplate_is_pruned_in_one_pass_including_nesting() {
+        let html = r#"<html><head><title>T</title><style>h1{}</style></head><body>
+            <template><style>p{}</style><script>nested()</script></template>
+            <svg><path d="M0 0"/></svg>
+            <noscript>enable js</noscript>
+            <iframe src="x"></iframe>
+            <p>Visible <span title="<script>decoy()</script>">text</span></p>
+            </body></html>"#;
+        let md = html_to_markdown(html);
+        assert!(md.contains("Visible"), "{md}");
+        for gone in ["h1{}", "nested()", "p{}", "enable js", "decoy()", "M0 0"] {
+            assert!(!md.contains(gone), "`{gone}` leaked into: {md}");
+        }
+    }
+
+    #[test]
+    fn strip_tags_collapses_markup_and_whitespace() {
+        assert_eq!(
+            strip_tags("<p>one <b>two</b>\n   three</p>"),
+            "one two three"
+        );
+        assert_eq!(strip_tags("plain"), "plain");
+        assert_eq!(strip_tags(""), "");
     }
 
     #[test]
