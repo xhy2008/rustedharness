@@ -284,55 +284,85 @@ pub(crate) fn sanitize(text: &str) -> Cow<'_, str> {
 /// rows; both are emitted in their own style so a marker can differ from the
 /// body (e.g. an accent marker in front of plain text). Widths are display
 /// columns, which keeps CJK and emoji from overrunning the right edge.
+pub(crate) fn wrap_spans(
+    frags: Vec<Span<'static>>,
+    width: usize,
+    first: (&str, Style),
+    cont: (&str, Style),
+) -> Vec<Line<'static>> {
+    let width = width.max(8);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut prefix = first;
+    let mut chars: Vec<(char, Style)> = Vec::new();
+    let mut used = display_width(prefix.0);
+    let mut last_space: Option<usize> = None;
+
+    let flush =
+        |lines: &mut Vec<Line<'static>>, prefix: (&str, Style), chars: &mut Vec<(char, Style)>| {
+            let mut spans = Vec::with_capacity(chars.len() + 1);
+            if !prefix.0.is_empty() {
+                spans.push(Span::styled(prefix.0.to_string(), prefix.1));
+            }
+            let mut merged: Vec<Span<'static>> = Vec::new();
+            for (c, style) in chars.drain(..) {
+                match merged.last_mut() {
+                    Some(span) if span.style == style => span.content.to_mut().push(c),
+                    _ => merged.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            spans.extend(merged);
+            lines.push(Line::from(spans));
+        };
+
+    for frag in frags {
+        for c in frag.content.chars() {
+            if c == '\n' {
+                flush(&mut lines, prefix, &mut chars);
+                prefix = cont;
+                used = display_width(prefix.0);
+                last_space = None;
+                continue;
+            }
+            let cw = char_width(c);
+            if used + cw > width && !chars.is_empty() {
+                match last_space {
+                    Some(index) if index > 0 => {
+                        let mut rest = chars.split_off(index + 1);
+                        chars.pop();
+                        flush(&mut lines, prefix, &mut chars);
+                        std::mem::swap(&mut chars, &mut rest);
+                        prefix = cont;
+                        used = display_width(prefix.0)
+                            + chars.iter().map(|(c, _)| char_width(*c)).sum::<usize>();
+                    }
+                    _ => {
+                        flush(&mut lines, prefix, &mut chars);
+                        prefix = cont;
+                        used = display_width(prefix.0);
+                    }
+                }
+                last_space = chars.iter().rposition(|(c, _)| *c == ' ');
+            }
+            if c == ' ' {
+                last_space = Some(chars.len());
+            }
+            chars.push((c, frag.style));
+            used += cw;
+        }
+    }
+    if !chars.is_empty() || lines.is_empty() {
+        flush(&mut lines, prefix, &mut chars);
+    }
+    lines
+}
+
 fn flow(
     frags: Vec<Span<'static>>,
     first: (&str, Style),
     cont: (&str, Style),
     width: usize,
 ) -> Vec<Line<'static>> {
-    let width = width.max(8);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = vec![Span::styled(first.0.to_string(), first.1)];
-    let mut used = display_width(first.0);
-    let mut filled = false;
-    let mut last: Option<Style> = None;
-
-    for frag in frags {
-        for c in frag.content.chars() {
-            // A newline inside a fragment (a pasted multi-line prompt, a tool
-            // result) must become a real line break here: emitted into a span
-            // it would move the terminal cursor behind the frame buffer's back.
-            if c == '\n' {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                spans.push(Span::styled(cont.0.to_string(), cont.1));
-                used = display_width(cont.0);
-                last = None;
-                filled = false;
-                continue;
-            }
-            let cw = char_width(c);
-            if filled && used + cw > width {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                spans.push(Span::styled(cont.0.to_string(), cont.1));
-                used = display_width(cont.0);
-                last = None;
-            }
-            if last == Some(frag.style) {
-                if let Some(span) = spans.last_mut() {
-                    span.content.to_mut().push(c);
-                }
-            } else {
-                spans.push(Span::styled(c.to_string(), frag.style));
-                last = Some(frag.style);
-            }
-            used += cw;
-            filled = true;
-        }
-    }
-    if filled || lines.is_empty() {
-        lines.push(Line::from(spans));
-    }
-    lines
+    wrap_spans(frags, width, first, cont)
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,24 +1433,18 @@ fn draw_picker(
 }
 
 fn wrap_plain(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let word_len = word.chars().count();
-        let current_len = current.chars().count();
-        if !current.is_empty() && current_len + 1 + word_len > width {
-            lines.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
+    wrap_spans(
+        vec![Span::raw(text.to_string())],
+        width,
+        ("", Style::default()),
+        ("", Style::default()),
+    )
+    .into_iter()
+    .map(|line| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    })
+    .collect()
 }

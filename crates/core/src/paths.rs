@@ -2,6 +2,9 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::{HarnessError, Result};
 
+/// Directories that are never useful to browse or index.
+pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", "build"];
+
 /// R1–R4 path rules.
 ///
 /// * R1 relative paths are anchored at the session cwd

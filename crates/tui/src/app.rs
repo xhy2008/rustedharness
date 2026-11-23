@@ -2114,7 +2114,7 @@ pub fn session_filtered<'a>(items: &'a [PickerItem], filter: &str) -> Vec<&'a Pi
 }
 
 fn is_skip_dir(name: &str) -> bool {
-    matches!(name, "target" | "node_modules" | "dist" | "build")
+    rustedharness_core::paths::SKIP_DIRS.contains(&name)
 }
 
 pub(crate) fn shorten_path(path: &str, max: usize) -> String {

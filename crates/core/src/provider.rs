@@ -389,6 +389,26 @@ pub struct Provider {
     name: String,
 }
 
+/// Build the shared async-openai client for both Chat Completions and
+/// Responses. Provider-specific headers and base URL stay in this one place.
+pub(crate) fn openai_client(
+    provider: &ProviderConfig,
+    api_key: String,
+    base_url: &str,
+) -> Result<Client<OpenAIConfig>> {
+    let mut oa = OpenAIConfig::new()
+        .with_api_base(base_url.trim_end_matches('/').to_string())
+        .with_api_key(api_key);
+    for (key, value) in provider.resolved_headers() {
+        let header = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|e| HarnessError::Config(format!("invalid header name {key}: {e}")))?;
+        oa = oa
+            .with_header(header, value)
+            .map_err(|e| HarnessError::Config(format!("invalid header {key}: {e}")))?;
+    }
+    Ok(Client::with_config(oa))
+}
+
 impl Provider {
     pub fn from_config(config: &Config) -> Result<Self> {
         let spec = config.resolve_model(&config.model)?;
@@ -417,17 +437,7 @@ impl Provider {
             )));
         }
         let base_url = provider.base_url.trim_end_matches('/').to_string();
-        let mut oa = OpenAIConfig::new()
-            .with_api_base(base_url)
-            .with_api_key(api_key);
-        for (key, value) in provider.resolved_headers() {
-            let header = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                .map_err(|e| HarnessError::Config(format!("invalid header name {key}: {e}")))?;
-            oa = oa
-                .with_header(header, value)
-                .map_err(|e| HarnessError::Config(format!("invalid header {key}: {e}")))?;
-        }
-        let client = Client::with_config(oa);
+        let client = openai_client(provider, api_key, &base_url)?;
         Ok(Self {
             client,
             compat: provider.compat.clone(),

@@ -51,7 +51,8 @@ client, code index, and process registry.
 ### Configuration
 
 `config.rs` merges `~/.rustedharness/config.json` (settings and model choice)
-with `~/.rustedharness/models.json` (Pi-style providers and model lists). The
+with `~/.rustedharness/models.json` (Pi-style providers and model lists), using
+`jsonc-parser` so comments and trailing commas keep accurate error locations. The
 directory can be moved with `RUSTEDHARNESS_DIR`. There is no built-in provider
 or default model: an unset choice stays empty, displays as `None`, and the TUI
 prompts for configuration; headless runs fail before the first turn. Model
@@ -65,7 +66,7 @@ literals, `$ENV`/`${ENV}` interpolation, and `!command`.
 `responses.rs` implements the OpenAI Responses API (`"api":
 "openai-responses"`), translating the internal transcript into `input` items,
 `instructions` and flat function tools, and folding `response.*` SSE events
-back into the same `Completion`. A `Router` selects the provider that owns each
+back into the same `Completion` through `async-openai`'s BYOT Responses client. A `Router` selects the provider that owns each
 request's model, so the agent and compaction models can use different endpoints
 and different protocols in one session. `Compat` resolves Pi's defaults from
 the endpoint: `max_tokens` vs `max_completion_tokens`, `system` vs `developer`,
@@ -173,8 +174,9 @@ appends to.
 ### Code intelligence
 
 `lsp.rs` speaks JSON-RPC over stdio to one server per language, with document
-sync, bounded restarts, idle shutdown, and ten operations. Positions are
-converted between UTF-16 (LSP) and byte offsets. `intel.rs` maintains the L0
+sync, bounded restarts, idle shutdown, and ten operations. Result types come
+from `lsp-types`, and `line-index` converts between UTF-16 (LSP) and byte
+offsets. `intel.rs` maintains the L0
 index in SQLite using real tree-sitter parses, with 17 bundled grammars. The
 database lives in `<workspace>/.rustedharness/index.sqlite`: the index describes
 one workspace, so it is created, invalidated and deleted with it, and a
@@ -212,8 +214,8 @@ replaced, so `installed` always describes a single copy.
 ### Processes
 
 `proc.rs` spawns commands in a pty for foreground or background execution,
-captures raw bytes, emulates the subset of terminal control sequences needed to
-render progress bars/clear-screen output, strips ANSI, and tracks child status.
+captures raw bytes, feeds them to `vt100` for progress bars/clear-screen output,
+strips ANSI, and tracks child status.
 Foreground runs can also publish throttled, byte-bounded screen tails as
 `tool_output` events keyed by tool-call id; the final `tool_result` remains
 authoritative. Background processes are addressable by pid through `await`;
@@ -235,7 +237,7 @@ Unit tests live beside the modules. They cover path escapes (including
 symlinks), anchor stability/staleness, batch atomicity, CRLF preservation,
 provider compatibility switches, usage-only accounting, compaction, session
 recovery, terminal emulation, LSP position conversion, tree-sitter extraction
-across all bundled grammars, download URL validation, MCP naming, web
+across all bundled grammars, download URL validation, rmcp tool results, web
 extraction, and tool schema/no-op guards. CLI/web/TUI end-to-end behavior is
 exercised manually against a mock OpenAI-compatible SSE server.
 

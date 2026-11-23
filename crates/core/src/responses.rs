@@ -5,11 +5,13 @@
 //! folds the SSE event stream back into the same [`Completion`] the Chat
 //! Completions backend produces.
 //!
-//! The wire format is handled as raw JSON rather than the typed client so that
-//! compatible gateways that lag behind the OpenAI schema keep working.
+//! Transport, SSE framing and event decoding use `async-openai`'s Responses
+//! client in BYOT mode: the payload/event stay raw JSON so compatible gateways
+//! that lag behind the OpenAI schema keep working.
 
 use std::collections::BTreeMap;
 
+use async_openai::{config::OpenAIConfig, Client};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
@@ -18,15 +20,13 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{Compat, ProviderConfig, ResolvedCompat};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
-    Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall, Usage,
+    openai_client, Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall,
+    Usage,
 };
 
 #[derive(Clone)]
 pub struct ResponsesProvider {
-    client: reqwest::Client,
-    url: String,
-    api_key: String,
-    headers: BTreeMap<String, String>,
+    client: Client<OpenAIConfig>,
     compat: Compat,
     base_url: String,
     name: String,
@@ -46,16 +46,9 @@ impl ResponsesProvider {
             )));
         }
         let base = provider.base_url.trim_end_matches('/');
-        let url = if base.ends_with("/responses") {
-            base.to_string()
-        } else {
-            format!("{base}/responses")
-        };
+        let client_base = base.strip_suffix("/responses").unwrap_or(base);
         Ok(Self {
-            client: reqwest::Client::new(),
-            url,
-            api_key,
-            headers: provider.resolved_headers(),
+            client: openai_client(provider, api_key, client_base)?,
             compat: provider.compat.clone(),
             base_url: provider.base_url.clone(),
             name: "provider".to_string(),
@@ -164,93 +157,25 @@ impl ResponsesProvider {
         Value::Object(body)
     }
 
-    async fn send(&self, body: &Value, stream: bool) -> Result<reqwest::Response> {
-        let mut builder = self.client.post(&self.url).json(body);
-        if !self.api_key.trim().is_empty() {
-            builder = builder.bearer_auth(self.api_key.trim());
-        }
-        for (key, value) in &self.headers {
-            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                .map_err(|e| HarnessError::Config(format!("invalid header name {key}: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
-                HarnessError::Config(format!("invalid header value for {key}: {e}"))
-            })?;
-            builder = builder.header(name, value);
-        }
-        if stream {
-            builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
-        }
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            let text: String = text.trim().chars().take(2_000).collect();
-            return Err(HarnessError::Provider(format!(
-                "{}: HTTP {status}: {text}",
-                self.name
-            )));
-        }
-        Ok(response)
-    }
-
     async fn stream_response(
         &self,
-        response: reqwest::Response,
+        stream: async_openai::types::stream::StreamResponse<Value>,
         sink: Option<UnboundedSender<StreamEvent>>,
         cancel: CancellationToken,
     ) -> Result<Completion> {
         let mut acc = ResponsesAccumulator::default();
-        let mut stream = response.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut data = String::new();
-
+        let mut stream = stream;
         loop {
-            let chunk = tokio::select! {
+            let item = tokio::select! {
                 _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                chunk = stream.next() => chunk,
+                item = stream.next() => item,
             };
-            let Some(chunk) = chunk else { break };
-            let bytes = chunk
+            let Some(item) = item else { break };
+            let event = item
                 .map_err(|e| HarnessError::Provider(format!("{}: stream error: {e}", self.name)))?;
-            buffer.extend_from_slice(&bytes);
-            while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=position).collect();
-                let line = String::from_utf8_lossy(&line);
-                let line = line.trim_end_matches(['\r', '\n']);
-                if let Some(payload) = line.strip_prefix("data:") {
-                    if !data.is_empty() {
-                        data.push('\n');
-                    }
-                    data.push_str(payload.trim_start());
-                } else if line.trim().is_empty() && !data.is_empty() {
-                    self.consume_event(&data, &mut acc, &sink)?;
-                    data.clear();
-                }
-            }
-        }
-        if !data.is_empty() {
-            self.consume_event(&data, &mut acc, &sink)?;
+            acc.apply(&event, &sink);
         }
         acc.finish(&self.name)
-    }
-
-    fn consume_event(
-        &self,
-        data: &str,
-        acc: &mut ResponsesAccumulator,
-        sink: &Option<UnboundedSender<StreamEvent>>,
-    ) -> Result<()> {
-        if data.trim() == "[DONE]" {
-            return Ok(());
-        }
-        let event: Value = serde_json::from_str(data).map_err(|e| {
-            HarnessError::Provider(format!("{}: invalid stream event: {e}", self.name))
-        })?;
-        acc.apply(&event, sink);
-        Ok(())
     }
 }
 
@@ -271,21 +196,21 @@ impl Backend for ResponsesProvider {
         cancel: CancellationToken,
     ) -> Result<Completion> {
         let body = self.body(&request);
-        let response = tokio::select! {
-            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-            response = self.send(&body, request.stream) => response,
-        }?;
-
+        let responses = self.client.responses();
         if request.stream {
-            return self.stream_response(response, sink, cancel).await;
+            let stream = tokio::select! {
+                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+                stream = responses.create_stream_byot::<Value, Value>(body) => stream,
+            }
+            .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
+            return self.stream_response(stream, sink, cancel).await;
         }
 
         let value: Value = tokio::select! {
             _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-            value = response.json() => value.map_err(|e| {
-                HarnessError::Provider(format!("{}: invalid response body: {e}", self.name))
-            })?,
-        };
+            value = responses.create_byot::<Value, Value>(body) => value,
+        }
+        .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
         let mut acc = ResponsesAccumulator::default();
         acc.absorb_response(&value);
         acc.finish(&self.name)
@@ -576,8 +501,12 @@ mod tests {
             api: "openai-responses".into(),
             ..Default::default()
         };
+        use async_openai::config::Config as _;
         let provider = ResponsesProvider::from_provider(&config, String::new()).unwrap();
-        assert_eq!(provider.url, "https://example.com/v1/responses");
+        assert_eq!(
+            provider.client.config().api_base(),
+            "https://example.com/v1"
+        );
 
         let config = ProviderConfig {
             base_url: "https://example.com/v1/responses".into(),
@@ -585,7 +514,10 @@ mod tests {
             ..Default::default()
         };
         let provider = ResponsesProvider::from_provider(&config, String::new()).unwrap();
-        assert_eq!(provider.url, "https://example.com/v1/responses");
+        assert_eq!(
+            provider.client.config().api_base(),
+            "https://example.com/v1"
+        );
     }
 
     #[test]

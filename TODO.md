@@ -923,3 +923,21 @@ rm -rf target/debug/incremental                                       # 顺手�
 - 工作区根锁死（target/debug 启动限制）是设计内行为，不要改。
 - 不要写依赖网络的实机测试。
 - 用户偏好：“少思考，多看代码”；回复用中文；改动必须构建+测试通过并如实汇报。
+
+
+## 已完成：依赖库替换（2026-11-16）
+
+1. **Responses**：启用 `async-openai` 的 `responses` feature，Responses 后端改用
+   `create_byot` / `create_stream_byot`，删除自写 HTTP 与 SSE 解析。
+2. **终端模拟**：`proc.rs` 的 `ScreenEmulator` 改用 `vt100`，保留 PTY、进程注册、
+   kill、原始字节和统计；屏幕宽度跟随 `pty_cols`。
+3. **MCP**：改用官方 `rmcp` 客户端（stdio + Streamable HTTP），删除自写 JSON-RPC、
+   pending map、SSE 和协议版本常量；保留配置解析、命名、deny、懒刷新和超时。
+4. **JSONC**：配置解析改用 `jsonc-parser`，删除手写去注释/去尾逗号逻辑。
+5. **grep**：`grep` 工具改用 `grep-regex` + `grep-searcher` 流式搜索，锚点仍由
+   hashline 生成；不再整文件读入。
+6. **LSP**：诊断、Location/LocationLink 用 `lsp-types` 解析，UTF-16 位置换算用
+   `line-index`；JSON-RPC 传输和 supervisor 保留，以维持重启/进度/安装行为。
+7. **二进制检测**：改用 `content_inspector`。
+8. **内部重复**：统一三套折行逻辑；`SKIP_DIRS` 移到 `core::paths`；MCP 复用
+   `config::interpolate_env`。

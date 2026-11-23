@@ -4,9 +4,12 @@ use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{
+    BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
-use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -78,15 +81,14 @@ impl Tool for GrepTool {
         let output_mode = args.output_mode.unwrap_or(OutputMode::Content);
         let literal = args.literal.unwrap_or(false);
         let anchors = args.anchors.unwrap_or(false) && output_mode == OutputMode::Content;
-        let pattern = if literal {
-            regex::escape(&args.pattern)
+        let mut matcher_builder = RegexMatcherBuilder::new();
+        matcher_builder.case_insensitive(args.case_insensitive.unwrap_or(false));
+        let matcher = if literal {
+            matcher_builder.build_literals(&[args.pattern.as_str()])
         } else {
-            args.pattern.clone()
-        };
-        let regex = RegexBuilder::new(&pattern)
-            .case_insensitive(args.case_insensitive.unwrap_or(false))
-            .build()
-            .map_err(|e| HarnessError::tool("E_INVALID_PATTERN", e.to_string()))?;
+            matcher_builder.build(&args.pattern)
+        }
+        .map_err(|e| HarnessError::tool("E_INVALID_PATTERN", e.to_string()))?;
 
         let root = ctx.resolver.resolve(args.path.as_deref().unwrap_or("."))?;
         let scope_root = if root.is_file() {
@@ -105,42 +107,32 @@ impl Tool for GrepTool {
         let per_file: Vec<(String, u64, Vec<FileHits>)> = files
             .par_iter()
             .filter_map(|path| {
-                let bytes = std::fs::read(path).ok()?;
-                if crate::tools::fs_tools::is_binary(&bytes) {
+                let rel = ctx.rel(path);
+                let mut sink = GrepSink {
+                    path: rel.clone(),
+                    hits: Vec::new(),
+                    pending_before: Vec::new(),
+                    binary: false,
+                };
+                let mut searcher = SearcherBuilder::new();
+                searcher
+                    .line_number(true)
+                    .before_context(context)
+                    .after_context(context)
+                    .binary_detection(BinaryDetection::quit(b'\0'))
+                    .build()
+                    .search_path(&matcher, path, &mut sink)
+                    .ok()?;
+                if sink.binary || sink.hits.is_empty() {
                     return None;
                 }
-                let text = std::str::from_utf8(&bytes).ok()?;
-                let lines: Vec<&str> = text.lines().collect();
-                let mut hits = Vec::new();
-                let mut file_anchors: Option<Vec<String>> = None;
-                for (idx, line) in lines.iter().enumerate() {
-                    if regex.is_match(line) {
-                        let anchor = if anchors {
-                            let a = file_anchors.get_or_insert_with(|| {
-                                hashline::anchors(&lines, ctx.config.edit.anchor_width)
-                            });
-                            Some(a[idx].clone())
-                        } else {
-                            None
-                        };
-                        let before = (idx.saturating_sub(context)..idx)
-                            .map(|i| (i + 1, lines[i].to_string()))
-                            .collect();
-                        let after = (idx + 1..(idx + 1 + context).min(lines.len()))
-                            .map(|i| (i + 1, lines[i].to_string()))
-                            .collect();
-                        hits.push(FileHits {
-                            path: ctx.rel(path),
-                            line: idx + 1,
-                            text: line.to_string(),
-                            before,
-                            after,
-                            anchor,
-                        });
+                if anchors {
+                    let text = std::fs::read_to_string(path).ok()?;
+                    let lines: Vec<&str> = text.lines().collect();
+                    let anchors = hashline::anchors(&lines, ctx.config.edit.anchor_width);
+                    for hit in &mut sink.hits {
+                        hit.anchor = anchors.get(hit.line - 1).cloned();
                     }
-                }
-                if hits.is_empty() {
-                    return None;
                 }
                 let mtime = std::fs::metadata(path)
                     .ok()
@@ -148,7 +140,7 @@ impl Tool for GrepTool {
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                Some((ctx.rel(path), mtime, hits))
+                Some((rel, mtime, sink.hits))
             })
             .collect();
 
@@ -202,6 +194,77 @@ impl Tool for GrepTool {
             },
         })))
     }
+}
+
+struct GrepSink {
+    path: String,
+    hits: Vec<FileHits>,
+    pending_before: Vec<(usize, String)>,
+    binary: bool,
+}
+
+impl Sink for GrepSink {
+    type Error = std::io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> std::io::Result<bool> {
+        let Some(line) = mat.line_number().map(|line| line as usize) else {
+            return Ok(false);
+        };
+        self.hits.push(FileHits {
+            path: self.path.clone(),
+            line,
+            text: line_text(mat.bytes()),
+            before: std::mem::take(&mut self.pending_before),
+            after: Vec::new(),
+            anchor: None,
+        });
+        Ok(true)
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        context: &SinkContext<'_>,
+    ) -> std::io::Result<bool> {
+        let Some(line) = context.line_number().map(|line| line as usize) else {
+            return Ok(true);
+        };
+        let text = line_text(context.bytes());
+        match context.kind() {
+            SinkContextKind::Before => self.pending_before.push((line, text)),
+            SinkContextKind::After => {
+                if let Some(hit) = self.hits.last_mut() {
+                    hit.after.push((line, text));
+                }
+            }
+            SinkContextKind::Other => {}
+        }
+        Ok(true)
+    }
+
+    fn context_break(&mut self, _searcher: &grep_searcher::Searcher) -> std::io::Result<bool> {
+        self.pending_before.clear();
+        Ok(true)
+    }
+
+    fn binary_data(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        _offset: u64,
+    ) -> std::io::Result<bool> {
+        self.binary = true;
+        Ok(false)
+    }
+}
+
+fn line_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -435,6 +498,33 @@ mod tests {
         let refs: Vec<&&FileHits> = hits.iter().collect();
         let out = content_body(&refs, 0);
         assert_eq!(out, "a.txt:1:one\n--\na.txt:5:five\n");
+    }
+
+    #[test]
+    fn searcher_collects_matches_and_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "one\ntwo alpha\nthree\nfour\nalpha five\n").unwrap();
+        let matcher = RegexMatcherBuilder::new().build("alpha").unwrap();
+        let mut sink = GrepSink {
+            path: "a.txt".into(),
+            hits: Vec::new(),
+            pending_before: Vec::new(),
+            binary: false,
+        };
+        SearcherBuilder::new()
+            .line_number(true)
+            .before_context(1)
+            .after_context(1)
+            .build()
+            .search_path(&matcher, &path, &mut sink)
+            .unwrap();
+        assert!(!sink.binary);
+        assert_eq!(sink.hits.len(), 2);
+        assert_eq!(sink.hits[0].line, 2);
+        assert_eq!(sink.hits[0].before, vec![(1, "one".to_string())]);
+        assert_eq!(sink.hits[0].after, vec![(3, "three".to_string())]);
+        assert_eq!(sink.hits[1].line, 5);
     }
 
     #[test]

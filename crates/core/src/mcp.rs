@@ -6,23 +6,26 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool as RmcpTool};
+use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{ServiceError, ServiceExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::McpConfig;
+use crate::config::{interpolate_env, McpConfig};
 use crate::error::{HarnessError, Result};
 use crate::provider::ToolDefinition;
 use crate::tools::{Tool, ToolContext, ToolOutput};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_TOOLS_PER_SERVER: usize = 512;
 
 #[derive(Debug, Clone)]
@@ -52,30 +55,12 @@ struct ServerConfig {
     timeout_ms: Option<u64>,
 }
 
-enum Kind {
-    Stdio {
-        stdin: Arc<AsyncMutex<ChildStdin>>,
-        child: Mutex<Child>,
-    },
-    Http {
-        client: reqwest::Client,
-        url: String,
-        headers: reqwest::header::HeaderMap,
-        session: AsyncMutex<Option<String>>,
-    },
-}
-
 pub struct McpServer {
     pub name: String,
-    kind: Kind,
-    alive: Arc<AtomicBool>,
-    tools: Arc<AsyncMutex<Option<Vec<McpToolDef>>>>,
-    next_id: AtomicI64,
-    pending: PendingMap,
+    client: AsyncMutex<RunningService<RoleClient, ()>>,
+    tools: AsyncMutex<Option<Vec<McpToolDef>>>,
     timeout: Duration,
 }
-
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<std::result::Result<Value, String>>>>>;
 
 impl McpServer {
     async fn connect(
@@ -85,34 +70,25 @@ impl McpServer {
     ) -> Result<Arc<Self>> {
         let timeout =
             Duration::from_millis(cfg.timeout_ms.unwrap_or(default_timeout.as_millis() as u64));
-        let mut stdio_stdout = None;
-        let kind = if let Some(command) = &cfg.command {
+        let client = if let Some(command) = &cfg.command {
             let mut cmd = Command::new(command);
             cmd.args(&cfg.args)
+                .kill_on_drop(true)
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
+                .stdout(Stdio::piped());
             for (key, value) in &cfg.env {
-                cmd.env(key, expand_env(value));
+                cmd.env(key, interpolate_env(value));
             }
-            let mut child = cmd.spawn().map_err(|e| {
-                HarnessError::tool(
-                    "E_MCP_SPAWN",
-                    format!("server `{name}` failed to start `{command}`: {e}"),
-                )
-            })?;
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| HarnessError::tool("E_MCP_SPAWN", "stdin unavailable"))?;
-            stdio_stdout = Some(
-                child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| HarnessError::tool("E_MCP_SPAWN", "stdout unavailable"))?,
-            );
-            if let Some(stderr) = child.stderr.take() {
+            let (transport, stderr) = TokioChildProcess::builder(cmd)
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    HarnessError::tool(
+                        "E_MCP_SPAWN",
+                        format!("server `{name}` failed to start `{command}`: {e}"),
+                    )
+                })?;
+            if let Some(stderr) = stderr {
                 tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
@@ -120,10 +96,12 @@ impl McpServer {
                     }
                 });
             }
-            Kind::Stdio {
-                stdin: Arc::new(AsyncMutex::new(stdin)),
-                child: Mutex::new(child),
-            }
+            tokio::time::timeout(timeout, ().serve(transport))
+                .await
+                .map_err(|_| {
+                    HarnessError::tool("E_MCP_TIMEOUT", format!("{name}: initialize timed out"))
+                })?
+                .map_err(|e| HarnessError::tool("E_MCP_CONNECT", format!("{name}: {e}")))?
         } else if let Some(url) = &cfg.url {
             let parsed = url::Url::parse(url)
                 .map_err(|e| HarnessError::tool("E_MCP_HTTP", format!("bad URL: {e}")))?;
@@ -133,24 +111,30 @@ impl McpServer {
                     "only http:// and https:// MCP endpoints are supported",
                 ));
             }
-            let mut headers = reqwest::header::HeaderMap::new();
+            let mut transport_config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+            let mut custom_headers = HashMap::new();
             for (key, value) in &cfg.headers {
-                let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                let header = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                     .map_err(|e| HarnessError::tool("E_MCP_HTTP", format!("header {key}: {e}")))?;
-                let value = reqwest::header::HeaderValue::from_str(&expand_env(value))
-                    .map_err(|e| HarnessError::tool("E_MCP_HTTP", format!("header {key}: {e}")))?;
-                headers.insert(name, value);
+                let value = interpolate_env(value);
+                if header == reqwest::header::AUTHORIZATION {
+                    let token = value.strip_prefix("Bearer ").unwrap_or(&value);
+                    transport_config = transport_config.auth_header(token.to_string());
+                } else {
+                    let value = reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
+                        HarnessError::tool("E_MCP_HTTP", format!("header {key}: {e}"))
+                    })?;
+                    custom_headers.insert(header, value);
+                }
             }
-            let client = reqwest::Client::builder()
-                .timeout(timeout + Duration::from_secs(5))
-                .build()
-                .map_err(|e| HarnessError::tool("E_MCP_HTTP", e.to_string()))?;
-            Kind::Http {
-                client,
-                url: url.clone(),
-                headers,
-                session: AsyncMutex::new(None),
-            }
+            transport_config = transport_config.custom_headers(custom_headers);
+            let transport = StreamableHttpClientTransport::from_config(transport_config);
+            tokio::time::timeout(timeout, ().serve(transport))
+                .await
+                .map_err(|_| {
+                    HarnessError::tool("E_MCP_TIMEOUT", format!("{name}: initialize timed out"))
+                })?
+                .map_err(|e| HarnessError::tool("E_MCP_CONNECT", format!("{name}: {e}")))?
         } else {
             return Err(HarnessError::tool(
                 "E_MCP_CONFIG",
@@ -158,424 +142,114 @@ impl McpServer {
             ));
         };
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let alive = Arc::new(AtomicBool::new(true));
-        let server = Arc::new(Self {
+        Ok(Arc::new(Self {
             name: name.to_string(),
-            kind,
-            alive: alive.clone(),
-            tools: Arc::new(AsyncMutex::new(None)),
-            next_id: AtomicI64::new(1),
-            pending: pending.clone(),
+            client: AsyncMutex::new(client),
+            tools: AsyncMutex::new(None),
             timeout,
-        });
-
-        if let (Kind::Stdio { stdin, .. }, Some(stdout)) = (&server.kind, stdio_stdout) {
-            let stdin = stdin.clone();
-            let pending_reader = pending.clone();
-            let alive_reader = alive.clone();
-            let tools_reader = server.tools.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout);
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                        continue;
-                    };
-                    if let Some(method) = value.get("method").and_then(Value::as_str) {
-                        if let Some(id) = value.get("id") {
-                            let result = match method {
-                                "roots/list" => json!({ "roots": [] }),
-                                "ping" => json!({}),
-                                _ => Value::Null,
-                            };
-                            let response = json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": result
-                            });
-                            let mut guard = stdin.lock().await;
-                            let body = serde_json::to_vec(&response).unwrap_or_default();
-                            let _ = guard.write_all(&body).await;
-                            let _ = guard.write_all(b"\n").await;
-                            let _ = guard.flush().await;
-                        } else if method == "notifications/tools/list_changed" {
-                            *tools_reader.lock().await = None;
-                        }
-                        continue;
-                    }
-                    if let Some(id) = value.get("id").and_then(Value::as_i64) {
-                        if let Some(tx) = pending_reader.lock().unwrap().remove(&id) {
-                            if let Some(error) = value.get("error") {
-                                let message = error
-                                    .get("message")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("MCP error")
-                                    .to_string();
-                                let _ = tx.send(Err(message));
-                            } else {
-                                let _ = tx
-                                    .send(Ok(value.get("result").cloned().unwrap_or(Value::Null)));
-                            }
-                        }
-                    }
-                }
-                alive_reader.store(false, Ordering::SeqCst);
-                let mut pending = pending_reader.lock().unwrap();
-                for (_, tx) in pending.drain() {
-                    let _ = tx.send(Err("server process exited".to_string()));
-                }
-            });
-        }
-
-        // Handshake. A failure here marks the server offline but does not
-        // prevent other servers from loading.
-        let init = server
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": { "name": "rustedharness", "version": crate::VERSION }
-                }),
-            )
-            .await
-            .map_err(|e| {
-                HarnessError::tool(
-                    "E_MCP_INIT",
-                    format!("server `{name}` initialize failed: {e}"),
-                )
-            })?;
-        let _ = init;
-        server
-            .notify("notifications/initialized", json!({}))
-            .await?;
-        Ok(server)
+        }))
     }
 
     pub fn alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
-    }
-
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        match &self.kind {
-            Kind::Stdio { stdin, .. } => {
-                if !self.alive() {
-                    return Err(HarnessError::tool(
-                        "E_MCP_UNAVAILABLE",
-                        format!("MCP server `{}` is offline", self.name),
-                    ));
-                }
-                let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-                let (tx, rx) = oneshot::channel();
-                self.pending.lock().unwrap().insert(id, tx);
-                let payload = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "method": method,
-                    "params": params
-                });
-                let body = serde_json::to_vec(&payload)?;
-                {
-                    let mut guard = stdin.lock().await;
-                    guard.write_all(&body).await?;
-                    guard.write_all(b"\n").await?;
-                    guard.flush().await?;
-                }
-                match tokio::time::timeout(self.timeout, rx).await {
-                    Ok(Ok(Ok(value))) => Ok(value),
-                    Ok(Ok(Err(message))) => Err(HarnessError::tool(
-                        "E_MCP_ERROR",
-                        format!("{}: {message}", self.name),
-                    )),
-                    Ok(Err(_)) => Err(HarnessError::tool(
-                        "E_MCP_UNAVAILABLE",
-                        format!("MCP server `{}` closed", self.name),
-                    )),
-                    Err(_) => {
-                        self.pending.lock().unwrap().remove(&id);
-                        Err(HarnessError::tool(
-                            "E_MCP_TIMEOUT",
-                            format!("{}: {method} timed out", self.name),
-                        ))
-                    }
-                }
-            }
-            Kind::Http {
-                client,
-                url,
-                headers,
-                session,
-            } => {
-                let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-                let payload = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "method": method,
-                    "params": params
-                });
-                let mut request = client
-                    .post(url)
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("Content-Type", "application/json")
-                    .header("MCP-Protocol-Version", PROTOCOL_VERSION)
-                    .headers(headers.clone())
-                    .json(&payload);
-                if let Some(session) = session.lock().await.clone() {
-                    request = request.header("Mcp-Session-Id", session);
-                }
-                let response = request
-                    .send()
-                    .await
-                    .map_err(|e| HarnessError::tool("E_MCP_HTTP", format!("{}: {e}", self.name)))?;
-                if let Some(value) = response.headers().get("mcp-session-id") {
-                    if let Ok(value) = value.to_str() {
-                        *session.lock().await = Some(value.to_string());
-                    }
-                }
-                let status = response.status();
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|e| HarnessError::tool("E_MCP_HTTP", e.to_string()))?;
-                if !status.is_success() {
-                    return Err(HarnessError::tool(
-                        "E_MCP_HTTP",
-                        format!("{}: HTTP {status}", self.name),
-                    ));
-                }
-                let value = if content_type.contains("text/event-stream") {
-                    parse_sse(&body, id)?
-                } else {
-                    serde_json::from_str::<Value>(&body)
-                        .map_err(|e| HarnessError::tool("E_MCP_HTTP", format!("bad JSON: {e}")))?
-                };
-                if let Some(error) = value.get("error") {
-                    return Err(HarnessError::tool(
-                        "E_MCP_ERROR",
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("MCP error")
-                            .to_string(),
-                    ));
-                }
-                Ok(value.get("result").cloned().unwrap_or(Value::Null))
-            }
-        }
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        match &self.kind {
-            Kind::Stdio { stdin, .. } => {
-                if !self.alive() {
-                    return Ok(());
-                }
-                let payload = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-                let body = serde_json::to_vec(&payload)?;
-                let mut guard = stdin.lock().await;
-                guard.write_all(&body).await?;
-                guard.write_all(b"\n").await?;
-                guard.flush().await?;
-                Ok(())
-            }
-            Kind::Http {
-                client,
-                url,
-                headers,
-                session,
-            } => {
-                let payload = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-                let mut request = client
-                    .post(url)
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("Content-Type", "application/json")
-                    .header("MCP-Protocol-Version", PROTOCOL_VERSION)
-                    .headers(headers.clone())
-                    .json(&payload);
-                if let Some(session) = session.lock().await.clone() {
-                    request = request.header("Mcp-Session-Id", session);
-                }
-                let _ = request.send().await;
-                Ok(())
-            }
-        }
+        self.client
+            .try_lock()
+            .map(|client| !client.is_closed())
+            .unwrap_or(true)
     }
 
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>> {
-        if let Some(cached) = self.tools.lock().await.clone() {
-            return Ok(cached);
-        }
-        if !self.alive() {
-            return Err(HarnessError::tool(
-                "E_MCP_UNAVAILABLE",
-                format!("MCP server `{}` is offline", self.name),
-            ));
-        }
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..10 {
-            let params = cursor
-                .clone()
-                .map(|c| json!({ "cursor": c }))
-                .unwrap_or_else(|| json!({}));
-            let result = self.request("tools/list", params).await?;
-            if let Some(items) = result.get("tools").and_then(Value::as_array) {
-                for item in items {
-                    let Some(name) = item.get("name").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let description = item
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let schema = item
-                        .get("inputSchema")
-                        .cloned()
-                        .filter(|v| v.is_object())
-                        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-                    tools.push(McpToolDef {
-                        name: name.to_string(),
-                        description,
-                        schema,
-                    });
-                    if tools.len() >= MAX_TOOLS_PER_SERVER {
-                        break;
-                    }
-                }
-            }
-            cursor = result
-                .get("nextCursor")
-                .and_then(Value::as_str)
-                .map(|s| s.to_string());
-            if cursor.is_none() || tools.len() >= MAX_TOOLS_PER_SERVER {
-                break;
-            }
-        }
+        let client = self.client.lock().await;
+        let tools = tokio::time::timeout(self.timeout, client.list_all_tools())
+            .await
+            .map_err(|_| {
+                HarnessError::tool(
+                    "E_MCP_TIMEOUT",
+                    format!("{}: tools/list timed out", self.name),
+                )
+            })?
+            .map_err(|e| service_error(&self.name, e))?;
+        let tools: Vec<McpToolDef> = tools
+            .into_iter()
+            .take(MAX_TOOLS_PER_SERVER)
+            .map(tool_def)
+            .collect();
         *self.tools.lock().await = Some(tools.clone());
         Ok(tools)
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpCallResult> {
-        let result = self
-            .request(
-                "tools/call",
-                json!({ "name": name, "arguments": arguments }),
-            )
-            .await?;
-        let is_error = result
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let mut texts = Vec::new();
-        if let Some(items) = result.get("content").and_then(Value::as_array) {
-            for item in items {
-                match item.get("type").and_then(Value::as_str) {
-                    Some("text") => texts.push(
-                        item.get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
-                    Some("resource") => {
-                        if let Some(text) = item.pointer("/resource/text").and_then(Value::as_str) {
-                            texts.push(text.to_string());
-                        } else {
-                            texts.push(
-                                item.pointer("/resource/uri")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("[resource]")
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    Some("image") => texts.push("[image content omitted]".to_string()),
-                    _ => texts.push(item.to_string()),
-                }
-            }
-        }
-        if texts.is_empty() {
-            texts.push(
-                result
-                    .get("structuredContent")
-                    .cloned()
-                    .unwrap_or(Value::Null)
-                    .to_string(),
-            );
-        }
+        let params = CallToolRequestParams::new(name.to_string())
+            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        let client = self.client.lock().await;
+        let result = tokio::time::timeout(self.timeout, client.call_tool(params))
+            .await
+            .map_err(|_| {
+                HarnessError::tool(
+                    "E_MCP_TIMEOUT",
+                    format!("{}: tools/call timed out", self.name),
+                )
+            })?
+            .map_err(|e| service_error(&self.name, e))?;
         Ok(McpCallResult {
-            content: texts.join("\n"),
-            is_error,
-            raw: result,
+            content: flatten_call_result(&result),
+            is_error: result.is_error.unwrap_or(false),
+            raw: serde_json::to_value(&result).unwrap_or(Value::Null),
         })
     }
 
     pub async fn shutdown(&self) {
-        if let Kind::Stdio { child, .. } = &self.kind {
-            let mut guard = child.lock().unwrap();
-            let _ = guard.start_kill();
-        }
-        self.alive.store(false, Ordering::SeqCst);
+        let mut client = self.client.lock().await;
+        let _ = client.close_with_timeout(Duration::from_secs(2)).await;
     }
 }
 
-fn parse_sse(body: &str, id: i64) -> Result<Value> {
-    let mut fallback = None;
-    for line in body.lines() {
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.trim();
-        if data.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        if value.get("id").and_then(Value::as_i64) == Some(id) {
-            return Ok(value);
-        }
-        if fallback.is_none() {
-            fallback = Some(value);
-        }
-    }
-    fallback.ok_or_else(|| HarnessError::tool("E_MCP_HTTP", "empty SSE response"))
+fn service_error(name: &str, error: ServiceError) -> HarnessError {
+    let code = if matches!(error, ServiceError::TransportClosed) {
+        "E_MCP_UNAVAILABLE"
+    } else {
+        "E_MCP_ERROR"
+    };
+    HarnessError::tool(code, format!("{name}: {error}"))
 }
 
-fn expand_env(value: &str) -> String {
-    let mut out = String::new();
-    let mut chars = value.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '$' && chars.peek() == Some(&'{') {
-            chars.next();
-            let mut name = String::new();
-            for c in chars.by_ref() {
-                if c == '}' {
-                    break;
+fn tool_def(tool: RmcpTool) -> McpToolDef {
+    McpToolDef {
+        name: tool.name.to_string(),
+        description: tool.description.map(|d| d.to_string()).unwrap_or_default(),
+        schema: Value::Object((*tool.input_schema).clone()),
+    }
+}
+
+fn flatten_call_result(result: &CallToolResult) -> String {
+    let mut texts = Vec::new();
+    for item in &result.content {
+        match item {
+            ContentBlock::Text(text) => texts.push(text.text.clone()),
+            ContentBlock::Image(_) => texts.push("[image content omitted]".to_string()),
+            ContentBlock::Audio(_) => texts.push("[audio content omitted]".to_string()),
+            ContentBlock::Resource(resource) => match &resource.resource {
+                rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+                    texts.push(text.clone())
                 }
-                name.push(c);
-            }
-            out.push_str(&std::env::var(&name).unwrap_or_default());
-        } else {
-            out.push(c);
+                rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => {
+                    texts.push(uri.clone())
+                }
+                _ => texts.push("[resource omitted]".to_string()),
+            },
+            ContentBlock::ResourceLink(link) => texts.push(link.uri.clone()),
+            _ => texts.push(serde_json::to_string(item).unwrap_or_default()),
         }
     }
-    out
+    if texts.is_empty() {
+        texts.push(
+            result
+                .structured_content
+                .as_ref()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| Value::Null.to_string()),
+        );
+    }
+    texts.join("\n")
 }
 
 pub(crate) fn exposed_name(server: &str, tool: &str) -> String {
@@ -814,33 +488,20 @@ mod tests {
     #[test]
     fn env_expansion() {
         std::env::set_var("RH_MCP_TEST", "value");
-        assert_eq!(expand_env("a-${RH_MCP_TEST}-b"), "a-value-b");
-        assert_eq!(expand_env("${RH_MCP_MISSING}"), "");
-    }
-
-    #[test]
-    fn sse_response_matches_request_id() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n";
-        let value = parse_sse(body, 2).unwrap();
-        assert_eq!(value["id"], 2);
+        assert_eq!(interpolate_env("a-${RH_MCP_TEST}-b"), "a-value-b");
+        assert_eq!(interpolate_env("${RH_MCP_MISSING}"), "");
     }
 
     #[test]
     fn call_result_content_is_flattened() {
-        let result = json!({
+        let result: CallToolResult = serde_json::from_value(json!({
             "content": [
                 { "type": "text", "text": "first" },
                 { "type": "text", "text": "second" }
             ],
             "isError": false
-        });
-        let text = result["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|i| i.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(text, "first\nsecond");
+        }))
+        .unwrap();
+        assert_eq!(flatten_call_result(&result), "first\nsecond");
     }
 }

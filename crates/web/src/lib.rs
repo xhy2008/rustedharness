@@ -28,7 +28,7 @@ use tracing::info;
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::Config;
 use rustedharness_core::error::HarnessError;
-use rustedharness_core::paths::WorkspacePathResolver;
+use rustedharness_core::paths::{WorkspacePathResolver, SKIP_DIRS};
 use rustedharness_core::protocol::HarnessCommand;
 use rustedharness_core::session::SessionStore;
 use rustedharness_core::VERSION;
@@ -36,7 +36,6 @@ use rustedharness_core::VERSION;
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const TREE_LIMIT: usize = 500;
 const FILE_LIMIT: usize = 256 * 1024;
-const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", "build"];
 
 struct AppState {
     config: Config,

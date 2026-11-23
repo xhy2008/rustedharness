@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -677,16 +678,15 @@ impl Config {
 
     fn read_json(path: &Path) -> Result<Self> {
         let raw = Self::read_text(path)?;
-        serde_json::from_str::<Config>(&strip_trailing_commas(&strip_json_comments(&raw)))
+        parse_jsonc::<Config>(&raw)
             .map_err(|e| HarnessError::Config(format!("invalid config {}: {e}", path.display())))
     }
 
     fn read_models(path: &Path) -> Result<ModelsFile> {
         let raw = Self::read_text(path)?;
-        serde_json::from_str::<ModelsFile>(&strip_trailing_commas(&strip_json_comments(&raw)))
-            .map_err(|e| {
-                HarnessError::Config(format!("invalid models file {}: {e}", path.display()))
-            })
+        parse_jsonc::<ModelsFile>(&raw).map_err(|e| {
+            HarnessError::Config(format!("invalid models file {}: {e}", path.display()))
+        })
     }
 
     /// Write `config.json` and `models.json` if they do not exist. Existing
@@ -787,9 +787,7 @@ impl Config {
         let path_on_disk = dir.join("config.json");
         let mut root: Value = std::fs::read_to_string(&path_on_disk)
             .ok()
-            .and_then(|raw| {
-                serde_json::from_str(&strip_trailing_commas(&strip_json_comments(&raw))).ok()
-            })
+            .and_then(|raw| parse_jsonc::<Value>(&raw).ok())
             .filter(Value::is_object)
             .unwrap_or_else(|| Value::Object(Default::default()));
         let mut slot = &mut root;
@@ -985,97 +983,23 @@ impl Config {
     }
 }
 
-/// Pi `models.json` allows `//` and `/* ... */` comments outside strings.
-/// Replace them with whitespace so strict serde_json can parse the result.
-pub fn strip_json_comments(raw: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
-    let mut out = String::with_capacity(raw.len());
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escape = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            out.push(c);
-            if escape {
-                escape = false;
-            } else if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            out.push('\n');
-            continue;
-        }
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i = (i + 2).min(chars.len());
-            out.push(' ');
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// Pi and JSON5-style config files allow trailing commas; strict serde_json
-/// does not. Remove commas that precede a closing bracket outside of strings.
-pub fn strip_trailing_commas(raw: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
-    let mut out = String::with_capacity(raw.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '"' {
-            out.push(c);
-            i += 1;
-            let mut escape = false;
-            while i < chars.len() {
-                let sc = chars[i];
-                out.push(sc);
-                i += 1;
-                if escape {
-                    escape = false;
-                } else if sc == '\\' {
-                    escape = true;
-                } else if sc == '"' {
-                    break;
-                }
-            }
-            continue;
-        }
-        if c == ',' {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() {
-                j += 1;
-            }
-            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
-                i += 1;
-                continue;
-            }
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
+/// Parse JSON with comments and trailing commas, as accepted by Pi config files.
+fn parse_jsonc<T: DeserializeOwned>(
+    raw: &str,
+) -> std::result::Result<T, jsonc_parser::errors::ParseError> {
+    let options = jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
+    };
+    jsonc_parser::parse_to_serde_value(raw, &options)
 }
 
 /// Expand `~` in paths supplied through `--config` or environment variables.
@@ -1108,7 +1032,7 @@ pub fn resolve_config_value(raw: &str) -> String {
     interpolate_env(raw)
 }
 
-fn interpolate_env(raw: &str) -> String {
+pub(crate) fn interpolate_env(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.char_indices().peekable();
     while let Some((_, ch)) = chars.next() {
@@ -1213,16 +1137,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_trailing_commas_keeps_strings_intact() {
-        let raw = r#"{ "a": [1, 2,], "b": "x,y}, ]" }"#;
-        let cleaned = strip_trailing_commas(raw);
-        assert_eq!(cleaned, r#"{ "a": [1, 2], "b": "x,y}, ]" }"#);
-        let value: serde_json::Value = serde_json::from_str(&cleaned).expect("parses");
-        assert_eq!(value["a"].as_array().unwrap().len(), 2);
-        assert_eq!(value["b"].as_str().unwrap(), "x,y}, ]");
-    }
-
-    #[test]
     fn default_config_has_no_model_until_configured() {
         let mut cfg: Config =
             serde_json::from_str(&default_config_json()).expect("template parses");
@@ -1257,19 +1171,21 @@ mod tests {
           // provider comment
           "providers": {
             "p": {
-              "baseUrl": "https://example.com/v1",
+              "baseUrl": "https://example.com/v1/a//b",
               /* block comment */
               "models": [{ "id": "m", }],
             },
           },
         }"#;
-        let file: ModelsFile =
-            serde_json::from_str(&strip_trailing_commas(&strip_json_comments(raw))).unwrap();
+        let file: ModelsFile = parse_jsonc(raw).unwrap();
         assert_eq!(file.providers["p"].models[0].id, "m");
-        assert_eq!(
-            strip_json_comments(r#"{ "url": "https://example.com/a//b" }"#),
-            r#"{ "url": "https://example.com/a//b" }"#
-        );
+        assert_eq!(file.providers["p"].base_url, "https://example.com/v1/a//b");
+    }
+
+    #[test]
+    fn jsonc_error_keeps_the_original_line_number() {
+        let err = parse_jsonc::<Value>("{\n  // comment\n  \"a\":\n}").unwrap_err();
+        assert!(err.to_string().contains("line 4"), "{err}");
     }
 
     #[test]

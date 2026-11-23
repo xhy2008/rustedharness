@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use line_index::{LineIndex, WideEncoding, WideLineCol};
+use lsp_types::{Diagnostic, DiagnosticSeverity, Location, LocationLink, NumberOrString};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -2005,19 +2007,25 @@ impl LspHub {
 
     fn prepare_position(&self, path: &Path, line: u32, column: u32) -> Result<Value> {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        let line0 = line.saturating_sub(1);
-        let col0 = column.saturating_sub(1);
-        let prefix = text
-            .lines()
-            .nth(line0 as usize)
-            .map(|l| {
-                l.chars()
-                    .take(col0 as usize)
-                    .map(|c| c.len_utf16())
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
-        Ok(json!({ "line": line0, "character": prefix }))
+        let index = LineIndex::new(&text);
+        let line = line.saturating_sub(1);
+        let column = column.saturating_sub(1);
+        let line_text = text.lines().nth(line as usize).unwrap_or("");
+        let byte_column = line_text
+            .char_indices()
+            .nth(column as usize)
+            .map(|(offset, _)| offset)
+            .unwrap_or(line_text.len());
+        let wide = index
+            .to_wide(
+                WideEncoding::Utf16,
+                line_index::LineCol {
+                    line,
+                    col: byte_column as u32,
+                },
+            )
+            .unwrap_or(WideLineCol { line, col: column });
+        Ok(json!({ "line": wide.line, "character": wide.col }))
     }
 }
 
@@ -2647,18 +2655,20 @@ fn uri_from_path(path: &Path) -> String {
 // Result formatting
 // ---------------------------------------------------------------------------
 
-fn location_parts(value: &Value) -> Option<(&str, u64, u64)> {
-    let uri = value
-        .get("uri")
-        .or_else(|| value.get("targetUri"))?
-        .as_str()?;
-    let range = value
-        .get("range")
-        .or_else(|| value.get("targetSelectionRange"))
-        .or_else(|| value.get("targetRange"))?;
-    let line = range.pointer("/start/line")?.as_u64()?;
-    let col = range.pointer("/start/character")?.as_u64()?;
-    Some((uri, line, col))
+fn location_parts(value: &Value) -> Option<(String, u64, u64)> {
+    if let Ok(location) = serde_json::from_value::<Location>(value.clone()) {
+        return Some((
+            location.uri.as_str().to_string(),
+            u64::from(location.range.start.line),
+            u64::from(location.range.start.character),
+        ));
+    }
+    let location = serde_json::from_value::<LocationLink>(value.clone()).ok()?;
+    Some((
+        location.target_uri.as_str().to_string(),
+        u64::from(location.target_selection_range.start.line),
+        u64::from(location.target_selection_range.start.character),
+    ))
 }
 
 fn relative_display(cwd: &Path, uri: &str) -> String {
@@ -2685,27 +2695,10 @@ fn format_locations(value: &Value, cwd: &Path, limit: usize) -> String {
     }
     let mut lines = Vec::new();
     for item in items.iter().take(limit) {
-        let (uri, line, col) = if let Some(parts) = location_parts(item) {
-            parts
-        } else if let (Some(uri), Some(range)) = (
-            item.get("targetUri").and_then(Value::as_str),
-            item.get("targetSelectionRange"),
-        ) {
-            (
-                uri,
-                range
-                    .pointer("/start/line")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                range
-                    .pointer("/start/character")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            )
-        } else {
+        let Some((uri, line, col)) = location_parts(item) else {
             continue;
         };
-        let path = relative_display(cwd, uri);
+        let path = relative_display(cwd, &uri);
         let preview = item
             .get("name")
             .and_then(Value::as_str)
@@ -2834,7 +2827,7 @@ fn format_workspace_symbols(value: &Value, cwd: &Path, limit: usize) -> String {
             if let Some((uri, line, col)) = location_parts(location) {
                 out.push(format!(
                     "{}:{}:{} {} {}",
-                    relative_display(cwd, uri),
+                    relative_display(cwd, &uri),
                     line + 1,
                     col + 1,
                     kind,
@@ -2940,33 +2933,28 @@ fn is_transient_lsp_error(err: &HarnessError) -> bool {
 }
 
 fn format_diagnostic(diag: &Value) -> String {
-    let range = diag.get("range");
-    let line = range
-        .and_then(|r| r.pointer("/start/line"))
-        .and_then(Value::as_u64)
-        .map(|l| l + 1)
-        .unwrap_or(0);
-    let col = range
-        .and_then(|r| r.pointer("/start/character"))
-        .and_then(Value::as_u64)
-        .map(|c| c + 1)
-        .unwrap_or(0);
-    let severity = match diag.get("severity").and_then(Value::as_u64) {
-        Some(1) => "error",
-        Some(2) => "warning",
-        Some(3) => "info",
-        Some(4) => "hint",
+    let Ok(diag) = serde_json::from_value::<Diagnostic>(diag.clone()) else {
+        return "[invalid diagnostic]".to_string();
+    };
+    let severity = match diag.severity {
+        Some(DiagnosticSeverity::WARNING) => "warning",
+        Some(DiagnosticSeverity::INFORMATION) => "info",
+        Some(DiagnosticSeverity::HINT) => "hint",
         _ => "error",
     };
-    let message = diag.get("message").and_then(Value::as_str).unwrap_or("");
     let code = diag
-        .get("code")
-        .map(|c| match c {
-            Value::String(s) => format!("[{s}] "),
-            other => format!("[{other}] "),
+        .code
+        .map(|code| match code {
+            NumberOrString::Number(code) => format!("[{code}] "),
+            NumberOrString::String(code) => format!("[{code}] "),
         })
         .unwrap_or_default();
-    format!("{severity} at {line}:{col}: {code}{message}")
+    format!(
+        "{severity} at {}:{}: {code}{}",
+        diag.range.start.line + 1,
+        diag.range.start.character + 1,
+        diag.message
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3140,28 +3128,18 @@ fn apply_workspace_edit(value: &Value, cwd: &Path) -> Result<Vec<AppliedFile>> {
 
 /// Convert an LSP UTF-16 (line, character) position to a byte offset.
 fn offset_for_position(text: &str, line: usize, character: usize) -> usize {
-    let mut current_line = 0;
-    let mut line_start = 0;
-    for (idx, ch) in text.char_indices() {
-        if current_line == line {
-            break;
-        }
-        if ch == '\n' {
-            current_line += 1;
-            line_start = idx + 1;
-        }
-    }
-    if current_line < line {
-        return text.len();
-    }
-    let mut utf16 = 0;
-    for (idx, ch) in text[line_start..].char_indices() {
-        if utf16 >= character || ch == '\n' {
-            return line_start + idx;
-        }
-        utf16 += ch.len_utf16();
-    }
-    text.len()
+    let index = LineIndex::new(text);
+    let line_col = index.to_utf8(
+        WideEncoding::Utf16,
+        WideLineCol {
+            line: line as u32,
+            col: character as u32,
+        },
+    );
+    line_col
+        .and_then(|line_col| index.offset(line_col))
+        .map(|offset| u32::from(offset) as usize)
+        .unwrap_or(text.len())
 }
 
 // ---------------------------------------------------------------------------

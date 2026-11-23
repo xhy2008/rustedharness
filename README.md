@@ -166,8 +166,9 @@ shown as unavailable instead of being guessed.
 - `openai-completions` (default) — `POST {baseUrl}/chat/completions`.
 - `openai-responses` — `POST {baseUrl}/responses`. The Responses backend maps
   the agent transcript to `input` items and `instructions`, flattens function
-  tools, streams `response.output_text.*`, `response.reasoning_*` and
-  `response.function_call_arguments.*` events, and reads `input_tokens` /
+  tools, and uses `async-openai` in BYOT mode to stream
+  `response.output_text.*`, `response.reasoning_*` and
+  `response.function_call_arguments.*` events, reading `input_tokens` /
   `output_tokens` from `usage`. Reasoning items are not replayed between turns,
   so stateless use does not require server-side response storage.
 
@@ -325,7 +326,7 @@ appended to the tool result.
 | `write` | Create/overwrite a file, or append when it already exists. |
 | `edit` | Hashline anchored edits, optionally several per call. |
 | `glob` | Workspace file discovery (respects `.gitignore`). |
-| `grep` | Regex content search with glob filters. |
+| `grep` | Regex content search with glob filters, backed by `grep-searcher`. |
 | `bash` / `powershell` | Run commands in a pty; background mode returns a pid. |
 | `await` | Wait for a background process and return output/exit status. |
 | `todo` | Replace, merge, or inspect the task list. |
@@ -488,8 +489,9 @@ native window at it, so the desktop and browser experiences stay identical.
 ## MCP
 
 MCP servers are loaded from `mcp.json` in the workspace, then the config
-directory, unless `mcp.configPath` points elsewhere. Stdio and HTTP+SSE
-transports are supported. Exposed tools are namespaced as `mcp__server__tool`;
+directory, unless `mcp.configPath` points elsewhere. Stdio and Streamable HTTP
+transports are supported through the official `rmcp` client. Exposed tools are
+namespaced as `mcp__server__tool`;
 `mcp.deny` removes specific tools or whole servers. MCP tool calls are subject
 to the same workspace anchoring and timeouts as built-in tools.
 

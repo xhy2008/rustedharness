@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::num::NonZeroU16;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,32 +73,16 @@ pub struct CaptureStats {
     pub truncated: bool,
 }
 
-/// Terminal emulator that converges cursor movement/progress redraws into the
-/// final text of each screen line. It is intentionally small: SGR/OSC are
-/// discarded, while carriage returns, erase-line, cursor up/down and clear
-/// screen are honoured.
-#[derive(Debug)]
+/// Terminal screen backed by `vt100`. It keeps the last `MAX_SCREEN_LINES`
+/// rows as one tall screen, so scrollback text stays available without a
+/// separate history buffer. The PTY width matches the child's `COLUMNS`, which
+/// makes progress bars and wrapped output behave like a real terminal.
 pub struct ScreenEmulator {
-    lines: Vec<Vec<char>>,
-    row: usize,
-    col: usize,
-    pending_utf8: Vec<u8>,
-    state: EmuState,
-    csi_buf: String,
-    saved_cursor: (usize, usize),
+    parser: vt100::Parser,
     pub ansi_sequences: u64,
     pub inline_rewrites: u64,
     pub activity_events: u64,
     total_bytes: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmuState {
-    Ground,
-    Esc,
-    Csi,
-    Osc,
-    OscEsc,
 }
 
 impl Default for ScreenEmulator {
@@ -108,14 +93,14 @@ impl Default for ScreenEmulator {
 
 impl ScreenEmulator {
     pub fn new() -> Self {
+        Self::with_cols(80)
+    }
+
+    pub fn with_cols(cols: u16) -> Self {
+        let rows = NonZeroU16::new(MAX_SCREEN_LINES as u16).expect("MAX_SCREEN_LINES > 0");
+        let cols = NonZeroU16::new(cols.max(1)).expect("cols > 0");
         Self {
-            lines: vec![Vec::new()],
-            row: 0,
-            col: 0,
-            pending_utf8: Vec::new(),
-            state: EmuState::Ground,
-            csi_buf: String::new(),
-            saved_cursor: (0, 0),
+            parser: vt100::Parser::new(rows, cols, 0),
             ansi_sequences: 0,
             inline_rewrites: 0,
             activity_events: 0,
@@ -125,271 +110,22 @@ impl ScreenEmulator {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.total_bytes += bytes.len();
-        for &byte in bytes {
-            if byte < 0x80 {
-                if !self.pending_utf8.is_empty() {
-                    let lossy = String::from_utf8_lossy(&std::mem::take(&mut self.pending_utf8))
-                        .to_string();
-                    for ch in lossy.chars() {
-                        self.byte(ch);
-                    }
-                }
-                self.byte(byte as char);
-            } else {
-                self.pending_utf8.push(byte);
-                if let Ok(text) = std::str::from_utf8(&self.pending_utf8) {
-                    if let Some(ch) = text.chars().next() {
-                        self.pending_utf8.clear();
-                        // Route through the state machine so multibyte text
-                        // inside OSC/CSI sequences (e.g. an elevated PowerShell
-                        // window title "管理员: C:\...") is swallowed, not
-                        // printed. Calling ground_char directly leaked it.
-                        self.byte(ch);
-                    }
-                } else if self.pending_utf8.len() > 4 {
-                    let lossy = String::from_utf8_lossy(&std::mem::take(&mut self.pending_utf8))
-                        .to_string();
-                    for ch in lossy.chars() {
-                        self.byte(ch);
-                    }
-                }
-            }
-        }
-    }
-
-    fn byte(&mut self, ch: char) {
-        match self.state {
-            EmuState::Ground => self.ground(ch),
-            EmuState::Esc => {
-                self.ansi_sequences += 1;
-                match ch {
-                    '[' => {
-                        self.state = EmuState::Csi;
-                        self.csi_buf.clear();
-                    }
-                    ']' => {
-                        self.state = EmuState::Osc;
-                    }
-                    '7' => self.saved_cursor = (self.row, self.col),
-                    '8' => {
-                        self.row = self.saved_cursor.0;
-                        self.col = self.saved_cursor.1;
-                    }
-                    _ => self.state = EmuState::Ground,
-                }
-            }
-            EmuState::Csi => {
-                if ('\u{40}'..='\u{7e}').contains(&ch) {
-                    let private = self.csi_buf.starts_with('?');
-                    let params: Vec<u16> = self
-                        .csi_buf
-                        .trim_start_matches('?')
-                        .split(';')
-                        .filter_map(|p| p.parse().ok())
-                        .collect();
-                    self.csi(&params, private, ch);
-                    self.state = EmuState::Ground;
-                    self.csi_buf.clear();
-                } else {
-                    self.csi_buf.push(ch);
-                }
-            }
-            EmuState::Osc => {
-                if ch == '\x07' {
-                    self.state = EmuState::Ground;
-                } else if ch == '\x1b' {
-                    self.state = EmuState::OscEsc;
-                }
-            }
-            EmuState::OscEsc => {
-                self.state = EmuState::Ground;
-            }
-        }
-    }
-
-    fn ground(&mut self, ch: char) {
-        match ch {
-            '\r' => {
-                self.col = 0;
-                self.inline_rewrites += 1;
-                self.activity_events += 1;
-            }
-            '\n' => {
-                self.newline();
-                self.col = 0;
-                self.activity_events += 1;
-            }
-            '\x08' => self.col = self.col.saturating_sub(1),
-            '\t' => {
-                let next = (self.col / 8 + 1) * 8;
-                while self.col < next {
-                    self.put(' ');
-                }
-            }
-            '\x07' => {}
-            '\x1b' => self.state = EmuState::Esc,
-            c if c.is_control() => {}
-            c => self.ground_char(c),
-        }
-    }
-
-    fn ground_char(&mut self, ch: char) {
-        match ch {
-            '\r' | '\n' | '\t' | '\x08' | '\x07' | '\x1b' => self.ground(ch),
-            c if !c.is_control() => self.put(c),
-            _ => {}
-        }
-    }
-
-    fn put(&mut self, ch: char) {
-        self.ensure_row();
-        let line = &mut self.lines[self.row];
-        while line.len() < self.col {
-            line.push(' ');
-        }
-        if self.col < line.len() {
-            line[self.col] = ch;
-        } else {
-            line.push(ch);
-        }
-        self.col += 1;
-        self.activity_events += 1;
-    }
-
-    fn newline(&mut self) {
-        self.row += 1;
-        self.ensure_row();
-        if self.row >= MAX_SCREEN_LINES {
-            let drain = self.row + 1 - MAX_SCREEN_LINES;
-            self.lines.drain(0..drain);
-            self.row -= drain;
-        }
-    }
-
-    fn ensure_row(&mut self) {
-        while self.lines.len() <= self.row {
-            self.lines.push(Vec::new());
-        }
-    }
-
-    fn csi(&mut self, params: &[u16], private: bool, final_byte: char) {
-        if private {
-            // Cursor visibility, alt-screen and bracketed paste are irrelevant
-            // to the final text capture.
-            return;
-        }
-        let n = |i: usize, default: usize| {
-            params
-                .get(i)
-                .copied()
-                .map(|v| v as usize)
-                .filter(|v| *v > 0)
-                .unwrap_or(default)
-        };
-        match final_byte {
-            'K' => {
-                self.ensure_row();
-                let mode = params.first().copied().unwrap_or(0);
-                let line = &mut self.lines[self.row];
-                match mode {
-                    0 => {
-                        if self.col < line.len() {
-                            line.truncate(self.col);
-                        }
-                    }
-                    1 => {
-                        let limit = self.col.min(line.len());
-                        for ch in line.iter_mut().take(limit) {
-                            *ch = ' ';
-                        }
-                    }
-                    2 => line.clear(),
-                    _ => {}
-                }
-                self.activity_events += 1;
-            }
-            'J' => {
-                let mode = params.first().copied().unwrap_or(0);
-                match mode {
-                    0 => {
-                        self.ensure_row();
-                        self.lines[self.row].truncate(self.col);
-                        self.lines.truncate(self.row + 1);
-                    }
-                    2 => {
-                        self.lines = vec![Vec::new()];
-                        self.row = 0;
-                        self.col = 0;
-                    }
-                    _ => {}
-                }
-                self.activity_events += 1;
-            }
-            'A' => {
-                self.row = self.row.saturating_sub(n(0, 1));
-                self.activity_events += 1;
-            }
-            'B' => {
-                self.row += n(0, 1);
-                self.ensure_row();
-                self.activity_events += 1;
-            }
-            'C' => self.col += n(0, 1),
-            'D' => self.col = self.col.saturating_sub(n(0, 1)),
-            'E' => {
-                self.row += n(0, 1);
-                self.col = 0;
-                self.ensure_row();
-            }
-            'F' => {
-                self.row = self.row.saturating_sub(n(0, 1));
-                self.col = 0;
-            }
-            'G' => self.col = n(0, 1) - 1,
-            'H' | 'f' => {
-                self.row = n(0, 1) - 1;
-                self.col = n(1, 1) - 1;
-                self.ensure_row();
-                self.activity_events += 1;
-            }
-            'P' => {
-                let count = n(0, 1);
-                self.ensure_row();
-                let line = &mut self.lines[self.row];
-                let start = self.col.min(line.len());
-                let end = (start + count).min(line.len());
-                line.drain(start..end);
-            }
-            'X' => {
-                let count = n(0, 1);
-                self.ensure_row();
-                let line = &mut self.lines[self.row];
-                for ch in line.iter_mut().skip(self.col).take(count) {
-                    *ch = ' ';
-                }
-            }
-            'm' | 'h' | 'l' | 'r' | 's' | 'u' | 'q' | 't' | 'n' | 'c' => {}
-            _ => {}
-        }
+        self.ansi_sequences += bytes.iter().filter(|byte| **byte == 0x1b).count() as u64;
+        self.inline_rewrites += bytes.iter().filter(|byte| **byte == b'\r').count() as u64;
+        self.activity_events += bytes.len() as u64;
+        self.parser.process(bytes);
     }
 
     pub fn snapshot(&mut self) -> String {
-        if !self.pending_utf8.is_empty() {
-            let lossy =
-                String::from_utf8_lossy(&std::mem::take(&mut self.pending_utf8)).to_string();
-            for ch in lossy.chars() {
-                self.ground_char(ch);
-            }
-        }
-        let mut out: Vec<String> = self
-            .lines
-            .iter()
-            .map(|line| line.iter().collect::<String>().trim_end().to_string())
-            .collect();
-        while out.last().is_some_and(|l| l.is_empty()) {
-            out.pop();
-        }
-        out.join("\n")
+        self.parser
+            .screen()
+            .contents()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
     }
 
     pub fn tail(&mut self, n: usize) -> String {
@@ -403,32 +139,39 @@ impl ScreenEmulator {
     /// Lines are taken from the bottom so progress-heavy commands show their
     /// most recent state without resending the whole scrollback.
     pub fn tail_bytes(&self, max_bytes: usize) -> String {
-        let mut chunks: Vec<String> = Vec::new();
+        let text = self
+            .parser
+            .screen()
+            .contents()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut chunks: Vec<&str> = Vec::new();
         let mut used = 0usize;
         let mut started = false;
-        for line in self.lines.iter().rev() {
-            let text = line.iter().collect::<String>().trim_end().to_string();
+        for line in text.lines().rev() {
             if !started {
-                if text.is_empty() {
+                if line.is_empty() {
                     continue;
                 }
                 started = true;
             }
             let sep = usize::from(!chunks.is_empty());
-            let extra = sep + text.len();
+            let extra = sep + line.len();
             if used + extra > max_bytes {
                 let remaining = max_bytes.saturating_sub(used + sep);
                 if remaining == 0 {
                     break;
                 }
-                let mut cut = text.len() - remaining;
-                while cut < text.len() && !text.is_char_boundary(cut) {
+                let mut cut = line.len() - remaining;
+                while cut < line.len() && !line.is_char_boundary(cut) {
                     cut += 1;
                 }
-                chunks.push(text[cut..].to_string());
+                chunks.push(&line[cut..]);
                 break;
             }
-            chunks.push(text);
+            chunks.push(line);
             used += extra;
         }
         chunks.reverse();
@@ -436,9 +179,11 @@ impl ScreenEmulator {
     }
 
     pub fn stats(&self) -> CaptureStats {
+        let snapshot = self.parser.screen().contents();
         CaptureStats {
             raw_bytes: self.total_bytes,
-            screen_lines: self.lines.len(),
+            screen_bytes: snapshot.len(),
+            screen_lines: snapshot.lines().count(),
             ansi_sequences: self.ansi_sequences,
             inline_rewrites: self.inline_rewrites,
             activity_events: self.activity_events,
@@ -730,7 +475,7 @@ impl ProcRegistry {
         // tty (otherwise they may wait for input).
         cmd.env("CI", "1");
 
-        let screen = Arc::new(Mutex::new(ScreenEmulator::new()));
+        let screen = Arc::new(Mutex::new(ScreenEmulator::with_cols(self.config.pty_cols)));
         let raw = Arc::new(Mutex::new(Vec::new()));
         let status = Arc::new(Mutex::new(ProcStatus::Running));
         let exit_code = Arc::new(Mutex::new(None));

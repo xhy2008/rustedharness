@@ -192,64 +192,7 @@ fn render(markdown: &str, width: Option<usize>) -> Vec<Line<'static>> {
 
 /// Wrap styled spans to `width`, breaking at spaces when there is one and
 /// between characters otherwise (CJK has no spaces, and a long URL must still
-/// fit).
+/// fit). The implementation is shared with the transcript's tool/output flow.
 fn wrap_words(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(8);
-    let mut chars: Vec<(char, Style)> = Vec::new();
-    for span in spans {
-        chars.extend(span.content.chars().map(|c| (c, span.style)));
-    }
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut current: Vec<(char, Style)> = Vec::new();
-    let mut used = 0usize;
-    let mut last_space: Option<usize> = None;
-
-    for (c, style) in chars {
-        let char_width = Span::raw(c.to_string()).width();
-        if used + char_width > width && !current.is_empty() {
-            match last_space {
-                // Break after the last space instead of in the middle of a
-                // word; the space itself is dropped.
-                Some(index) => {
-                    let rest = current.split_off(index + 1);
-                    let line = std::mem::replace(&mut current, rest);
-                    lines.push(render_chars(line));
-                    used = current
-                        .iter()
-                        .map(|(c, _)| Span::raw(c.to_string()).width())
-                        .sum();
-                    last_space = current.iter().rposition(|(c, _)| *c == ' ');
-                }
-                None => {
-                    lines.push(render_chars(std::mem::take(&mut current)));
-                    used = 0;
-                }
-            }
-        }
-        if c == ' ' {
-            last_space = Some(current.len());
-        }
-        current.push((c, style));
-        used += char_width;
-    }
-    if !current.is_empty() {
-        lines.push(render_chars(current));
-    }
-    if lines.is_empty() {
-        lines.push(Line::default());
-    }
-    lines
-}
-
-/// Re-merge per-character styles into spans.
-fn render_chars(chars: Vec<(char, Style)>) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (c, style) in chars {
-        match spans.last_mut() {
-            Some(span) if span.style == style => span.content.to_mut().push(c),
-            _ => spans.push(Span::styled(c.to_string(), style)),
-        }
-    }
-    Line::from(spans)
+    crate::render::wrap_spans(spans, width, ("", Style::default()), ("", Style::default()))
 }

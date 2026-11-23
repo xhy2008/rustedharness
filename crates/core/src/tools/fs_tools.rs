@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::Path;
 
 use async_trait::async_trait;
+use content_inspector::{inspect, ContentType};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -220,7 +221,7 @@ fn list_dir(ctx: &ToolContext, path: &Path, limit: Option<usize>) -> Result<Tool
 }
 
 pub fn is_binary(bytes: &[u8]) -> bool {
-    bytes.contains(&0) || std::str::from_utf8(bytes).is_err()
+    inspect(bytes) == ContentType::BINARY
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -354,10 +355,9 @@ mod tests {
     #[test]
     fn binary_detection() {
         assert!(is_binary(b"abc\0def"));
-        let mut late_invalid = vec![b'a'; 9_000];
-        late_invalid.push(0xff);
-        assert!(is_binary(&late_invalid));
+        assert!(is_binary(&[0, 1, 2, 3]));
         assert!(!is_binary("hello 世界".as_bytes()));
+        assert!(!is_binary(b"caf\xe9")); // Latin-1 text is not binary.
         assert!(!is_binary(b""));
     }
 }
