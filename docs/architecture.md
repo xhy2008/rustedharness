@@ -53,15 +53,14 @@ milliseconds: the request is abandoned once that long passes without a single
 byte, which is the only case where the harness gives up on a stalled provider.
 
 Cache accounting lives in `cache.rs`. Providers report cached prompt tokens in
-`usage`, but not why an entry was lost, so `CacheWatch` compares each turn with
-the previous one: prompt tokens that were already cached but billed again are a
-miss. Misses above ~20k tokens are announced once, named after the only
-observable cause (an idle gap past the model's cache lifetime, or a model
-switch); compaction resets the comparison because it rewrites the prompt on
-purpose. The lifetime itself comes from `promptCache` in `models.json`, with a
-built-in 5-minute default for Anthropic-style models; providers with no known
-lifetime are never reported. `agent.showCacheMissNotices` (default on) silences
-the notices.
+`usage`, but not why an entry was lost, and none of them publishes a cache
+lifetime, so `CacheWatch` compares each turn with the previous one: prompt
+tokens that were already cached but billed again are a miss. Misses above ~20k
+tokens are announced once, with the facts that were observed — the missed
+tokens, the gap since the previous request, and whether the model changed.
+Nothing claims a lifetime, because there is no API to ask for one. Compaction
+resets the comparison because it rewrites the prompt on purpose.
+`agent.showCacheMissNotices` (default on) silences the notices.
 
 The loop holds no borrows across `.await`: shared state is behind `Arc` and
 snapshotted or cloned at await boundaries. Each tool call receives a

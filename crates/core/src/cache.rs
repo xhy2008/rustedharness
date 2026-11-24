@@ -2,9 +2,10 @@
 //! previous turn had already cached.
 //!
 //! Providers report cached prompt tokens in `usage`; nothing reports *why* a
-//! cache entry was lost. The two observable causes are an idle gap longer than
-//! the model's cache lifetime and a model switch, so a miss is labelled with
-//! whichever of those the timing shows, and otherwise left unlabelled.
+//! cache entry was lost, and no provider advertises how long it keeps one. A
+//! miss therefore carries only what was observed — the gap since the previous
+//! request and whether the model changed — and callers must not turn those into
+//! a claim about a cache lifetime.
 
 use std::time::{Duration, Instant};
 
@@ -36,7 +37,9 @@ pub struct CacheMiss {
     /// Prompt tokens that were in the previous prompt but were not read from
     /// cache, so they were billed again.
     pub missed_tokens: u64,
-    /// Time since the previous request, which last refreshed the cache.
+    /// Observed gap since the previous request, which last refreshed the cache.
+    /// Providers do not publish a cache lifetime, so this is information, not a
+    /// verdict.
     pub idle: Duration,
     /// Whether the model changed between the two requests.
     pub model_changed: bool,

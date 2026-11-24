@@ -932,8 +932,9 @@ impl Agent {
     }
 
     /// Tell the user when a turn re-billed prompt tokens the previous turn had
-    /// already cached. Only observable causes are named: an idle gap past the
-    /// model's cache lifetime, or a model switch.
+    /// already cached. Providers do not report why an entry was dropped, so the
+    /// notice states what was observed — the missed tokens, a model switch and
+    /// the gap since the previous request — and never claims a cache lifetime.
     fn note_cache_miss(&self, usage: &crate::provider::Usage) {
         let Some(miss) = self.cache_watch.lock().unwrap().observe(
             &self.agent_model.read().unwrap().clone(),
@@ -945,25 +946,21 @@ impl Agent {
         if !self.show_cache_miss_notices.load(Ordering::Relaxed) || !miss.is_significant() {
             return;
         }
-        let ttl = self
-            .config
-            .model_cache_ttl_secs(&self.agent_model.read().unwrap().clone());
-        let cause = if miss.model_changed {
-            "after a model switch".to_string()
-        } else if ttl.is_some_and(|secs| miss.idle.as_secs() >= secs) {
-            format!("after {}m idle", miss.idle.as_secs() / 60)
+        let label = if miss.model_changed {
+            "cache miss after a model switch"
+        } else {
+            "cache miss"
+        };
+        let idle = if !miss.model_changed && miss.idle.as_secs() >= 60 {
+            format!(" after {}m idle", miss.idle.as_secs() / 60)
         } else {
             String::new()
         };
         let _ = self.events.send(HarnessEvent::Notice {
             level: "cache".to_string(),
             message: format!(
-                "cache miss{cause}: {:.1}k tokens re-billed{}",
-                miss.missed_tokens as f64 / 1000.0,
-                match ttl {
-                    Some(secs) => format!(" (model cache lifetime about {}m)", secs / 60),
-                    None => String::new(),
-                }
+                "{label}: {:.1}k tokens re-billed{idle}",
+                miss.missed_tokens as f64 / 1000.0
             ),
         });
     }

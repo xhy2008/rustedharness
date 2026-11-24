@@ -221,9 +221,6 @@ pub struct App {
     pub painted_overlay: Option<u8>,
     pub quit: bool,
     pub pending: Option<PendingSession>,
-    /// When the last assistant turn finished. The gap to the next user message
-    /// decides whether the provider's prompt cache is still alive.
-    pub last_reply_at: Option<std::time::Instant>,
 }
 
 /// Animated dots, all three frames the same width so the status line never
@@ -343,7 +340,6 @@ impl App {
             painted_overlay: None,
             quit: false,
             pending: None,
-            last_reply_at: None,
         };
         app.populate(app.agent.snapshot());
         app
@@ -584,27 +580,6 @@ impl App {
             format!("lsp {}{state}{more}", head.language),
             head.state == "warming",
         ))
-    }
-
-    /// Say so when the pause since the last reply is longer than the model's
-    /// prompt-cache lifetime: the next request re-bills the whole prompt. Only
-    /// models with a known lifetime are reported, so nothing is guessed.
-    fn warn_about_expired_cache(&mut self) {
-        let Some(idle) = self.last_reply_at.map(|at| at.elapsed()) else {
-            return;
-        };
-        let Some(ttl) = self.config.model_cache_ttl_secs(&self.agent_model) else {
-            return;
-        };
-        if idle.as_secs() < ttl {
-            return;
-        }
-        self.notice(format!(
-            "prompt cache expired: {}m idle > ~{}m lifetime for {} — the next turn re-bills the whole prompt",
-            idle.as_secs() / 60,
-            ttl / 60,
-            rustedharness_core::config::model_display(&self.agent_model)
-        ));
     }
 
     pub fn notice(&mut self, text: impl Into<String>) {
@@ -894,7 +869,6 @@ impl App {
             }
             HarnessEvent::TurnComplete { stop_reason, .. } => {
                 self.busy = false;
-                self.last_reply_at = Some(std::time::Instant::now());
                 self.last_stop = Some(stop_reason);
                 self.streaming = None;
                 self.end_reasoning();
@@ -1134,7 +1108,6 @@ impl App {
                     });
                     return Ok(());
                 }
-                self.warn_about_expired_cache();
                 self.push(EntryKind::User, "", text.clone());
                 self.busy = true;
                 self.follow = true;
@@ -2794,44 +2767,6 @@ mod tests {
             ));
         }
         assert!(app.settings_description().contains("off, low, medium"));
-    }
-
-    /// The gap between the last reply and the next message decides whether the
-    /// provider still holds the prompt cache; only models with a known
-    /// lifetime are reported.
-    #[test]
-    fn an_expired_prompt_cache_is_announced_before_sending() {
-        let mut app = crate::ui_tests::demo_app();
-        app.agent_model = "claude-sonnet-4.5".into();
-        app.entries.clear();
-        app.last_reply_at = None;
-        app.warn_about_expired_cache();
-        assert!(
-            app.entries.is_empty(),
-            "no reply yet, nothing to warn about"
-        );
-
-        // Inside the five-minute window: stay quiet.
-        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        app.warn_about_expired_cache();
-        assert!(app.entries.is_empty());
-
-        // Past it: say so once, with the observed gap.
-        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
-        app.warn_about_expired_cache();
-        assert_eq!(app.entries.len(), 1);
-        let body = &app.entries[0].body;
-        assert!(body.contains("prompt cache expired"), "{body}");
-        assert!(body.contains("10m idle"), "{body}");
-        assert!(body.contains("5m lifetime"), "{body}");
-
-        // A model without a known lifetime never claims anything.
-        let mut app = crate::ui_tests::demo_app();
-        app.entries.clear();
-        app.agent_model = "mystery/model".into();
-        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(9_000));
-        app.warn_about_expired_cache();
-        assert!(app.entries.is_empty());
     }
 
     /// The root settings page toggles cache-miss notices and persists it.

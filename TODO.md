@@ -974,15 +974,12 @@ rm -rf target/debug/incremental                                       # 顺手�
    `Backend::complete` 现在接收调用方的 token（之前它自己造一个永不取消的 token，
    压缩摘要和 `read(URL)` 抽取一旦卡住就只能杀进程）。设成非 0 时变成空闲预算：
    连续 N 毫秒没有一个字节就放弃并报 `provider sent no data for Ns`。
-2. **缓存寿命**：解析 pi 的 `promptCache { short, long }`（秒），`Config::model_cache_ttl_secs`
-   优先用它，其次按已知家族自动识别（Anthropic/`claude*` 默认 300 秒）；未知 provider
-   返回 `None`，绝不猜。
-3. **发送前提醒**：TUI 在 `TurnComplete` 记录 `last_reply_at`，下次发送前比较空闲时长与
-   该模型的寿命，超出就提示"上一次回复已经 N 分钟，缓存大概过期，下一轮会重新计费整个
-   prompt"。
-4. **cache miss notice**（`core/cache.rs`）：provider 只报告 `cached_tokens`，不报告为什么
+2. **不猜缓存寿命**：provider 的 API 不返回缓存有效时间，所以不做"发送前提醒"、
+   不解析 `promptCache`、也没有任何按型号硬编码的 TTL。宁可少一个功能，也不编一个
+   查不到的结论。
+3. **cache miss notice**（`core/cache.rs`）：provider 只报告 `cached_tokens`，不报告为什么
    丢缓存，所以 `CacheWatch` 用相邻两轮比较——上一轮已在 prompt 里、这一轮却按普通
    input 计费的 token 就是 miss。噪声地板 1024 token，≥20k 才提示；标签只写可观测的
-   原因（空闲超过寿命 / 换了模型）。压缩会重写 prompt，所以压缩后 `reset()`，下一轮
-   不算 miss。`agent.showCacheMissNotices`（默认开）可关，`/settings` 根页第一项就是它。
-5. **不做 cache warming**：缺 `cost`/`promptCache` 价格数据就算不出收益，盲目重发只会烧钱。
+   观察到的事实（重计费 token 数、距上一次请求的空闲时长、是否换了模型），不声称
+   任何寿命。压缩会重写 prompt，所以压缩后 `reset()`，下一轮不算 miss。`agent.showCacheMissNotices`（默认开）可关，`/settings` 根页第一项就是它。
+4. **不做 cache warming**：缺 `cost` 价格数据就算不出收益，盲目重发只会烧钱。
