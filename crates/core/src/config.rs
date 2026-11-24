@@ -48,6 +48,8 @@ pub struct Config {
     #[serde(default)]
     pub web: WebConfig,
     #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
     pub session: SessionConfig,
     #[serde(default)]
     pub mcp: McpConfig,
@@ -680,6 +682,143 @@ impl Default for WebConfig {
             host: "127.0.0.1".to_string(),
             port: 8787,
             auth_token: None,
+        }
+    }
+}
+
+/// Which web search backend `web_search` uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchBackend {
+    Brave,
+    Tavily,
+    #[serde(rename = "searxng")]
+    SearXng,
+    /// Keyless HTML search; an optional key switches to the official API.
+    #[default]
+    Bing,
+    #[serde(rename = "duckduckgo")]
+    DuckDuckGo,
+}
+
+impl SearchBackend {
+    /// Order shown in `/settings`, keyless options included.
+    pub const ALL: [Self; 5] = [
+        Self::Brave,
+        Self::Tavily,
+        Self::SearXng,
+        Self::Bing,
+        Self::DuckDuckGo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Brave => "brave",
+            Self::Tavily => "tavily",
+            Self::SearXng => "searxng",
+            Self::Bing => "bing",
+            Self::DuckDuckGo => "duckduckgo",
+        }
+    }
+
+    /// Whether the backend cannot answer without a credential.
+    pub fn needs_key(self) -> bool {
+        matches!(self, Self::Brave | Self::Tavily)
+    }
+
+    /// Whether the backend has an optional key that upgrades it (Bing serves
+    /// the same results through the official API when a key is set).
+    pub fn key_optional(self) -> bool {
+        matches!(self, Self::Bing)
+    }
+
+    /// Whether the backend needs an instance URL instead of a key.
+    pub fn needs_url(self) -> bool {
+        matches!(self, Self::SearXng)
+    }
+
+    /// Config key that stores this backend's credential.
+    pub fn credential_key(self) -> &'static str {
+        match self {
+            Self::Brave => "braveApiKey",
+            Self::Tavily => "tavilyApiKey",
+            Self::SearXng => "searxngUrl",
+            Self::Bing => "bingApiKey",
+            Self::DuckDuckGo => "",
+        }
+    }
+}
+
+/// `web_search` settings: one backend plus whatever credential it needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SearchConfig {
+    pub backend: SearchBackend,
+    /// Brave Search subscription token; `BRAVE_API_KEY` is used when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brave_api_key: Option<String>,
+    /// Tavily API key; `TAVILY_API_KEY` is used when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tavily_api_key: Option<String>,
+    /// Bing v7 subscription key. Unset means the website is scraped instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bing_api_key: Option<String>,
+    /// Base URL of a SearXNG instance, e.g. `https://searx.example.com`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub searxng_url: Option<String>,
+}
+
+impl SearchConfig {
+    /// Stored credential, or the environment variable that has always worked
+    /// when the config file says nothing.
+    pub fn credential(&self, backend: SearchBackend) -> Option<String> {
+        let stored = match backend {
+            SearchBackend::Brave => self.brave_api_key.clone(),
+            SearchBackend::Tavily => self.tavily_api_key.clone(),
+            SearchBackend::Bing => self.bing_api_key.clone(),
+            SearchBackend::SearXng => self.searxng_url.clone(),
+            SearchBackend::DuckDuckGo => None,
+        };
+        if let Some(value) = stored.filter(|value| !value.trim().is_empty()) {
+            return Some(value.trim().to_string());
+        }
+        let env = match backend {
+            SearchBackend::Brave => "BRAVE_API_KEY",
+            SearchBackend::Tavily => "TAVILY_API_KEY",
+            SearchBackend::SearXng => "SEARXNG_URL",
+            SearchBackend::Bing | SearchBackend::DuckDuckGo => return None,
+        };
+        std::env::var(env)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Where a credential came from, for the settings panel.
+    pub fn credential_source(&self, backend: SearchBackend) -> &'static str {
+        let stored = match backend {
+            SearchBackend::Brave => self.brave_api_key.is_some(),
+            SearchBackend::Tavily => self.tavily_api_key.is_some(),
+            SearchBackend::Bing => self.bing_api_key.is_some(),
+            SearchBackend::SearXng => self.searxng_url.is_some(),
+            SearchBackend::DuckDuckGo => false,
+        };
+        if stored {
+            "config"
+        } else if self.credential(backend).is_some() {
+            "environment"
+        } else {
+            ""
+        }
+    }
+
+    /// Whether the selected backend can answer as configured.
+    pub fn ready(&self) -> bool {
+        match self.backend {
+            backend if backend.needs_key() || backend.needs_url() => {
+                self.credential(backend).is_some()
+            }
+            _ => true,
         }
     }
 }

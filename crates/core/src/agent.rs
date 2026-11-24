@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cache::CacheWatch;
 use crate::compact::{Compactor, SummaryMode, SummaryRequest};
 use crate::config::{
-    model_display, CompactionSettings, Config, NewModel, StripContent, ThinkingLevel,
+    model_display, CompactionSettings, Config, NewModel, SearchBackend, StripContent, ThinkingLevel,
 };
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
@@ -1013,6 +1013,39 @@ impl Agent {
 
     pub fn show_cache_miss_notices(&self) -> bool {
         self.show_cache_miss_notices.load(Ordering::Relaxed)
+    }
+
+    /// Which backend `web_search` uses right now.
+    pub fn search_backend(&self) -> SearchBackend {
+        self.config().search.backend
+    }
+
+    /// Store the chosen search backend and reload, so the tool picks it up on
+    /// its next call.
+    pub fn set_search_backend(&self, backend: SearchBackend) -> Result<()> {
+        self.config()
+            .save_setting(&["search", "backend"], json!(backend))?;
+        self.reload_config()
+    }
+
+    /// Store (or clear, with an empty value) the credential a backend needs:
+    /// an API key, or the instance URL for SearXNG.
+    pub fn set_search_credential(&self, backend: SearchBackend, value: &str) -> Result<()> {
+        let key = backend.credential_key();
+        if key.is_empty() {
+            return Err(HarnessError::Config(format!(
+                "{} needs no credential",
+                backend.label()
+            )));
+        }
+        let value = value.trim();
+        let stored = if value.is_empty() {
+            Value::Null
+        } else {
+            json!(value)
+        };
+        self.config().save_setting(&["search", key], stored)?;
+        self.reload_config()
     }
 
     pub fn rate_limit_retries(&self) -> u32 {

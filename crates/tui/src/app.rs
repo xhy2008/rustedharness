@@ -19,7 +19,7 @@ use crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use rustedharness_core::agent::Agent;
-use rustedharness_core::config::{Config, NewModel};
+use rustedharness_core::config::{Config, NewModel, SearchBackend, SearchConfig};
 use rustedharness_core::discovery::CatalogModel;
 use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
@@ -116,6 +116,14 @@ pub enum Overlay {
     Lsp,
     /// Full-screen "add model" flow opened from the model picker.
     AddModel(AddModelState),
+    /// Typing the credential of the selected search backend.
+    WebSearchKey {
+        backend: SearchBackend,
+        text: String,
+        cursor: usize,
+        /// Row to select again once the editor closes.
+        row: usize,
+    },
 }
 
 /// Which half of the add-model flow is on screen.
@@ -188,6 +196,7 @@ pub enum ModelTarget {
 pub enum SettingsPage {
     Root,
     Compaction,
+    WebSearch,
 }
 
 /// A download in flight: the server, how far it got and what of.
@@ -243,6 +252,8 @@ pub struct App {
     pub compact_model: String,
     pub compact_is_separate: bool,
     pub compaction: rustedharness_core::config::CompactionSettings,
+    /// Mirror of `[search]` from the live agent config.
+    pub search: SearchConfig,
     /// The download in flight, shown in the status line.
     pub download: Option<DownloadProgress>,
     pub input_tokens: u64,
@@ -378,6 +389,7 @@ impl App {
             compaction: rustedharness_core::config::CompactionSettings::from(
                 &rustedharness_core::config::AgentConfig::default(),
             ),
+            search: SearchConfig::default(),
             download: None,
             input_tokens: 0,
             output_tokens: 0,
@@ -450,6 +462,7 @@ impl App {
         self.compact_model = snapshot.compact_model;
         self.compact_is_separate = self.agent.compact_is_separate();
         self.compaction = self.agent.compaction_settings();
+        self.search = self.agent.config().search.clone();
         self.context_tokens = snapshot.context_tokens;
         self.context_limit = snapshot.context_limit;
         // A resumed session shows the numbers the provider last reported, so
@@ -1280,6 +1293,9 @@ impl App {
         if matches!(self.overlay, Overlay::AddModel(_)) {
             return self.add_model_key(key, op_tx).await;
         }
+        if matches!(self.overlay, Overlay::WebSearchKey { .. }) {
+            return self.web_search_key(key);
+        }
         match key.code {
             KeyCode::Esc => {
                 // From a file back to the list it was opened from; the next
@@ -1392,6 +1408,7 @@ impl App {
             Overlay::Processes => Some(9),
             Overlay::Lsp => Some(10),
             Overlay::AddModel(_) => Some(11),
+            Overlay::WebSearchKey { .. } => Some(12),
         }
     }
 
@@ -1622,6 +1639,12 @@ impl App {
                                     sel: 0,
                                 }
                             }
+                            "search" => {
+                                self.overlay = Overlay::Settings {
+                                    page: SettingsPage::WebSearch,
+                                    sel: 0,
+                                }
+                            }
                             "retry" => {
                                 let next = next_retry_preset(self.agent.rate_limit_retries());
                                 match self.agent.set_rate_limit_retries(next) {
@@ -1640,6 +1663,42 @@ impl App {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                    SettingsPage::WebSearch => {
+                        let Some(item) = self.settings_items_for(page).get(sel).cloned() else {
+                            return Ok(());
+                        };
+                        if item.disabled {
+                            return Ok(());
+                        }
+                        if let Some(label) = item.value.strip_prefix("backend:") {
+                            let Some(backend) = SearchBackend::ALL
+                                .into_iter()
+                                .find(|backend| backend.label() == label)
+                            else {
+                                return Ok(());
+                            };
+                            match self.agent.set_search_backend(backend) {
+                                Ok(()) => {
+                                    self.search = self.agent.config().search.clone();
+                                    self.notice(format!("web search: {}", backend.label()));
+                                    // The credential row depends on the backend.
+                                    self.overlay = Overlay::Settings {
+                                        page: SettingsPage::WebSearch,
+                                        sel: 0,
+                                    };
+                                }
+                                Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                            }
+                        } else if item.value == "credential" {
+                            let backend = self.search.backend;
+                            self.overlay = Overlay::WebSearchKey {
+                                backend,
+                                text: String::new(),
+                                cursor: 0,
+                                row: sel,
+                            };
                         }
                     }
                     SettingsPage::Compaction => {
@@ -1868,6 +1927,54 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(OpResult::Catalog { url, result });
         });
+    }
+
+    /// Keys for the search-credential editor: a text field with save/cancel.
+    fn web_search_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Overlay::WebSearchKey {
+            backend,
+            text,
+            cursor,
+            row,
+        } = &mut self.overlay
+        else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Esc => {
+                let row = *row;
+                self.overlay = Overlay::Settings {
+                    page: SettingsPage::WebSearch,
+                    sel: row,
+                };
+            }
+            KeyCode::Enter => {
+                let backend = *backend;
+                let row = *row;
+                let value = text.trim().to_string();
+                match self.agent.set_search_credential(backend, &value) {
+                    Ok(()) => {
+                        self.search = self.agent.config().search.clone();
+                        self.overlay = Overlay::Settings {
+                            page: SettingsPage::WebSearch,
+                            sel: row,
+                        };
+                        self.notice(if value.is_empty() {
+                            format!("{} credential cleared", backend.label())
+                        } else if backend.needs_url() {
+                            format!("{} instance: {value}", backend.label())
+                        } else {
+                            format!("{} api key saved", backend.label())
+                        });
+                    }
+                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                }
+            }
+            KeyCode::Char(c) => insert_at(text, cursor, c),
+            KeyCode::Backspace => delete_before(text, cursor),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Fold a `GET /models` answer into the wizard. A url mismatch means the
@@ -2127,6 +2234,20 @@ impl App {
                     disabled: false,
                 },
                 PickerItem {
+                    label: "web search".to_string(),
+                    detail: format!(
+                        "{} ({})",
+                        self.search.backend.label(),
+                        if self.search.ready() {
+                            "ready"
+                        } else {
+                            "needs a credential"
+                        }
+                    ),
+                    value: "search".to_string(),
+                    disabled: false,
+                },
+                PickerItem {
                     label: "compaction".to_string(),
                     detail: format!(
                         "model {} | {} thinking | {:.0}% threshold | keep {}",
@@ -2144,6 +2265,64 @@ impl App {
                     disabled: false,
                 },
             ],
+            SettingsPage::WebSearch => {
+                let search = &self.search;
+                let mut items: Vec<PickerItem> = SearchBackend::ALL
+                    .iter()
+                    .map(|backend| {
+                        let credential = match search.credential_source(*backend) {
+                            "config" => "credential saved",
+                            "environment" => "credential from the environment",
+                            "" if backend.needs_key() => "needs an api key",
+                            "" if backend.needs_url() => "needs an instance url",
+                            "" => "no account needed",
+                            other => other,
+                        };
+                        PickerItem {
+                            label: backend.label().to_string(),
+                            detail: if *backend == search.backend {
+                                format!("selected | {credential}")
+                            } else {
+                                credential.to_string()
+                            },
+                            value: format!("backend:{}", backend.label()),
+                            disabled: false,
+                        }
+                    })
+                    .collect();
+                // Only the selected backend's credential is editable: typing a
+                // key for a backend that is not in use would be a mystery.
+                let backend = search.backend;
+                if backend.credential_key().is_empty() {
+                    items.push(PickerItem {
+                        label: "credential".to_string(),
+                        detail: format!("{} needs no credential", backend.label()),
+                        value: "credential".to_string(),
+                        disabled: true,
+                    });
+                } else {
+                    let label = if backend.needs_url() {
+                        "instance url"
+                    } else {
+                        "api key"
+                    };
+                    let state = match search.credential_source(backend) {
+                        "config" => "saved".to_string(),
+                        "environment" => "from the environment".to_string(),
+                        _ if backend.key_optional() => {
+                            "not set - the public website is scraped instead".to_string()
+                        }
+                        _ => "not set - press enter to type it".to_string(),
+                    };
+                    items.push(PickerItem {
+                        label: label.to_string(),
+                        detail: state,
+                        value: "credential".to_string(),
+                        disabled: false,
+                    });
+                }
+                items
+            }
             SettingsPage::Compaction => vec![
                 PickerItem {
                     label: "model".to_string(),
@@ -2244,6 +2423,7 @@ impl App {
             return match value.as_str() {
                 "notices" => "Cache miss notices appear in the transcript when a turn re-bills prompt tokens the previous turn had already cached. Only significant misses are reported, and only when the provider reports cached tokens at all.".to_string(),
                 "retry" => "How many times a turn retries after a 429/rate-limit response before giving up. Enter cycles 5, 15, 30, 50 and 100. The wait between attempts is fixed at 3 seconds; quota or credit exhaustion is never retried.".to_string(),
+                "search" => "Which backend the web_search tool uses. Enter opens the web search page: brave, tavily, SearXNG, bing or duckduckgo. The page asks for an api key (or a SearXNG instance url) for the backend that needs one.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
             };
         }
@@ -2256,6 +2436,13 @@ impl App {
             .get(sel)
             .map(|item| item.value.clone())
             .unwrap_or_default();
+        if page == SettingsPage::WebSearch {
+            return match value.as_str() {
+                "credential" => "The credential this backend needs. Enter opens a text box; an empty value clears the stored one. Keys are kept in config.json in plain text, and BRAVE_API_KEY/TAVILY_API_KEY/SEARXNG_URL are used when the file says nothing.".to_string(),
+                other if other.starts_with("backend:") => "Enter selects this backend for every web_search call. brave and tavily need an api key, searxng needs the base url of an instance with the JSON API enabled, bing scrapes the public results page until an api key upgrades it to the official API, and duckduckgo needs no account.".to_string(),
+                _ => String::new(),
+            };
+        }
         match value.as_str() {
             "model" => "None reuses the main model. The summary request then sends the same system prompt, tools and old messages as the live turn, so the provider can serve the whole prefix from prompt cache. A separate model starts with a cold cache; it is useful only when its lower price outweighs the uncached input.".to_string(),
             "thinking" => "Reasoning effort requested for the summary request, for both the main model and a separate compaction model. Enter cycles off, low, medium, high, xhigh and max. Off sends no effort field, so the provider default applies. The value is only sent when the compaction model declares reasoning and its provider supports reasoning effort.".to_string(),
@@ -2983,10 +3170,10 @@ mod tests {
         runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
         assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
 
-        // The root page lists notices, 429 retries, then compaction.
+        // The root page lists notices, 429 retries, web search, then compaction.
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 2,
+            sel: 3,
         };
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(matches!(
@@ -3126,6 +3313,117 @@ mod tests {
         );
         assert!(app.settings_items()[1].detail.contains("3s apart"));
         assert!(app.settings_description().contains("fixed at 3 seconds"));
+    }
+
+    /// The web-search page selects a backend and offers a credential box only
+    /// for the backend that is in use.
+    #[test]
+    fn settings_pick_the_web_search_backend_and_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::ui_tests::demo_app_in(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: 2,
+        };
+        assert_eq!(app.settings_items()[2].value, "search");
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert!(matches!(
+            app.overlay,
+            Overlay::Settings {
+                page: SettingsPage::WebSearch,
+                sel: 0
+            }
+        ));
+
+        let labels: Vec<String> = app
+            .settings_items()
+            .iter()
+            .map(|item| item.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "brave",
+                "tavily",
+                "searxng",
+                "bing",
+                "duckduckgo",
+                "api key"
+            ],
+            "the five backends, then the bing key box (the default backend)"
+        );
+
+        // Brave is the first row: selecting it switches the backend and asks
+        // for a key.
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.search.backend, SearchBackend::Brave);
+        assert_eq!(app.agent.search_backend(), SearchBackend::Brave);
+        let items = app.settings_items();
+        assert_eq!(items[5].label, "api key");
+        assert!(items[5].detail.contains("not set"), "{}", items[5].detail);
+
+        // Enter on the credential row opens the text box; the key is stored and
+        // the page comes back.
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::WebSearch,
+            sel: 5,
+        };
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert!(matches!(
+            app.overlay,
+            Overlay::WebSearchKey {
+                backend: SearchBackend::Brave,
+                ..
+            }
+        ));
+        for c in "brave-key".chars() {
+            app.web_search_key(KeyEvent::from(KeyCode::Char(c)))
+                .unwrap();
+        }
+        app.web_search_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert!(matches!(
+            app.overlay,
+            Overlay::Settings {
+                page: SettingsPage::WebSearch,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.search.credential(SearchBackend::Brave).as_deref(),
+            Some("brave-key")
+        );
+        assert!(app.search.ready());
+        assert!(app.settings_items()[5].detail.contains("saved"));
+
+        // DuckDuckGo needs nothing, so the credential row is inert.
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::WebSearch,
+            sel: 4,
+        };
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.search.backend, SearchBackend::DuckDuckGo);
+        assert!(app.settings_items()[5].disabled);
+        assert!(app.settings_items()[5].detail.contains("no credential"));
+
+        // SearXNG asks for an instance url rather than a key.
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::WebSearch,
+            sel: 2,
+        };
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.search.backend, SearchBackend::SearXng);
+        assert_eq!(app.settings_items()[5].label, "instance url");
+        assert!(!app.search.ready(), "no instance url yet");
+
+        // Everything landed in config.json.
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["search"]["backend"], "searxng");
+        assert_eq!(saved["search"]["braveApiKey"], "brave-key");
     }
 
     /// The root settings page toggles cache-miss notices and persists it.

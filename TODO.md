@@ -1005,3 +1005,20 @@ rm -rf target/debug/incremental                                       # 顺手�
 5. **热重载**（`Agent::add_model`）：写完后重新加载 `config.json`/`models.json`，重建
    provider router 并替换 `ToolContext` 的 config/backend，所以向导选中的模型在当前
    会话里立刻可用，不用重启。为此 `Agent.config`/`backend` 改为 `RwLock<Arc<_>>`。
+
+## 已完成：`/settings` 的 WebSearch 后端选择（2026-11-16）
+
+1. **配置**：新增 `[search]` 段（`SearchConfig`）：`backend` = brave / tavily / searxng /
+   bing / duckduckgo（默认 bing，无需账号），加上 `braveApiKey` / `tavilyApiKey` /
+   `bingApiKey` / `searxngUrl`。配置文件留空时仍回退到 `BRAVE_API_KEY` / `TAVILY_API_KEY` /
+   `SEARXNG_URL`，纯环境变量配置不受影响。
+2. **删除旧的 fallback 链**：不再有 `auto` 链和 `web_search` 的 `provider` 参数——后端由设置
+   决定，一个后端失败就如实报错（说明缺哪个凭据），而不是偷偷换下一个引擎。
+3. **实现**：brave / tavily / searxng 走各自 JSON API；bing 有 key 走官方 v7 API，没有 key
+   抓 `b_algo` 结果页；duckduckgo 抓 `html.duckduckgo.com` 并解开 `/l/?uddg=` 重定向。
+   每个 payload 的解析都是纯函数（`parse_*`），单测不需要网络。
+4. **TUI**：`/settings` 根页第三行 `web search` → 子页列出五个后端（Enter 选中，写回
+   `config.json` 并 `reload_config`，`web_search` 下一次调用即生效）+ 一行凭据开关。
+   只有当前后端的凭据可编辑：brave/tavily 要 API key，searxng 要实例 URL，bing 的 key 可选，
+   duckduckgo 显示"不需要凭据"且置灰。Enter 打开输入框（`Overlay::WebSearchKey`），key 打码
+   显示，Enter 保存 / 空值清除 / Esc 取消，保存后回到原来的行。

@@ -230,6 +230,11 @@ and model selection loads unchanged.
     "httpIdleTimeoutMs": 0,
     "showCacheMissNotices": true
   },
+  "search": {
+    "backend": "bing",
+    "braveApiKey": "$BRAVE_API_KEY",
+    "searxngUrl": "https://searx.example.com"
+  },
   "edit": {
     "anchorWidth": 2,
     "enableReplaceText": true,
@@ -357,7 +362,7 @@ appended to the tool result.
 | `bash` / `powershell` | Run commands in a pty; background mode returns a pid. |
 | `await` | Wait for a background process and return output/exit status. |
 | `todo` | Replace, merge, or inspect the task list. |
-| `web_search` | Brave → Tavily → DuckDuckGo fallback chain. |
+| `web_search` | Web search through the backend chosen in `/settings`. |
 | `lsp` | Ten semantic operations backed by a real language server, with L0 fallback. |
 | `mcp__server__tool` | Tools exposed by configured MCP servers. |
 
@@ -365,8 +370,22 @@ Remote `read` results are wrapped as untrusted external content so fetched pages
 cannot impersonate instructions. HTML is parsed once with `html5ever`; the
 boilerplate subtrees are pruned from that DOM and the same tree is handed to
 `html2md`, so scripts, styles and `<head>` metadata never reach the Markdown and
-every named entity is decoded. `web_search` uses `BRAVE_API_KEY` and
-`TAVILY_API_KEY` when present and always falls back to keyless DuckDuckGo.
+every named entity is decoded.
+
+`web_search` uses one backend at a time, chosen in `/settings` → **web search**:
+
+| Backend | Credential | Notes |
+| --- | --- | --- |
+| `brave` | API key (required) | Brave Search API |
+| `tavily` | API key (required) | Tavily `/search` |
+| `searxng` | Instance URL (required) | Any instance with the JSON API enabled |
+| `bing` | API key (optional) | Without a key the public results page is scraped; with one the official v7 API answers |
+| `duckduckgo` | none | HTML endpoint; it rate-limits scraping |
+
+Keys live in `config.json` under `[search]` (`braveApiKey`, `tavilyApiKey`,
+`bingApiKey`, `searxngUrl`). A file that says nothing falls back to
+`BRAVE_API_KEY`, `TAVILY_API_KEY` and `SEARXNG_URL`, so an environment-only
+setup keeps working. `bing` is the default because it needs no account.
 
 ### Anchored editing (Hashline)
 

@@ -12,7 +12,7 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Config;
+use crate::config::{Config, SearchBackend, SearchConfig};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Backend, ChatMessage, ChatRequest};
 
@@ -208,65 +208,45 @@ impl WebTools {
         Ok(result)
     }
 
-    /// Brave → Tavily → Bing fallback. `provider="auto"` prefers a provider
-    /// with a key and keeps Bing as the keyless last resort (reachable from
-    /// regions where other engines are blocked).
+    /// Run the search backend selected in `[search]`. Credentials come from
+    /// `SearchConfig` (which falls back to the documented environment
+    /// variables); a backend that cannot answer says so instead of silently
+    /// returning nothing.
     pub async fn search(
         &self,
         query: &str,
         num: usize,
         allowed: &[String],
         blocked: &[String],
-        provider: &str,
+        search: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
-        let mut chain: Vec<&str> = Vec::new();
-        let mut notes: Vec<String> = Vec::new();
-        match provider {
-            "auto" | "" => {
-                if std::env::var("BRAVE_API_KEY").is_ok() {
-                    chain.push("brave");
-                } else {
-                    notes.push("brave: skipped (BRAVE_API_KEY not set)".to_string());
-                }
-                if std::env::var("TAVILY_API_KEY").is_ok() {
-                    chain.push("tavily");
-                } else {
-                    notes.push("tavily: skipped (TAVILY_API_KEY not set)".to_string());
-                }
-                // Keyless fallback.
-                chain.push("bing");
+        let backend = search.backend;
+        let hits = match backend {
+            SearchBackend::Brave => {
+                self.search_brave(query, num, &credential(search, backend)?)
+                    .await
             }
-            other => chain.push(other),
-        }
-        let mut errors = Vec::new();
-        for provider in chain {
-            let attempt = match provider {
-                "brave" => self.search_brave(query, num).await,
-                "tavily" => self.search_tavily(query, num).await,
-                "bing" => self.search_bing(query, num).await,
-                other => Err(HarnessError::tool(
-                    "E_INVALID_ARGUMENT",
-                    format!("unknown search provider `{other}`"),
-                )),
-            };
-            match attempt {
-                Ok(hits) => {
-                    let filtered = filter_domains(hits, allowed, blocked);
-                    return Ok(filtered.into_iter().take(num).collect());
-                }
-                Err(err) => errors.push(format!("{provider}: request failed: {err}")),
+            SearchBackend::Tavily => {
+                self.search_tavily(query, num, &credential(search, backend)?)
+                    .await
             }
-        }
-        notes.extend(errors);
-        Err(HarnessError::tool(
-            "E_SEARCH",
-            format!("all search providers failed: {}", notes.join("; ")),
-        ))
+            SearchBackend::SearXng => {
+                self.search_searxng(query, num, &credential(search, backend)?)
+                    .await
+            }
+            SearchBackend::Bing => {
+                self.search_bing(query, num, search.credential(backend).as_deref())
+                    .await
+            }
+            SearchBackend::DuckDuckGo => self.search_duckduckgo(query, num).await,
+        }?;
+        Ok(filter_domains(hits, allowed, blocked)
+            .into_iter()
+            .take(num)
+            .collect())
     }
 
-    async fn search_brave(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
-        let key = std::env::var("BRAVE_API_KEY")
-            .map_err(|_| HarnessError::tool("E_SEARCH", "BRAVE_API_KEY is not set"))?;
+    async fn search_brave(&self, query: &str, num: usize, key: &str) -> Result<Vec<SearchHit>> {
         let response = self
             .client
             .get("https://api.search.brave.com/res/v1/web/search")
@@ -286,28 +266,10 @@ impl WebTools {
             .json()
             .await
             .map_err(|e| HarnessError::tool("E_SEARCH", format!("brave json: {e}")))?;
-        let mut hits = Vec::new();
-        if let Some(results) = value["web"]["results"].as_array() {
-            for item in results {
-                let url = item["url"].as_str().unwrap_or_default();
-                if url.is_empty() {
-                    continue;
-                }
-                hits.push(SearchHit {
-                    title: item["title"].as_str().unwrap_or(url).to_string(),
-                    url: url.to_string(),
-                    snippet: strip_tags(item["description"].as_str().unwrap_or("")),
-                    source: "brave".into(),
-                    published: item["age"].as_str().map(str::to_string),
-                });
-            }
-        }
-        Ok(hits)
+        Ok(parse_brave(&value, num))
     }
 
-    async fn search_tavily(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
-        let key = std::env::var("TAVILY_API_KEY")
-            .map_err(|_| HarnessError::tool("E_SEARCH", "TAVILY_API_KEY is not set"))?;
+    async fn search_tavily(&self, query: &str, num: usize, key: &str) -> Result<Vec<SearchHit>> {
         let response = self
             .client
             .post("https://api.tavily.com/search")
@@ -331,34 +293,69 @@ impl WebTools {
             .json()
             .await
             .map_err(|e| HarnessError::tool("E_SEARCH", format!("tavily json: {e}")))?;
-        let mut hits = Vec::new();
-        if let Some(results) = value["results"].as_array() {
-            for item in results {
-                let url = item["url"].as_str().unwrap_or_default();
-                if url.is_empty() {
-                    continue;
-                }
-                hits.push(SearchHit {
-                    title: item["title"].as_str().unwrap_or(url).to_string(),
-                    url: url.to_string(),
-                    snippet: item["content"]
-                        .as_str()
-                        .unwrap_or("")
-                        .chars()
-                        .take(400)
-                        .collect(),
-                    source: "tavily".into(),
-                    published: item["published_date"].as_str().map(str::to_string),
-                });
-            }
+        Ok(parse_tavily(&value, num))
+    }
+
+    /// A SearXNG instance with the JSON API enabled (`format=json`).
+    async fn search_searxng(&self, query: &str, num: usize, base: &str) -> Result<Vec<SearchHit>> {
+        let url = format!("{}/search", base.trim().trim_end_matches('/'));
+        let response = self
+            .client
+            .get(&url)
+            .query(&[("q", query), ("format", "json")])
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("searxng: {e}")))?;
+        if !response.status().is_success() {
+            return Err(HarnessError::tool(
+                "E_SEARCH",
+                format!("searxng HTTP {}", response.status()),
+            ));
         }
-        Ok(hits)
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("searxng json: {e}")))?;
+        Ok(parse_searxng(&value, num))
+    }
+
+    /// Bing. With a key this is the official v7 API; without one it scrapes the
+    /// public results page, which keeps Bing reachable with no account at all.
+    async fn search_bing(
+        &self,
+        query: &str,
+        num: usize,
+        key: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        let Some(key) = key.filter(|key| !key.is_empty()) else {
+            return self.search_bing_html(query, num).await;
+        };
+        let response = self
+            .client
+            .get("https://api.bing.microsoft.com/v7.0/search")
+            .query(&[("q", query), ("count", &num.to_string())])
+            .header("Ocp-Apim-Subscription-Key", key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing: {e}")))?;
+        if !response.status().is_success() {
+            return Err(HarnessError::tool(
+                "E_SEARCH",
+                format!("bing HTTP {}", response.status()),
+            ));
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing json: {e}")))?;
+        Ok(parse_bing_api(&value, num))
     }
 
     /// Keyless Bing web search. Reachable from regions where other search
     /// engines are blocked; parses the classic `b_algo` result blocks.
-    /// blocked; parses the classic `b_algo` result blocks.
-    async fn search_bing(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
+    async fn search_bing_html(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
         let response = self
             .client
             .get("https://www.bing.com/search")
@@ -382,47 +379,242 @@ impl WebTools {
             .text()
             .await
             .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing body: {e}")))?;
-        let link_re =
-            Regex::new(r#"(?is)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
-        let p_re = Regex::new(r"(?is)<p[^>]*>(.*?)</p>").unwrap();
-        let mut hits = Vec::new();
-        for block in html.split("<li class=\"b_algo").skip(1) {
-            if hits.len() >= num {
-                break;
-            }
-            let block = block.split("</li>").next().unwrap_or(block);
-            let Some(link) = link_re.captures(block) else {
-                continue;
-            };
-            let url = html_unescape(&link[1]);
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                continue;
-            }
-            let title = strip_tags(&link[2]);
-            let snippet = p_re
-                .captures(block)
-                .map(|c| strip_tags(&c[1]))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_default();
-            if title.is_empty() {
-                continue;
-            }
-            hits.push(SearchHit {
-                title,
-                url,
-                snippet,
-                source: "bing".into(),
-                published: None,
-            });
-        }
+        let hits = parse_bing_html(&html, num);
         if hits.is_empty() {
             return Err(HarnessError::tool(
                 "E_SEARCH",
-                "bing returned no parseable results (HTML layout may have changed)",
+                "bing returned no parseable results (HTML layout may have changed; \
+                 set a bing api key in /settings -> web search)",
             ));
         }
         Ok(hits)
     }
+
+    /// DuckDuckGo's HTML endpoint, which needs no account. Its result links are
+    /// redirects (`/l/?uddg=<encoded target>`), so the target is unwrapped.
+    async fn search_duckduckgo(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
+        let response = self
+            .client
+            .post("https://html.duckduckgo.com/html/")
+            .form(&[("q", query)])
+            .header(
+                reqwest::header::USER_AGENT,
+                "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+            )
+            .header("Accept", "text/html")
+            .send()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("duckduckgo: {e}")))?;
+        if !response.status().is_success() {
+            return Err(HarnessError::tool(
+                "E_SEARCH",
+                format!("duckduckgo HTTP {}", response.status()),
+            ));
+        }
+        let html = response
+            .text()
+            .await
+            .map_err(|e| HarnessError::tool("E_SEARCH", format!("duckduckgo body: {e}")))?;
+        let hits = parse_duckduckgo_html(&html, num);
+        if hits.is_empty() {
+            return Err(HarnessError::tool(
+                "E_SEARCH",
+                "duckduckgo returned no parseable results (it rate-limits scraping; \
+                 try again later or pick another backend in /settings -> web search)",
+            ));
+        }
+        Ok(hits)
+    }
+}
+
+/// Credential for a backend that cannot work without one.
+fn credential(search: &SearchConfig, backend: SearchBackend) -> Result<String> {
+    search.credential(backend).ok_or_else(|| {
+        let what = if backend.needs_url() {
+            "instance url"
+        } else {
+            "api key"
+        };
+        HarnessError::tool(
+            "E_SEARCH",
+            format!(
+                "web search backend `{}` needs an {what}: set it in /settings -> web search",
+                backend.label()
+            ),
+        )
+    })
+}
+
+fn parse_brave(value: &Value, num: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    if let Some(results) = value["web"]["results"].as_array() {
+        for item in results.iter().take(num) {
+            let url = item["url"].as_str().unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: item["title"].as_str().unwrap_or(url).to_string(),
+                url: url.to_string(),
+                snippet: strip_tags(item["description"].as_str().unwrap_or("")),
+                source: "brave".into(),
+                published: item["age"].as_str().map(str::to_string),
+            });
+        }
+    }
+    hits
+}
+
+fn parse_tavily(value: &Value, num: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    if let Some(results) = value["results"].as_array() {
+        for item in results.iter().take(num) {
+            let url = item["url"].as_str().unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: item["title"].as_str().unwrap_or(url).to_string(),
+                url: url.to_string(),
+                snippet: item["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(400)
+                    .collect(),
+                source: "tavily".into(),
+                published: item["published_date"].as_str().map(str::to_string),
+            });
+        }
+    }
+    hits
+}
+
+fn parse_searxng(value: &Value, num: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    if let Some(results) = value["results"].as_array() {
+        for item in results.iter().take(num) {
+            let url = item["url"].as_str().unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: item["title"].as_str().unwrap_or(url).to_string(),
+                url: url.to_string(),
+                snippet: strip_tags(item["content"].as_str().unwrap_or("")),
+                source: "searxng".into(),
+                published: item["publishedDate"].as_str().map(str::to_string),
+            });
+        }
+    }
+    hits
+}
+
+/// Bing v7 `webPages.value[]`.
+fn parse_bing_api(value: &Value, num: usize) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    if let Some(results) = value["webPages"]["value"].as_array() {
+        for item in results.iter().take(num) {
+            let url = item["url"].as_str().unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            hits.push(SearchHit {
+                title: item["name"].as_str().unwrap_or(url).to_string(),
+                url: url.to_string(),
+                snippet: strip_tags(item["snippet"].as_str().unwrap_or("")),
+                source: "bing".into(),
+                published: item["datePublished"].as_str().map(str::to_string),
+            });
+        }
+    }
+    hits
+}
+
+fn parse_bing_html(html: &str, num: usize) -> Vec<SearchHit> {
+    let link_re = Regex::new(r#"(?is)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
+    let p_re = Regex::new(r"(?is)<p[^>]*>(.*?)</p>").unwrap();
+    let mut hits = Vec::new();
+    for block in html.split("<li class=\"b_algo").skip(1) {
+        if hits.len() >= num {
+            break;
+        }
+        let block = block.split("</li>").next().unwrap_or(block);
+        let Some(link) = link_re.captures(block) else {
+            continue;
+        };
+        let url = html_unescape(&link[1]);
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            continue;
+        }
+        let title = strip_tags(&link[2]);
+        let snippet = p_re
+            .captures(block)
+            .map(|c| strip_tags(&c[1]))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet,
+            source: "bing".into(),
+            published: None,
+        });
+    }
+    hits
+}
+
+fn parse_duckduckgo_html(html: &str, num: usize) -> Vec<SearchHit> {
+    let link_re =
+        Regex::new(r#"(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+            .unwrap();
+    let snippet_re =
+        Regex::new(r#"(?is)<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#).unwrap();
+    let snippets: Vec<String> = snippet_re
+        .captures_iter(html)
+        .map(|c| strip_tags(&c[1]))
+        .collect();
+    let mut hits = Vec::new();
+    for (index, link) in link_re.captures_iter(html).enumerate() {
+        if hits.len() >= num {
+            break;
+        }
+        let Some(url) = duckduckgo_target(&html_unescape(&link[1])) else {
+            continue;
+        };
+        let title = strip_tags(&link[2]);
+        if title.is_empty() {
+            continue;
+        }
+        hits.push(SearchHit {
+            title,
+            url,
+            snippet: snippets.get(index).cloned().unwrap_or_default(),
+            source: "duckduckgo".into(),
+            published: None,
+        });
+    }
+    hits
+}
+
+/// DDG wraps every result in `//duckduckgo.com/l/?uddg=<percent-encoded
+/// target>`. Unwrap it; a direct link is returned as-is, and an ad or an
+/// internal link is dropped.
+fn duckduckgo_target(href: &str) -> Option<String> {
+    let href = href.trim();
+    let target = match href.split_once("uddg=") {
+        Some((_, rest)) => {
+            let encoded = rest.split('&').next().unwrap_or("");
+            urlencoding::decode(encoded)
+                .map(|decoded| decoded.into_owned())
+                .unwrap_or_else(|_| encoded.to_string())
+        }
+        None => href.to_string(),
+    };
+    (target.starts_with("http://") || target.starts_with("https://")).then_some(target)
 }
 
 fn filter_domains(hits: Vec<SearchHit>, allowed: &[String], blocked: &[String]) -> Vec<SearchHit> {
@@ -607,6 +799,119 @@ mod tests {
     use super::*;
     use crate::provider::{Completion, StreamEvent};
     use tokio::sync::mpsc::UnboundedSender;
+
+    /// Each backend's payload is parsed by a pure function so the shapes can be
+    /// checked without a network.
+    #[test]
+    fn search_backend_payloads_are_parsed() {
+        let brave = json!({ "web": { "results": [
+            { "title": "Rust", "url": "https://rust-lang.org", "description": "<b>fast</b>", "age": "2 days" }
+        ]}});
+        let hits = parse_brave(&brave, 5);
+        assert_eq!(hits[0].title, "Rust");
+        assert_eq!(hits[0].snippet, "fast", "brave snippets are HTML");
+        assert_eq!(hits[0].published.as_deref(), Some("2 days"));
+
+        let tavily = json!({ "results": [
+            { "title": "T", "url": "https://example.com/a", "content": "body", "published_date": "2026-01-01" }
+        ]});
+        let hits = parse_tavily(&tavily, 5);
+        assert_eq!(hits[0].source, "tavily");
+        assert_eq!(hits[0].snippet, "body");
+
+        let searx = json!({ "results": [
+            { "title": "S", "url": "https://example.com/b", "content": "text", "publishedDate": "2026-02-02" }
+        ]});
+        let hits = parse_searxng(&searx, 5);
+        assert_eq!(hits[0].url, "https://example.com/b");
+        assert_eq!(hits[0].published.as_deref(), Some("2026-02-02"));
+
+        let bing = json!({ "webPages": { "value": [
+            { "name": "B", "url": "https://example.com/c", "snippet": "snippet" }
+        ]}});
+        let hits = parse_bing_api(&bing, 5);
+        assert_eq!(hits[0].title, "B");
+        assert_eq!(hits[0].source, "bing");
+
+        // An empty or unrelated payload is empty, not a panic.
+        assert!(parse_brave(&json!({}), 5).is_empty());
+        assert!(parse_tavily(&json!({ "results": "no" }), 5).is_empty());
+        assert!(parse_bing_api(&json!({ "webPages": {} }), 5).is_empty());
+    }
+
+    /// The keyless scrapers: Bing's `b_algo` blocks and DuckDuckGo's redirect
+    /// links.
+    #[test]
+    fn scraped_search_pages_are_parsed() {
+        let bing = r#"<ol id="b_results">
+            <li class="b_algo"><h2><a href="https://example.com/one">One</a></h2>
+                <p>First snippet</p></li>
+            <li class="b_algo"><h2><a href="https://example.com/two">Two</a></h2></li>
+        </ol>"#;
+        let hits = parse_bing_html(bing, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "One");
+        assert_eq!(hits[0].snippet, "First snippet");
+        assert_eq!(hits[1].url, "https://example.com/two");
+        assert_eq!(parse_bing_html(bing, 1).len(), 1, "num caps the list");
+
+        let ddg = r##"<div class="result">
+            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fx%3Fa%3D1&amp;rut=abc">Title X</a>
+            <a class="result__snippet" href="#">Snippet X</a>
+        </div>
+        <div class="result">
+            <a rel="nofollow" class="result__a" href="https://example.com/direct">Direct</a>
+        </div>"##;
+        let hits = parse_duckduckgo_html(ddg, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].url, "https://example.com/x?a=1",
+            "redirect unwrapped"
+        );
+        assert_eq!(hits[0].snippet, "Snippet X");
+        assert_eq!(hits[1].url, "https://example.com/direct");
+        assert_eq!(hits[1].snippet, "", "missing snippet is empty");
+    }
+
+    #[test]
+    fn the_selected_backend_says_what_it_needs() {
+        let mut search = SearchConfig {
+            backend: SearchBackend::Brave,
+            ..Default::default()
+        };
+        assert!(!search.ready(), "brave has no key");
+        search.brave_api_key = Some("  key  ".into());
+        assert!(search.ready());
+        assert_eq!(
+            search.credential(SearchBackend::Brave).as_deref(),
+            Some("key")
+        );
+        assert_eq!(search.credential_source(SearchBackend::Brave), "config");
+
+        // Bing works without a key (it scrapes) and with one (official API).
+        let search = SearchConfig {
+            backend: SearchBackend::Bing,
+            ..Default::default()
+        };
+        assert!(search.ready());
+        assert_eq!(search.credential_source(SearchBackend::Bing), "");
+
+        // SearXNG needs an instance url, not a key.
+        let mut search = SearchConfig {
+            backend: SearchBackend::SearXng,
+            ..Default::default()
+        };
+        assert!(!search.ready());
+        assert!(SearchBackend::SearXng.needs_url());
+        search.searxng_url = Some("https://searx.example.com".into());
+        assert!(search.ready());
+
+        assert!(SearchBackend::DuckDuckGo.needs_key().eq(&false));
+        assert_eq!(
+            SearchBackend::ALL.map(|backend| backend.label()),
+            ["brave", "tavily", "searxng", "bing", "duckduckgo"]
+        );
+    }
 
     /// Extraction must use the non-streaming completion path. The provider
     /// implements that path per protocol, so a backend only has to answer the

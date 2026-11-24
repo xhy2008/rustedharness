@@ -1080,12 +1080,44 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             let title = match page {
                 crate::app::SettingsPage::Root => "settings",
                 crate::app::SettingsPage::Compaction => "settings / compaction",
+                crate::app::SettingsPage::WebSearch => "settings / web search",
             };
             let items = app.settings_items();
             let help = app.settings_description();
             draw_picker(frame, body, title, &items, *sel, "", Some(&help));
         }
         Overlay::AddModel(state) => draw_add_model(frame, body, state),
+        Overlay::WebSearchKey {
+            backend,
+            text,
+            cursor,
+            ..
+        } => {
+            let label = if backend.needs_url() {
+                "instance url"
+            } else {
+                "api key"
+            };
+            let lines = vec![
+                panel_title(&format!("{} {}", backend.label(), label)),
+                Line::from(""),
+                text_field(label, text, true, *cursor, !backend.needs_url()),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "enter save   esc cancel   (stored in config.json)",
+                    style(FAINT),
+                )),
+                Line::from(Span::styled(
+                    if backend.needs_url() {
+                        "the base url of a searxng instance with the json api enabled"
+                    } else {
+                        "the key is kept in config.json in plain text"
+                    },
+                    style(FAINT),
+                )),
+            ];
+            draw_info_block(frame, body, lines);
+        }
         Overlay::Hotkeys => {
             let lines = vec![
                 panel_title("keys"),

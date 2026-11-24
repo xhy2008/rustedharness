@@ -258,6 +258,19 @@ with `latest_tag` and emits `update_available` when they differ. Installs write
 `lsp/<server>/<tag>/` and `prune_other_versions` deletes the directory they
 replaced, so `installed` always describes a single copy.
 
+### Web search
+
+`web_search` runs exactly one backend, picked in `/settings` → web search and
+stored under `[search]` in `config.json` (`SearchConfig`). Each backend has its
+own payload parser as a pure function (`parse_brave`, `parse_tavily`,
+`parse_searxng`, `parse_bing_api`, `parse_bing_html`, `parse_duckduckgo_html`)
+so the shapes are tested without a network. Brave, Tavily and SearXNG are
+JSON APIs; Bing scrapes its results page until an API key upgrades it to the
+official v7 endpoint; DuckDuckGo scrapes `html.duckduckgo.com`, unwrapping its
+`/l/?uddg=` redirects. A backend that cannot answer says which credential it
+needs instead of silently returning nothing, and `SearchConfig::credential`
+falls back to the documented environment variables when the file is empty.
+
 ### Web fetching
 
 `web.rs` fetches a page, decides whether the body is HTML, and converts it for
