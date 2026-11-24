@@ -196,10 +196,12 @@ not implemented yet: `thinkingFormat`, `chatTemplate*`, `openRouterRouting`,
 `supportsStrictMode`, `supportsOpenAIGrammarTools`, and the mid-conversation
 tool/system flags. They are ignored rather than emitted with guessed values.
 
-Pi's advanced model fields (`input`, `inputLimits`, `cost`, `promptCache`,
-`samplingParams`, model-level `api`/`baseUrl`/`headers`/`compat`) and provider
+Pi's advanced model fields (`input`, `inputLimits`, `cost`, `samplingParams`,
+model-level `api`/`baseUrl`/`headers`/`compat`) and provider
 `oauth`/`authHeader`/`modelOverrides` are currently ignored; basic provider
-and model selection loads unchanged.
+and model selection loads unchanged. `promptCache` is read: it tells the
+cache-miss notice and the pre-send warning how long a provider keeps a prompt
+cached.
 
 ### config.json
 
@@ -217,7 +219,9 @@ and model selection loads unchanged.
     "chaseLimit": 3,
     "maxOutputTokens": 8192,
     "rateLimitRetries": null,
-    "rateLimitIntervalSecs": 5
+    "rateLimitIntervalSecs": 5,
+    "httpIdleTimeoutMs": 0,
+    "showCacheMissNotices": true
   },
   "edit": {
     "anchorWidth": 2,
@@ -296,6 +300,19 @@ appended to the tool result.
   provider accepts `reasoning_effort`. `/settings` opens a compaction submenu
   for all of these. Auto-compaction is always on. Changes apply immediately and
   are written to `config.json`.
+- **Slow providers**: provider requests have no timeout. The turn is still
+  cancellable at any time, including while waiting for the first byte, so a
+  free API that trickles can be interrupted with Esc/Ctrl+C. Set
+  `agent.httpIdleTimeoutMs` (milliseconds) to give up instead when nothing
+  arrives for that long; `0` keeps waiting forever.
+- **Cache notices**: when a turn re-bills prompt tokens the previous turn had
+  already cached, a notice explains it. The label names the observable cause —
+  an idle gap longer than the model's cache lifetime or a model switch. The
+  lifetime is read from `promptCache` in `models.json` (`{ "short": 300 }`,
+  seconds) and defaults to 5 minutes for Anthropic-style models; unknown
+  providers are never reported. The TUI also warns before sending when the
+  pause since the last reply exceeds that lifetime. `agent.showCacheMissNotices`
+  (default `true`) turns the notices off.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).

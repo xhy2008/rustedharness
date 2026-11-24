@@ -145,6 +145,42 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "is_false")]
     pub reasoning: bool,
+    /// Best-effort prompt-cache lifetime per retention tier, in seconds. Pi's
+    /// field; a declared value replaces the built-in detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCache>,
+}
+
+/// Prompt-cache lifetimes, in seconds. Only `short` is used: every request
+/// this harness sends asks for the default retention tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PromptCache {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long: Option<u64>,
+}
+
+impl PromptCache {
+    /// The lifetime a default-retention request gets.
+    pub fn retention_secs(&self) -> Option<u64> {
+        self.short.or(self.long).filter(|secs| *secs > 0)
+    }
+}
+
+/// Cache lifetime of providers that document one. Anthropic's default
+/// ephemeral cache lasts five minutes, which is also the gap pi reports
+/// misses against; anything else stays unknown so nothing is claimed.
+fn detected_cache_ttl_secs(provider: &str, base_url: &str, model_id: &str) -> Option<u64> {
+    let provider = provider.to_ascii_lowercase();
+    let url = base_url.to_ascii_lowercase();
+    let model = model_id.to_ascii_lowercase();
+    let anthropic = provider.contains("anthropic")
+        || provider == "claude"
+        || url.contains("anthropic.com")
+        || model.starts_with("claude");
+    anthropic.then_some(300)
 }
 
 /// `models.json` wrapper.
@@ -164,6 +200,7 @@ pub struct ModelSpec {
     pub context_window: u64,
     pub max_tokens: Option<u32>,
     pub reasoning: bool,
+    pub prompt_cache: Option<PromptCache>,
 }
 
 impl ModelSpec {
@@ -347,6 +384,12 @@ pub struct AgentConfig {
     pub rate_limit_retries: Option<u32>,
     /// Seconds between 429 retries. Suggested values: 1, 3, 5.
     pub rate_limit_interval_secs: u64,
+    /// Give up on a provider request after this many milliseconds without a
+    /// single byte. `0` disables the budget: slow APIs may take as long as they
+    /// need, and the turn is still cancellable with Esc/Ctrl+C.
+    pub http_idle_timeout_ms: u64,
+    /// Report significant prompt-cache misses in the transcript.
+    pub show_cache_miss_notices: bool,
 }
 
 impl Default for AgentConfig {
@@ -364,6 +407,8 @@ impl Default for AgentConfig {
             max_output_tokens: 8_192,
             rate_limit_retries: None,
             rate_limit_interval_secs: 5,
+            http_idle_timeout_ms: 0,
+            show_cache_miss_notices: true,
         }
     }
 }
@@ -960,6 +1005,7 @@ impl Config {
             context_window,
             max_tokens,
             reasoning: model.map(|m| m.reasoning).unwrap_or(false),
+            prompt_cache: model.and_then(|m| m.prompt_cache),
         })
     }
 
@@ -982,10 +1028,38 @@ impl Config {
                     },
                     max_tokens: model.max_tokens.filter(|value| *value > 0),
                     reasoning: model.reasoning,
+                    prompt_cache: model.prompt_cache,
                 });
             }
         }
         out
+    }
+
+    /// Best-effort prompt-cache lifetime of a model, in seconds. A
+    /// `promptCache` declaration in `models.json` wins; otherwise known
+    /// provider families are detected. `None` means "unknown", and callers must
+    /// stay quiet instead of guessing.
+    pub fn model_cache_ttl_secs(&self, reference: &str) -> Option<u64> {
+        let (provider_id, base_url) = match self.resolve_model(reference) {
+            Ok(spec) => {
+                if let Some(secs) = spec.prompt_cache.and_then(|cache| cache.retention_secs()) {
+                    return Some(secs);
+                }
+                let base_url = self
+                    .providers
+                    .get(&spec.provider)
+                    .map(|provider| provider.base_url.clone())
+                    .unwrap_or_default();
+                (spec.provider, base_url)
+            }
+            // An unconfigured model cannot be looked up; fall back to the
+            // provider that would serve it.
+            Err(_) => (
+                self.default_provider_id().unwrap_or_default(),
+                String::new(),
+            ),
+        };
+        detected_cache_ttl_secs(&provider_id, &base_url, reference)
     }
 
     pub fn model_context_window(&self, reference: &str) -> u64 {
@@ -1182,6 +1256,57 @@ mod tests {
         assert_eq!(settings.send_recent_turns, 6);
         assert_eq!(settings.strip_content, StripContent::ToolOutput);
         assert_eq!(settings.compact_thinking, ThinkingLevel::XHigh);
+    }
+
+    /// The idle budget defaults to disabled so slow free APIs are never cut
+    /// off; notices default to on because they explain a cost jump.
+    #[test]
+    fn network_defaults_match_the_slow_api_use_case() {
+        let cfg = Config::default();
+        assert_eq!(cfg.agent.http_idle_timeout_ms, 0);
+        assert!(cfg.agent.show_cache_miss_notices);
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"agent":{"httpIdleTimeoutMs":120000,"showCacheMissNotices":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.agent.http_idle_timeout_ms, 120_000);
+        assert!(!cfg.agent.show_cache_miss_notices);
+    }
+
+    /// `promptCache` is pi's field; a declaration wins over detection.
+    #[test]
+    fn prompt_cache_lifetime_comes_from_the_model_or_a_known_family() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "protocol": "openai-completions",
+                "providers": {
+                    "anthropic": {
+                        "baseUrl": "https://api.anthropic.com/v1",
+                        "models": [{ "id": "claude-sonnet-4.5" }]
+                    },
+                    "custom": {
+                        "baseUrl": "https://gateway.example.com/v1",
+                        "models": [{ "id": "fast", "promptCache": { "short": 900 } }]
+                    },
+                    "other": {
+                        "baseUrl": "https://api.example.com/v1",
+                        "models": [{ "id": "mystery" }]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        // Declared lifetime.
+        assert_eq!(cfg.model_cache_ttl_secs("custom/fast"), Some(900));
+        // Detected from the family: Anthropic's ephemeral cache lasts 5 minutes.
+        assert_eq!(
+            cfg.model_cache_ttl_secs("anthropic/claude-sonnet-4.5"),
+            Some(300)
+        );
+        assert_eq!(cfg.model_cache_ttl_secs("claude-sonnet-4.5"), Some(300));
+        // Unknown providers stay unknown instead of guessing.
+        assert_eq!(cfg.model_cache_ttl_secs("other/mystery"), None);
     }
 
     /// Every level the settings panel cycles through round-trips through JSON,

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::config::{CompactionSettings, StripContent, ThinkingLevel};
 use crate::error::Result;
 use crate::provider::{Backend, ChatMessage, ChatRequest, Role, ToolDefinition};
@@ -34,6 +36,17 @@ pub enum SummaryMode {
     /// A separate model starts cold, so the transcript may omit tool output
     /// and reasoning before it is sent.
     Separate,
+}
+
+/// Everything one summary call needs beyond the compactor's own settings.
+pub struct SummaryRequest<'a> {
+    pub model: &'a str,
+    pub messages: &'a [ChatMessage],
+    pub plan: &'a CompactionPlan,
+    pub tools: Vec<ToolDefinition>,
+    /// `Cached` reuses the live request verbatim; `Separate` builds a smaller
+    /// transcript for a cold model.
+    pub mode: SummaryMode,
 }
 
 pub struct Compactor {
@@ -111,15 +124,21 @@ impl Compactor {
     /// Summarise the old prefix. `Cached` reuses the live messages, system
     /// prompt and tools verbatim so the main model reads them from its prompt
     /// cache; `Separate` builds a smaller transcript for a cold summary model.
+    /// `cancel` is the running turn's token: a summary cannot outlive the turn
+    /// that asked for it.
     pub async fn summarize(
         &self,
         backend: &dyn Backend,
-        model: &str,
-        messages: &[ChatMessage],
-        plan: &CompactionPlan,
-        tools: Vec<ToolDefinition>,
-        mode: SummaryMode,
+        request: SummaryRequest<'_>,
+        cancel: &CancellationToken,
     ) -> Result<String> {
+        let SummaryRequest {
+            model,
+            messages,
+            plan,
+            tools,
+            mode,
+        } = request;
         let (messages, tools) = match mode {
             SummaryMode::Cached => {
                 let mut prefix = messages[..plan.keep_from].to_vec();
@@ -158,8 +177,9 @@ impl Compactor {
             stream: false,
             model_reasoning: false,
             reasoning_effort: Some(self.compact_thinking),
+            http_idle_timeout_ms: 0,
         };
-        let completion = backend.complete(request).await?;
+        let completion = backend.complete(request, cancel).await?;
         let mut summary = completion.content.trim().to_string();
         if summary.is_empty() {
             summary = "(empty summary)".to_string();
@@ -365,11 +385,14 @@ mod tests {
         let summary = compactor()
             .summarize(
                 &fake,
-                "compact-model",
-                &msgs,
-                &plan,
-                Vec::new(),
-                SummaryMode::Separate,
+                SummaryRequest {
+                    model: "compact-model",
+                    messages: &msgs,
+                    plan: &plan,
+                    tools: Vec::new(),
+                    mode: SummaryMode::Separate,
+                },
+                &CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -397,11 +420,14 @@ mod tests {
         compactor()
             .summarize(
                 &fake,
-                "main-model",
-                &msgs,
-                &plan,
-                tools.clone(),
-                SummaryMode::Cached,
+                SummaryRequest {
+                    model: "main-model",
+                    messages: &msgs,
+                    plan: &plan,
+                    tools: tools.clone(),
+                    mode: SummaryMode::Cached,
+                },
+                &CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -472,11 +498,14 @@ mod tests {
         compact
             .summarize(
                 &fake,
-                "compact-model",
-                &msgs,
-                &plan,
-                Vec::new(),
-                SummaryMode::Separate,
+                SummaryRequest {
+                    model: "compact-model",
+                    messages: &msgs,
+                    plan: &plan,
+                    tools: Vec::new(),
+                    mode: SummaryMode::Separate,
+                },
+                &CancellationToken::new(),
             )
             .await
             .unwrap();

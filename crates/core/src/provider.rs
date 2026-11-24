@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_openai::{config::OpenAIConfig, Client};
 use base64::prelude::BASE64_STANDARD as BASE64;
@@ -306,6 +307,10 @@ pub struct ChatRequest {
     /// Requested reasoning effort; only sent when the model is a reasoning
     /// model and the provider's compat allows `reasoning_effort`.
     pub reasoning_effort: Option<ThinkingLevel>,
+    /// Milliseconds without a single byte before the request is abandoned.
+    /// `0` waits forever: slow APIs are allowed to take their time, and the
+    /// turn stays cancellable.
+    pub http_idle_timeout_ms: u64,
 }
 
 impl ChatRequest {
@@ -319,7 +324,39 @@ impl ChatRequest {
             stream: true,
             model_reasoning: false,
             reasoning_effort: None,
+            http_idle_timeout_ms: 0,
         }
+    }
+}
+
+impl ChatRequest {
+    fn idle_budget(&self) -> Duration {
+        Duration::from_millis(self.http_idle_timeout_ms)
+    }
+}
+
+/// Await one provider future while honouring cancellation and, when the user
+/// configured one, the idle budget. A zero budget never expires, so a slow
+/// free API is never cut off — but Esc/Ctrl+C still ends the wait because the
+/// future is dropped as soon as the token fires.
+pub(crate) async fn await_guarded<T>(
+    future: impl std::future::Future<Output = T>,
+    idle: Duration,
+    cancel: &CancellationToken,
+) -> Result<T> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(HarnessError::Cancelled),
+        result = async {
+            if idle.is_zero() {
+                return Ok(future.await);
+            }
+            tokio::time::timeout(idle, future).await.map_err(|_| {
+                HarnessError::Provider(format!(
+                    "provider sent no data for {}s (agent.httpIdleTimeoutMs; set it to 0 to wait forever)",
+                    idle.as_secs().max(1)
+                ))
+            })
+        } => result,
     }
 }
 
@@ -384,13 +421,18 @@ pub trait Backend: Send + Sync {
         cancel: CancellationToken,
     ) -> Result<Completion>;
 
-    async fn complete(&self, request: ChatRequest) -> Result<Completion> {
+    /// Non-streaming completion. The caller's token is honoured, so a summary
+    /// or URL extraction cannot wedge the run.
+    async fn complete(
+        &self,
+        request: ChatRequest,
+        cancel: &CancellationToken,
+    ) -> Result<Completion> {
         let request = ChatRequest {
             stream: false,
             ..request
         };
-        self.stream_chat(request, None, CancellationToken::new())
-            .await
+        self.stream_chat(request, None, cancel.clone()).await
     }
 }
 
@@ -769,6 +811,7 @@ impl Backend for Router {
         if !request.model_reasoning {
             request.reasoning_effort = None;
         }
+        request.http_idle_timeout_ms = self.config.agent.http_idle_timeout_ms;
         request.model = model_id;
         provider.stream_chat(request, sink, cancel).await
     }
@@ -978,16 +1021,13 @@ impl Provider {
     ) -> Result<Completion> {
         let compat = self.resolved();
         let body = self.body_with(request, compat);
+        let idle = request.idle_budget();
         let chat = self.client.chat();
         if request.stream {
-            // Guard the request itself with cancellation: the client awaits the
-            // response headers before the first event, which is where a slow or
-            // rate-limited provider stalls.
+            // The client awaits the response headers before the first event,
+            // which is where a slow or rate-limited provider stalls.
             let request_future = chat.create_stream_byot::<Value, WireChunk>(body);
-            let created = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                result = request_future => result,
-            };
+            let created = await_guarded(request_future, idle, cancel).await?;
             drop(chat);
             let stream = created.map_err(|err| self.provider_error(err))?;
 
@@ -995,10 +1035,7 @@ impl Provider {
             let mut calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
             let mut stream = stream;
             loop {
-                let item = tokio::select! {
-                    _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                    item = stream.next() => item,
-                };
+                let item = await_guarded(stream.next(), idle, cancel).await?;
                 let Some(item) = item else { break };
                 let chunk = item.map_err(|err| self.provider_error(err))?;
                 if let Some(usage) = chunk.usage {
@@ -1074,10 +1111,7 @@ impl Provider {
         }
 
         let request_future = chat.create_byot::<Value, WireResponse>(body);
-        let created = tokio::select! {
-            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-            result = request_future => result,
-        };
+        let created = await_guarded(request_future, idle, cancel).await?;
         drop(chat);
         let response = created.map_err(|err| self.provider_error(err))?;
         Ok(response.into_completion())
@@ -1489,6 +1523,80 @@ mod tests {
         assert_eq!(messages[3]["role"], "user");
     }
 
+    /// The configured idle budget is the only thing that abandons a stalled
+    /// provider; with `0` the wait is unbounded, which is what slow free APIs
+    /// need.
+    #[tokio::test]
+    async fn idle_timeout_abandons_a_silent_provider() {
+        let base_url = silent_server().await;
+        let provider = Provider::from_provider(
+            &ProviderConfig {
+                base_url,
+                ..Default::default()
+            },
+            "test-key".into(),
+        )
+        .unwrap();
+        let mut request = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        request.http_idle_timeout_ms = 200;
+        let started = std::time::Instant::now();
+        let err = provider
+            .complete(request, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no data"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A stream that stops mid-reply is abandoned by the same budget.
+    #[tokio::test]
+    async fn idle_timeout_abandons_a_stalled_stream() {
+        let base_url = stalling_stream_server().await;
+        let provider = Provider::from_provider(
+            &ProviderConfig {
+                base_url,
+                ..Default::default()
+            },
+            "test-key".into(),
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut request = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        request.http_idle_timeout_ms = 300;
+        let err = provider
+            .stream_chat(request, Some(tx), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no data"), "{err}");
+        // The chunk that did arrive was delivered before the stall.
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Delta(text)) if text == "partial"));
+    }
+
+    /// With the timeout disabled, cancellation is the way out — and it works
+    /// while a request is stalled before its first byte.
+    #[tokio::test]
+    async fn cancellation_ends_an_unbounded_wait() {
+        let base_url = silent_server().await;
+        let provider = Provider::from_provider(
+            &ProviderConfig {
+                base_url,
+                ..Default::default()
+            },
+            "test-key".into(),
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        let trigger = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            trigger.cancel();
+        });
+        let request = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        assert_eq!(request.http_idle_timeout_ms, 0, "no idle budget by default");
+        let err = provider.complete(request, &token).await.unwrap_err();
+        assert!(matches!(err, HarnessError::Cancelled), "{err}");
+    }
+
     /// Compaction asks for an effort level; the request keeps it only when the
     /// routed model reasons and the provider accepts `reasoning_effort`.
     #[test]
@@ -1529,6 +1637,47 @@ mod tests {
         let mut request = ChatRequest::new("m", vec![assistant]);
         request.model_reasoning = true;
         assert_eq!(p.body(&request)["messages"][0]["reasoning_content"], "why");
+    }
+
+    /// Accept one connection and never answer it: the shape of a gateway that
+    /// holds the request open forever. The socket stays open for the test.
+    async fn silent_server() -> String {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        });
+        format!("http://{address}/v1")
+    }
+
+    /// Send one SSE chunk, then stop writing without closing the connection.
+    async fn stalling_stream_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            socket.write_all(head.as_bytes()).await.unwrap();
+            // Real newlines: the raw string would send a literal `\n` and the
+            // SSE event would never terminate.
+            let chunk = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+            socket.write_all(chunk.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        });
+        format!("http://{address}/v1")
     }
 
     /// Serve one HTTP request and return the bound base URL. The caller only
@@ -1590,7 +1739,10 @@ mod tests {
         .unwrap();
 
         let completion = provider
-            .complete(ChatRequest::new("m", vec![ChatMessage::user("hi")]))
+            .complete(
+                ChatRequest::new("m", vec![ChatMessage::user("hi")]),
+                &CancellationToken::new(),
+            )
             .await
             .unwrap();
 

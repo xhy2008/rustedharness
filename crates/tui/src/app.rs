@@ -221,6 +221,9 @@ pub struct App {
     pub painted_overlay: Option<u8>,
     pub quit: bool,
     pub pending: Option<PendingSession>,
+    /// When the last assistant turn finished. The gap to the next user message
+    /// decides whether the provider's prompt cache is still alive.
+    pub last_reply_at: Option<std::time::Instant>,
 }
 
 /// Animated dots, all three frames the same width so the status line never
@@ -340,6 +343,7 @@ impl App {
             painted_overlay: None,
             quit: false,
             pending: None,
+            last_reply_at: None,
         };
         app.populate(app.agent.snapshot());
         app
@@ -580,6 +584,27 @@ impl App {
             format!("lsp {}{state}{more}", head.language),
             head.state == "warming",
         ))
+    }
+
+    /// Say so when the pause since the last reply is longer than the model's
+    /// prompt-cache lifetime: the next request re-bills the whole prompt. Only
+    /// models with a known lifetime are reported, so nothing is guessed.
+    fn warn_about_expired_cache(&mut self) {
+        let Some(idle) = self.last_reply_at.map(|at| at.elapsed()) else {
+            return;
+        };
+        let Some(ttl) = self.config.model_cache_ttl_secs(&self.agent_model) else {
+            return;
+        };
+        if idle.as_secs() < ttl {
+            return;
+        }
+        self.notice(format!(
+            "prompt cache expired: {}m idle > ~{}m lifetime for {} — the next turn re-bills the whole prompt",
+            idle.as_secs() / 60,
+            ttl / 60,
+            rustedharness_core::config::model_display(&self.agent_model)
+        ));
     }
 
     pub fn notice(&mut self, text: impl Into<String>) {
@@ -855,7 +880,10 @@ impl App {
                 ));
             }
             HarnessEvent::Notice { level, message } => {
-                if level == "warning" || level == "error" {
+                if level == "cache" {
+                    // Worth keeping: it explains a jump in input cost.
+                    self.push(EntryKind::Notice, "cache", message);
+                } else if level == "warning" || level == "error" {
                     self.notice(format!("{level}: {message}"));
                 } else {
                     self.notice(message);
@@ -866,6 +894,7 @@ impl App {
             }
             HarnessEvent::TurnComplete { stop_reason, .. } => {
                 self.busy = false;
+                self.last_reply_at = Some(std::time::Instant::now());
                 self.last_stop = Some(stop_reason);
                 self.streaming = None;
                 self.end_reasoning();
@@ -1105,6 +1134,7 @@ impl App {
                     });
                     return Ok(());
                 }
+                self.warn_about_expired_cache();
                 self.push(EntryKind::User, "", text.clone());
                 self.busy = true;
                 self.follow = true;
@@ -1529,15 +1559,29 @@ impl App {
                 self.overlay = Overlay::Settings { page, sel };
                 match page {
                     SettingsPage::Root => {
-                        if self
+                        let value = self
                             .settings_items_for(page)
                             .get(sel)
-                            .is_some_and(|item| item.value == "compaction")
-                        {
-                            self.overlay = Overlay::Settings {
-                                page: SettingsPage::Compaction,
-                                sel: 0,
-                            };
+                            .map(|item| item.value.clone())
+                            .unwrap_or_default();
+                        match value.as_str() {
+                            "compaction" => {
+                                self.overlay = Overlay::Settings {
+                                    page: SettingsPage::Compaction,
+                                    sel: 0,
+                                }
+                            }
+                            "notices" => {
+                                let on = !self.agent.show_cache_miss_notices();
+                                match self.agent.set_show_cache_miss_notices(on) {
+                                    Ok(()) => self.notice(format!(
+                                        "cache miss notices: {}",
+                                        if on { "on" } else { "off" }
+                                    )),
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     SettingsPage::Compaction => {
@@ -1813,22 +1857,35 @@ impl App {
 
     fn settings_items_for(&self, page: SettingsPage) -> Vec<PickerItem> {
         match page {
-            SettingsPage::Root => vec![PickerItem {
-                label: "compaction".to_string(),
-                detail: format!(
-                    "model {} | {} thinking | {:.0}% threshold | keep {}",
-                    if self.compact_is_separate {
-                        rustedharness_core::config::model_display(&self.compact_model).to_string()
+            SettingsPage::Root => vec![
+                PickerItem {
+                    label: "cache miss notices".to_string(),
+                    detail: if self.agent.show_cache_miss_notices() {
+                        "on - warn when a turn re-bills cached prompt tokens".to_string()
                     } else {
-                        "None (main model)".to_string()
+                        "off".to_string()
                     },
-                    self.compaction.compact_thinking.label(),
-                    self.compaction.compact_threshold * 100.0,
-                    self.compaction.keep_recent_turns
-                ),
-                value: "compaction".to_string(),
-                disabled: false,
-            }],
+                    value: "notices".to_string(),
+                    disabled: false,
+                },
+                PickerItem {
+                    label: "compaction".to_string(),
+                    detail: format!(
+                        "model {} | {} thinking | {:.0}% threshold | keep {}",
+                        if self.compact_is_separate {
+                            rustedharness_core::config::model_display(&self.compact_model)
+                                .to_string()
+                        } else {
+                            "None (main model)".to_string()
+                        },
+                        self.compaction.compact_thinking.label(),
+                        self.compaction.compact_threshold * 100.0,
+                        self.compaction.keep_recent_turns
+                    ),
+                    value: "compaction".to_string(),
+                    disabled: false,
+                },
+            ],
             SettingsPage::Compaction => vec![
                 PickerItem {
                     label: "model".to_string(),
@@ -1917,7 +1974,14 @@ impl App {
             _ => SettingsPage::Root,
         };
         if page == SettingsPage::Root {
-            return "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string();
+            let sel = match &self.overlay {
+                Overlay::Settings { sel, .. } => *sel,
+                _ => 0,
+            };
+            return match sel {
+                0 => "Cache miss notices appear in the transcript when a turn re-bills prompt tokens the previous turn had already cached. Only significant misses are reported, and only when the provider reports cached tokens at all.".to_string(),
+                _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
+            };
         }
         let sel = match &self.overlay {
             Overlay::Settings { sel, .. } => *sel,
@@ -2615,9 +2679,10 @@ mod tests {
         runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
         assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
 
+        // The root page lists cache-miss notices first, then compaction.
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 0,
+            sel: 1,
         };
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(matches!(
@@ -2729,6 +2794,67 @@ mod tests {
             ));
         }
         assert!(app.settings_description().contains("off, low, medium"));
+    }
+
+    /// The gap between the last reply and the next message decides whether the
+    /// provider still holds the prompt cache; only models with a known
+    /// lifetime are reported.
+    #[test]
+    fn an_expired_prompt_cache_is_announced_before_sending() {
+        let mut app = crate::ui_tests::demo_app();
+        app.agent_model = "claude-sonnet-4.5".into();
+        app.entries.clear();
+        app.last_reply_at = None;
+        app.warn_about_expired_cache();
+        assert!(
+            app.entries.is_empty(),
+            "no reply yet, nothing to warn about"
+        );
+
+        // Inside the five-minute window: stay quiet.
+        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        app.warn_about_expired_cache();
+        assert!(app.entries.is_empty());
+
+        // Past it: say so once, with the observed gap.
+        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+        app.warn_about_expired_cache();
+        assert_eq!(app.entries.len(), 1);
+        let body = &app.entries[0].body;
+        assert!(body.contains("prompt cache expired"), "{body}");
+        assert!(body.contains("10m idle"), "{body}");
+        assert!(body.contains("5m lifetime"), "{body}");
+
+        // A model without a known lifetime never claims anything.
+        let mut app = crate::ui_tests::demo_app();
+        app.entries.clear();
+        app.agent_model = "mystery/model".into();
+        app.last_reply_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(9_000));
+        app.warn_about_expired_cache();
+        assert!(app.entries.is_empty());
+    }
+
+    /// The root settings page toggles cache-miss notices and persists it.
+    #[test]
+    fn settings_toggle_cache_miss_notices() {
+        let mut app = crate::ui_tests::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let before = app.agent.show_cache_miss_notices();
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: 0,
+        };
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_ne!(app.agent.show_cache_miss_notices(), before);
+        assert!(matches!(
+            app.overlay,
+            Overlay::Settings {
+                page: SettingsPage::Root,
+                ..
+            }
+        ));
+        assert!(app.settings_description().contains("Cache miss notices"));
     }
 
     #[test]

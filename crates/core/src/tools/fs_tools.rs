@@ -60,12 +60,15 @@ impl Tool for ReadTool {
             let result = ctx
                 .web
                 .read_url(
-                    &args.path,
-                    args.prompt.as_deref(),
-                    args.use_compact_model.unwrap_or(true),
+                    crate::web::WebReadRequest {
+                        url: &args.path,
+                        prompt: args.prompt.as_deref(),
+                        use_compact: args.use_compact_model.unwrap_or(true),
+                        compact_model: &ctx.compact_model,
+                        ttl_secs: ttl,
+                    },
                     ctx.provider.as_ref(),
-                    &ctx.compact_model,
-                    ttl,
+                    &ctx.cancel,
                 )
                 .await?;
             return Ok(ToolOutput::ok(result.content).with_metadata(json!({

@@ -10,6 +10,7 @@
 //! that lag behind the OpenAI schema keep working.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_openai::{config::OpenAIConfig, Client};
 use futures_util::StreamExt;
@@ -20,8 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{Compat, ProviderConfig, ResolvedCompat, ThinkingLevel};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
-    openai_client, Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall,
-    Usage,
+    await_guarded, openai_client, Backend, ChatRequest, Completion, FunctionCall, Role,
+    StreamEvent, ToolCall, Usage,
 };
 
 #[derive(Clone)]
@@ -169,14 +170,12 @@ impl ResponsesProvider {
         stream: async_openai::types::stream::StreamResponse<Value>,
         sink: Option<UnboundedSender<StreamEvent>>,
         cancel: CancellationToken,
+        idle: Duration,
     ) -> Result<Completion> {
         let mut acc = ResponsesAccumulator::default();
         let mut stream = stream;
         loop {
-            let item = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                item = stream.next() => item,
-            };
+            let item = await_guarded(stream.next(), idle, &cancel).await?;
             let Some(item) = item else { break };
             let event = item
                 .map_err(|e| HarnessError::Provider(format!("{}: stream error: {e}", self.name)))?;
@@ -203,21 +202,23 @@ impl Backend for ResponsesProvider {
         cancel: CancellationToken,
     ) -> Result<Completion> {
         let body = self.body(&request);
+        let idle = Duration::from_millis(request.http_idle_timeout_ms);
         let responses = self.client.responses();
         if request.stream {
-            let stream = tokio::select! {
-                _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-                stream = responses.create_stream_byot::<Value, Value>(body) => stream,
-            }
+            let stream = await_guarded(
+                responses.create_stream_byot::<Value, Value>(body),
+                idle,
+                &cancel,
+            )
+            .await?
             .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
-            return self.stream_response(stream, sink, cancel).await;
+            return self.stream_response(stream, sink, cancel, idle).await;
         }
 
-        let value: Value = tokio::select! {
-            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
-            value = responses.create_byot::<Value, Value>(body) => value,
-        }
-        .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
+        let value: Value =
+            await_guarded(responses.create_byot::<Value, Value>(body), idle, &cancel)
+                .await?
+                .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
         let mut acc = ResponsesAccumulator::default();
         acc.absorb_response(&value);
         acc.finish(&self.name)
@@ -569,6 +570,7 @@ mod tests {
             stream: true,
             model_reasoning: false,
             reasoning_effort: None,
+            http_idle_timeout_ms: 0,
         };
 
         let body = provider.body(&request);

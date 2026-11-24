@@ -1,6 +1,7 @@
 //! RustedHarness core: provider, agent loop, tools and code intelligence.
 
 pub mod agent;
+pub mod cache;
 pub mod compact;
 pub mod config;
 pub mod error;

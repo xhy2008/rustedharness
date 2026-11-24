@@ -43,6 +43,26 @@ Rate-limited (429) requests retry at `agent.rateLimitIntervalSecs` up to
 `agent.rateLimitRetries` times, with `null` meaning retry until cancellation;
 quota exhaustion is terminal.
 
+Provider requests have **no timeout by default** (`agent.httpIdleTimeoutMs`
+is `0`): a slow free API may take as long as it needs. Every wait — response
+headers, each streamed chunk, and the non-streaming `complete` used for
+summaries and URL extraction — is raced against the turn's cancellation token,
+so Esc/Ctrl+C ends it immediately; `complete` takes the caller's token for
+exactly that reason. Setting `httpIdleTimeoutMs` adds an idle budget in
+milliseconds: the request is abandoned once that long passes without a single
+byte, which is the only case where the harness gives up on a stalled provider.
+
+Cache accounting lives in `cache.rs`. Providers report cached prompt tokens in
+`usage`, but not why an entry was lost, so `CacheWatch` compares each turn with
+the previous one: prompt tokens that were already cached but billed again are a
+miss. Misses above ~20k tokens are announced once, named after the only
+observable cause (an idle gap past the model's cache lifetime, or a model
+switch); compaction resets the comparison because it rewrites the prompt on
+purpose. The lifetime itself comes from `promptCache` in `models.json`, with a
+built-in 5-minute default for Anthropic-style models; providers with no known
+lifetime are never reported. `agent.showCacheMissNotices` (default on) silences
+the notices.
+
 The loop holds no borrows across `.await`: shared state is behind `Arc` and
 snapshotted or cloned at await boundaries. Each tool call receives a
 `ToolContext` with the workspace resolver, config, provider, LSP hub, web

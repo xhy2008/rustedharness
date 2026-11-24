@@ -4,12 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::compact::{Compactor, SummaryMode};
+use crate::cache::CacheWatch;
+use crate::compact::{Compactor, SummaryMode, SummaryRequest};
 use crate::config::{model_display, CompactionSettings, Config, StripContent, ThinkingLevel};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
@@ -46,6 +48,9 @@ pub struct Agent {
     compaction: RwLock<CompactionSettings>,
     cancel_token: Mutex<CancellationToken>,
     busy: AtomicBool,
+    /// Prompt-cache accounting across turns; also feeds the cache-miss notice.
+    cache_watch: Mutex<CacheWatch>,
+    show_cache_miss_notices: AtomicBool,
 }
 
 struct ResumeData {
@@ -132,6 +137,7 @@ impl Agent {
         }
         let compaction = CompactionSettings::from(&config.agent);
         let separate_compact = !config.compact_model.trim().is_empty();
+        let show_cache_miss_notices = config.agent.show_cache_miss_notices;
         let config = Arc::new(config);
         // A pi session may not name a model at all (no `model_change`, no
         // assistant message yet). Use the transcript's model when config.json
@@ -201,6 +207,8 @@ impl Agent {
             compaction: RwLock::new(compaction),
             cancel_token: Mutex::new(CancellationToken::new()),
             busy: AtomicBool::new(false),
+            cache_watch: Mutex::new(CacheWatch::new()),
+            show_cache_miss_notices: AtomicBool::new(show_cache_miss_notices),
         });
         agent.refresh_system();
         let (cwd_display, session_id) = {
@@ -642,6 +650,7 @@ impl Agent {
                     .map(|spec| spec.reasoning)
                     .unwrap_or(false),
                 reasoning_effort: None,
+                http_idle_timeout_ms: 0,
             };
 
             let (sink, mut stream_rx) = mpsc::unbounded_channel();
@@ -907,6 +916,7 @@ impl Agent {
             }
             return;
         };
+        self.note_cache_miss(&usage);
         self.usage.record(&usage);
         if let Ok(mut session) = self.session.lock() {
             let _ = session.usage(&usage, self.usage.total_cost_usd());
@@ -919,6 +929,55 @@ impl Agent {
             cost_usd: self.usage.total_cost_usd(),
             cache_hit_pct: self.usage.cache_hit_pct(),
         });
+    }
+
+    /// Tell the user when a turn re-billed prompt tokens the previous turn had
+    /// already cached. Only observable causes are named: an idle gap past the
+    /// model's cache lifetime, or a model switch.
+    fn note_cache_miss(&self, usage: &crate::provider::Usage) {
+        let Some(miss) = self.cache_watch.lock().unwrap().observe(
+            &self.agent_model.read().unwrap().clone(),
+            usage,
+            Instant::now(),
+        ) else {
+            return;
+        };
+        if !self.show_cache_miss_notices.load(Ordering::Relaxed) || !miss.is_significant() {
+            return;
+        }
+        let ttl = self
+            .config
+            .model_cache_ttl_secs(&self.agent_model.read().unwrap().clone());
+        let cause = if miss.model_changed {
+            "after a model switch".to_string()
+        } else if ttl.is_some_and(|secs| miss.idle.as_secs() >= secs) {
+            format!("after {}m idle", miss.idle.as_secs() / 60)
+        } else {
+            String::new()
+        };
+        let _ = self.events.send(HarnessEvent::Notice {
+            level: "cache".to_string(),
+            message: format!(
+                "cache miss{cause}: {:.1}k tokens re-billed{}",
+                miss.missed_tokens as f64 / 1000.0,
+                match ttl {
+                    Some(secs) => format!(" (model cache lifetime about {}m)", secs / 60),
+                    None => String::new(),
+                }
+            ),
+        });
+    }
+
+    /// Toggle cache-miss notices at runtime.
+    pub fn set_show_cache_miss_notices(&self, on: bool) -> Result<()> {
+        self.config
+            .save_setting(&["agent", "showCacheMissNotices"], json!(on))?;
+        self.show_cache_miss_notices.store(on, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn show_cache_miss_notices(&self) -> bool {
+        self.show_cache_miss_notices.load(Ordering::Relaxed)
     }
 
     async fn maybe_compact(
@@ -947,19 +1006,24 @@ impl Agent {
         let summary = compactor
             .summarize(
                 self.backend.as_ref(),
-                &compact_model,
-                &messages,
-                &plan,
-                tools.to_vec(),
-                mode,
+                SummaryRequest {
+                    model: &compact_model,
+                    messages: &messages,
+                    plan: &plan,
+                    tools: tools.to_vec(),
+                    mode,
+                },
+                token,
             )
             .await?;
         let new_messages = compactor.apply(&messages, &plan, &summary);
         *self.messages.write().unwrap() = new_messages;
         // The last API report described the pre-compaction request. Clearing
         // it prevents an immediate re-trigger from stale numbers; the next
-        // model response reports the new context size.
+        // model response reports the new context size. The prompt was
+        // rewritten, so the next request is new content, not a cache miss.
         self.usage.reset_context();
+        self.cache_watch.lock().unwrap().reset();
         let _ = self
             .session
             .lock()
@@ -1194,6 +1258,70 @@ mod tests {
                 })
             }
         }
+    }
+
+    /// Two turns whose prompts mostly miss the cache: the second reports the
+    /// tokens the first had already sent.
+    struct CacheMiss {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Backend for CacheMiss {
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _sink: Option<UnboundedSender<StreamEvent>>,
+            _cancel: CancellationToken,
+        ) -> Result<Completion> {
+            let prompt_tokens = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                50_000
+            } else {
+                60_000
+            };
+            let cached_tokens = if prompt_tokens == 50_000 { 0 } else { 5_000 };
+            Ok(Completion {
+                content: "ok".into(),
+                usage: Some(Usage {
+                    prompt_tokens,
+                    completion_tokens: 2,
+                    total_tokens: prompt_tokens + 2,
+                    cached_tokens,
+                    cost_usd: None,
+                }),
+                finish_reason: Some("stop".into()),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rebilled_prompt_emits_a_cache_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(CacheMiss {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::with_backend(config, dir.path().to_path_buf(), tx, backend)
+            .await
+            .unwrap();
+        agent.send("first").await.unwrap();
+        agent.send("second").await.unwrap();
+        agent.shutdown().await;
+
+        let mut messages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let HarnessEvent::Notice { level, message } = event {
+                assert_eq!(level, "cache");
+                messages.push(message);
+            }
+        }
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("45.0k tokens re-billed"),
+            "{messages:?}"
+        );
     }
 
     #[tokio::test]

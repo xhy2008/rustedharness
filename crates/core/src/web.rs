@@ -10,12 +10,26 @@ use html5ever::tendril::TendrilSink;
 use html5ever::{parse_document, ParseOpts};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
 use crate::provider::{Backend, ChatMessage, ChatRequest};
 
 const MAX_BODY_BYTES: usize = 2_000_000;
 const MAX_MARKDOWN_CHARS: usize = 60_000;
+
+/// What to read and how much of it to summarise.
+pub struct WebReadRequest<'a> {
+    pub url: &'a str,
+    pub prompt: Option<&'a str>,
+    /// Ask the compaction model to extract from the page instead of returning
+    /// the whole markdown.
+    pub use_compact: bool,
+    pub compact_model: &'a str,
+    /// How long the rendered page stays in the in-process cache.
+    pub ttl_secs: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct WebReadResult {
@@ -65,13 +79,17 @@ impl WebTools {
     /// GET URL → markdown → truncate → cache → optional compact-model extraction.
     pub async fn read_url(
         &self,
-        url: &str,
-        prompt: Option<&str>,
-        use_compact: bool,
+        request: WebReadRequest<'_>,
         backend: &dyn Backend,
-        compact_model: &str,
-        ttl_secs: u64,
+        cancel: &CancellationToken,
     ) -> Result<WebReadResult> {
+        let WebReadRequest {
+            url,
+            prompt,
+            use_compact,
+            compact_model,
+            ttl_secs,
+        } = request;
         let parsed = url::Url::parse(url)
             .map_err(|e| HarnessError::tool("E_INVALID_URL", format!("{url}: {e}")))?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -143,9 +161,10 @@ impl WebTools {
         }
 
         let mut content = if let (Some(prompt), true) = (prompt, use_compact) {
-            let extracted = extract_with_compact(backend, compact_model, url, &text, prompt)
-                .await
-                .unwrap_or_default();
+            let extracted =
+                extract_with_compact(backend, compact_model, url, &text, prompt, cancel)
+                    .await
+                    .unwrap_or_default();
             if extracted.trim().is_empty() {
                 // The compact model returned nothing (unsupported non-stream
                 // call, empty completion, or a provider error). Silently
@@ -437,6 +456,7 @@ async fn extract_with_compact(
     url: &str,
     text: &str,
     prompt: &str,
+    cancel: &CancellationToken,
 ) -> Result<String> {
     let request = ChatRequest {
         model: model.to_string(),
@@ -456,8 +476,9 @@ async fn extract_with_compact(
         stream: false,
         model_reasoning: false,
         reasoning_effort: None,
+        http_idle_timeout_ms: 0,
     };
-    let completion = backend.complete(request).await?;
+    let completion = backend.complete(request, cancel).await?;
     Ok(completion.content)
 }
 
@@ -616,6 +637,7 @@ mod tests {
             "https://example.com",
             "Rust is a language.",
             "what is this page about",
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
