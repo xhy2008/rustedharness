@@ -28,3 +28,10 @@ pub use protocol::{HarnessCommand, HarnessEvent};
 
 /// Version reported by the CLI and the protocol handshake.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// User agent for every outbound request, so providers can tell who is calling.
+pub const USER_AGENT: &str = concat!(
+    "RustedHarness/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://example.invalid/rustedharness)"
+);

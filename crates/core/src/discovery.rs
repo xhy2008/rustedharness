@@ -29,11 +29,7 @@ pub struct CatalogModel {
 pub async fn fetch_catalog(base_url: &str, api_key: &str) -> Result<Vec<CatalogModel>> {
     let url = format!("{}/models", base_url.trim().trim_end_matches('/'));
     let client = reqwest::Client::builder()
-        .user_agent(concat!(
-            "RustedHarness/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://example.invalid/rustedharness)"
-        ))
+        .user_agent(crate::USER_AGENT)
         // Discovery is interactive: the user is watching a spinner, so a silent
         // endpoint must fail rather than hang the flow.
         .timeout(Duration::from_secs(20))

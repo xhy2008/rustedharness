@@ -271,6 +271,12 @@ official v7 endpoint; DuckDuckGo scrapes `html.duckduckgo.com`, unwrapping its
 needs instead of silently returning nothing, and `SearchConfig::credential`
 falls back to the documented environment variables when the file is empty.
 
+A backend declares its credential exactly once, in
+`SearchBackend::credential() -> Option<Credential { key, kind }>`: the `[search]`
+key that stores the value and whether it is a required key, an optional key, or
+an instance URL. The settings panel, the save path and the "is it usable" check
+all read that one table.
+
 ### Web fetching
 
 `web.rs` fetches a page, decides whether the body is HTML, and converts it for

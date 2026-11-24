@@ -18,8 +18,10 @@ use crossterm::event::{
 use crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
-use rustedharness_core::agent::Agent;
-use rustedharness_core::config::{Config, NewModel, SearchBackend, SearchConfig};
+use rustedharness_core::agent::{Agent, RATE_LIMIT_RETRY_INTERVAL};
+use rustedharness_core::config::{
+    Config, CredentialKind, CredentialSource, NewModel, SearchBackend, SearchConfig,
+};
 use rustedharness_core::discovery::CatalogModel;
 use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
@@ -121,8 +123,6 @@ pub enum Overlay {
         backend: SearchBackend,
         text: String,
         cursor: usize,
-        /// Row to select again once the editor closes.
-        row: usize,
     },
 }
 
@@ -172,6 +172,18 @@ impl AddModelState {
             target,
             from_settings,
         }
+    }
+
+    /// Run `edit` on the focused text field of the endpoint step. Returns
+    /// false when no text field has focus.
+    fn edit(&mut self, edit: impl FnOnce(&mut String, &mut usize)) -> bool {
+        let text = match (self.step, self.field) {
+            (AddModelStep::Endpoint, 0) => &mut self.url,
+            (AddModelStep::Endpoint, 1) => &mut self.key,
+            _ => return false,
+        };
+        edit(text, &mut self.cursor);
+        true
     }
 
     /// Models matching the filter, or every model while it is empty.
@@ -1697,7 +1709,6 @@ impl App {
                                 backend,
                                 text: String::new(),
                                 cursor: 0,
-                                row: sel,
                             };
                         }
                     }
@@ -1929,42 +1940,35 @@ impl App {
         });
     }
 
-    /// Keys for the search-credential editor: a text field with save/cancel.
+    /// Keys for the search-credential editor: one text field with save/cancel.
     fn web_search_key(&mut self, key: KeyEvent) -> Result<()> {
         let Overlay::WebSearchKey {
             backend,
             text,
             cursor,
-            row,
         } = &mut self.overlay
         else {
             return Ok(());
         };
+        let backend = *backend;
+        let close = |overlay: &mut Overlay| {
+            *overlay = Overlay::Settings {
+                page: SettingsPage::WebSearch,
+                sel: CREDENTIAL_ROW,
+            };
+        };
         match key.code {
-            KeyCode::Esc => {
-                let row = *row;
-                self.overlay = Overlay::Settings {
-                    page: SettingsPage::WebSearch,
-                    sel: row,
-                };
-            }
+            KeyCode::Esc => close(&mut self.overlay),
             KeyCode::Enter => {
-                let backend = *backend;
-                let row = *row;
                 let value = text.trim().to_string();
                 match self.agent.set_search_credential(backend, &value) {
                     Ok(()) => {
                         self.search = self.agent.config().search.clone();
-                        self.overlay = Overlay::Settings {
-                            page: SettingsPage::WebSearch,
-                            sel: row,
-                        };
+                        close(&mut self.overlay);
                         self.notice(if value.is_empty() {
                             format!("{} credential cleared", backend.label())
-                        } else if backend.needs_url() {
-                            format!("{} instance: {value}", backend.label())
                         } else {
-                            format!("{} api key saved", backend.label())
+                            format!("{} credential saved", backend.label())
                         });
                     }
                     Err(err) => self.push(EntryKind::Error, "", err.to_string()),
@@ -2029,12 +2033,7 @@ impl App {
                 }
             },
             KeyCode::Tab | KeyCode::Up | KeyCode::Down if state.step == AddModelStep::Endpoint => {
-                let step = if matches!(key.code, KeyCode::Tab | KeyCode::Down) {
-                    1
-                } else {
-                    usize::MAX
-                };
-                state.field = if step == usize::MAX {
+                state.field = if key.code == KeyCode::Up {
                     state.field.saturating_sub(1)
                 } else {
                     (state.field + 1).min(2)
@@ -2051,34 +2050,20 @@ impl App {
             KeyCode::Down => {
                 state.sel = (state.sel + 1).min(state.filtered().len().saturating_sub(1));
             }
-            KeyCode::Backspace => match state.step {
-                AddModelStep::Endpoint if state.field == 0 => {
-                    delete_before(&mut state.url, &mut state.cursor);
-                }
-                AddModelStep::Endpoint if state.field == 1 => {
-                    delete_before(&mut state.key, &mut state.cursor);
-                }
-                AddModelStep::Endpoint => {}
-                AddModelStep::Models => {
+            KeyCode::Backspace => {
+                if !state.edit(delete_before) && state.step == AddModelStep::Models {
                     state.filter.pop();
                     state.sel = 0;
                 }
-            },
-            KeyCode::Char(c) => match state.step {
-                AddModelStep::Endpoint if state.field == 0 => {
-                    insert_at(&mut state.url, &mut state.cursor, c);
+            }
+            KeyCode::Char(c) => {
+                if state.edit(|text, cursor| insert_at(text, cursor, c)) {
                     state.error = None;
-                }
-                AddModelStep::Endpoint if state.field == 1 => {
-                    insert_at(&mut state.key, &mut state.cursor, c);
-                    state.error = None;
-                }
-                AddModelStep::Endpoint => {}
-                AddModelStep::Models => {
+                } else if state.step == AddModelStep::Models {
                     state.filter.push(c);
                     state.sel = 0;
                 }
-            },
+            }
             KeyCode::Enter => match state.step {
                 AddModelStep::Endpoint => self.fetch_catalog(op_tx),
                 AddModelStep::Models => self.save_added_model(),
@@ -2104,26 +2089,22 @@ impl App {
             .map(|model| model.id.clone())
             .unwrap_or(manual);
         if model_id.is_empty() {
-            if let Overlay::AddModel(state) = &mut self.overlay {
-                state.error = Some("pick a model or type its id".to_string());
-            }
+            self.add_model_error("pick a model or type its id".to_string());
             return;
         }
         let new = NewModel {
             base_url: state.url.clone(),
             api_key: state.key.clone(),
             model_id,
-            context_window: chosen.as_ref().map(|m| m.context_window).unwrap_or(0),
-            max_tokens: chosen.as_ref().and_then(|m| m.max_tokens),
+            context_window: chosen.as_ref().map_or(0, |model| model.context_window),
+            max_tokens: chosen.as_ref().and_then(|model| model.max_tokens),
         };
         let target = state.target;
         let from_settings = state.from_settings;
         let reference = match self.agent.add_model(&new) {
             Ok(reference) => reference,
             Err(err) => {
-                if let Overlay::AddModel(state) = &mut self.overlay {
-                    state.error = Some(err.to_string());
-                }
+                self.add_model_error(err.to_string());
                 return;
             }
         };
@@ -2141,6 +2122,13 @@ impl App {
             Overlay::None
         };
         self.notice(format!("added {reference} to models.json"));
+    }
+
+    /// Show a failure inside the wizard, where the user is still looking.
+    fn add_model_error(&mut self, message: String) {
+        if let Overlay::AddModel(state) = &mut self.overlay {
+            state.error = Some(message);
+        }
     }
 
     fn open_model_picker(&mut self, target: ModelTarget, from_settings: bool) {
@@ -2229,7 +2217,11 @@ impl App {
                 },
                 PickerItem {
                     label: "429 retry".to_string(),
-                    detail: format!("{} retries, 3s apart", self.agent.rate_limit_retries()),
+                    detail: format!(
+                        "{} retries, {}s apart",
+                        self.agent.rate_limit_retries(),
+                        RATE_LIMIT_RETRY_INTERVAL.as_secs()
+                    ),
                     value: "retry".to_string(),
                     disabled: false,
                 },
@@ -2268,59 +2260,43 @@ impl App {
             SettingsPage::WebSearch => {
                 let search = &self.search;
                 let mut items: Vec<PickerItem> = SearchBackend::ALL
-                    .iter()
+                    .into_iter()
                     .map(|backend| {
-                        let credential = match search.credential_source(*backend) {
-                            "config" => "credential saved",
-                            "environment" => "credential from the environment",
-                            "" if backend.needs_key() => "needs an api key",
-                            "" if backend.needs_url() => "needs an instance url",
-                            "" => "no account needed",
-                            other => other,
-                        };
+                        let status = search_status(search, backend);
                         PickerItem {
                             label: backend.label().to_string(),
-                            detail: if *backend == search.backend {
-                                format!("selected | {credential}")
+                            detail: if backend == search.backend {
+                                format!("selected | {status}")
                             } else {
-                                credential.to_string()
+                                status.to_string()
                             },
                             value: format!("backend:{}", backend.label()),
                             disabled: false,
                         }
                     })
                     .collect();
-                // Only the selected backend's credential is editable: typing a
+                // Only the selected backend's credential is editable: storing a
                 // key for a backend that is not in use would be a mystery.
                 let backend = search.backend;
-                if backend.credential_key().is_empty() {
-                    items.push(PickerItem {
+                items.push(match backend.credential() {
+                    None => PickerItem {
                         label: "credential".to_string(),
                         detail: format!("{} needs no credential", backend.label()),
                         value: "credential".to_string(),
                         disabled: true,
-                    });
-                } else {
-                    let label = if backend.needs_url() {
-                        "instance url"
-                    } else {
-                        "api key"
-                    };
-                    let state = match search.credential_source(backend) {
-                        "config" => "saved".to_string(),
-                        "environment" => "from the environment".to_string(),
-                        _ if backend.key_optional() => {
-                            "not set - the public website is scraped instead".to_string()
+                    },
+                    Some(spec) => PickerItem {
+                        label: if spec.kind == CredentialKind::Url {
+                            "instance url"
+                        } else {
+                            "api key"
                         }
-                        _ => "not set - press enter to type it".to_string(),
-                    };
-                    items.push(PickerItem {
-                        label: label.to_string(),
-                        detail: state,
+                        .to_string(),
+                        detail: credential_state(search, backend).to_string(),
                         value: "credential".to_string(),
                         disabled: false,
-                    });
-                }
+                    },
+                });
                 items
             }
             SettingsPage::Compaction => vec![
@@ -2422,7 +2398,11 @@ impl App {
                 .unwrap_or_default();
             return match value.as_str() {
                 "notices" => "Cache miss notices appear in the transcript when a turn re-bills prompt tokens the previous turn had already cached. Only significant misses are reported, and only when the provider reports cached tokens at all.".to_string(),
-                "retry" => "How many times a turn retries after a 429/rate-limit response before giving up. Enter cycles 5, 15, 30, 50 and 100. The wait between attempts is fixed at 3 seconds; quota or credit exhaustion is never retried.".to_string(),
+                "retry" => format!(
+                    "How many times a turn retries after a 429/rate-limit response before giving up. Enter cycles {}. The wait between attempts is fixed at {} seconds; quota or credit exhaustion is never retried.",
+                    retry_presets_text(),
+                    RATE_LIMIT_RETRY_INTERVAL.as_secs()
+                ),
                 "search" => "Which backend the web_search tool uses. Enter opens the web search page: brave, tavily, SearXNG, bing or duckduckgo. The page asks for an api key (or a SearXNG instance url) for the backend that needs one.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
             };
@@ -2853,12 +2833,41 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
     out
 }
 
-/// Copy through the platform clipboard API instead of piping bytes into
-/// `clip.exe`, which decodes stdin with the ANSI code page and turns every
-/// non-ASCII character into mojibake on a Chinese Windows.
 /// Picker row that opens the add-model wizard. The value cannot collide with a
 /// real model reference because a reference always contains a `/`.
 const ADD_MODEL_ROW: &str = "+";
+
+/// Row of the credential editor on the web-search page: always the last one,
+/// below the five backends.
+const CREDENTIAL_ROW: usize = SearchBackend::ALL.len();
+
+/// One line saying whether `backend` can search with the current config.
+fn search_status(search: &SearchConfig, backend: SearchBackend) -> &'static str {
+    match search.credential_source(backend) {
+        Some(CredentialSource::Config) => "credential saved",
+        Some(CredentialSource::Environment) => "credential from the environment",
+        None => match backend.credential().map(|spec| spec.kind) {
+            None => "no account needed",
+            Some(CredentialKind::Url) => "needs an instance url",
+            Some(_) => "needs an api key",
+        },
+    }
+}
+
+/// What the credential row shows for the selected backend.
+fn credential_state(search: &SearchConfig, backend: SearchBackend) -> &'static str {
+    match search.credential_source(backend) {
+        Some(CredentialSource::Config) => "saved",
+        Some(CredentialSource::Environment) => "from the environment",
+        None if backend
+            .credential()
+            .is_some_and(|spec| !spec.kind.required()) =>
+        {
+            "not set - the public website is scraped instead"
+        }
+        None => "not set - press enter to type it",
+    }
+}
 
 /// Insert one character at the caret of a single-line field.
 fn insert_at(text: &mut String, cursor: &mut usize, c: char) {
@@ -2889,6 +2898,15 @@ fn delete_before(text: &mut String, cursor: &mut usize) {
 /// moves up to the next preset, wrapping at the top.
 const RETRY_PRESETS: [u32; 5] = [5, 15, 30, 50, 100];
 
+/// `5, 15, 30, 50, 100`, for the settings help text.
+fn retry_presets_text() -> String {
+    RETRY_PRESETS
+        .iter()
+        .map(|preset| preset.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn next_retry_preset(current: u32) -> u32 {
     RETRY_PRESETS
         .into_iter()
@@ -2896,6 +2914,9 @@ fn next_retry_preset(current: u32) -> u32 {
         .unwrap_or(RETRY_PRESETS[0])
 }
 
+/// Copy through the platform clipboard API instead of piping bytes into
+/// `clip.exe`, which decodes stdin with the ANSI code page and turns every
+/// non-ASCII character into mojibake on a Chinese Windows.
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;

@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use reqwest::RequestBuilder;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -12,7 +13,7 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Config, SearchBackend, SearchConfig};
+use crate::config::{Config, CredentialKind, SearchBackend, SearchConfig};
 use crate::error::{HarnessError, Result};
 use crate::provider::{Backend, ChatMessage, ChatRequest};
 
@@ -61,11 +62,7 @@ pub struct WebTools {
 impl WebTools {
     pub fn new(_config: &Config) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .user_agent(concat!(
-                "RustedHarness/",
-                env!("CARGO_PKG_VERSION"),
-                " (+https://example.invalid/rustedharness)"
-            ))
+            .user_agent(crate::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5))
             .timeout(Duration::from_secs(30))
             .build()
@@ -208,10 +205,10 @@ impl WebTools {
         Ok(result)
     }
 
-    /// Run the search backend selected in `[search]`. Credentials come from
-    /// `SearchConfig` (which falls back to the documented environment
-    /// variables); a backend that cannot answer says so instead of silently
-    /// returning nothing.
+    /// Run the backend selected in `[search]`. Credentials come from
+    /// `SearchConfig`, which falls back to the documented environment
+    /// variables; a backend without the credential it needs says so instead of
+    /// quietly returning nothing.
     pub async fn search(
         &self,
         query: &str,
@@ -220,225 +217,199 @@ impl WebTools {
         blocked: &[String],
         search: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
-        let backend = search.backend;
-        let hits = match backend {
-            SearchBackend::Brave => {
-                self.search_brave(query, num, &credential(search, backend)?)
-                    .await
-            }
-            SearchBackend::Tavily => {
-                self.search_tavily(query, num, &credential(search, backend)?)
-                    .await
-            }
-            SearchBackend::SearXng => {
-                self.search_searxng(query, num, &credential(search, backend)?)
-                    .await
-            }
-            SearchBackend::Bing => {
-                self.search_bing(query, num, search.credential(backend).as_deref())
-                    .await
-            }
-            SearchBackend::DuckDuckGo => self.search_duckduckgo(query, num).await,
-        }?;
-        Ok(filter_domains(hits, allowed, blocked)
-            .into_iter()
-            .take(num)
-            .collect())
+        let hits = match search.backend {
+            SearchBackend::Brave => self.search_brave(query, num, search).await?,
+            SearchBackend::Tavily => self.search_tavily(query, num, search).await?,
+            SearchBackend::SearXng => self.search_searxng(query, num, search).await?,
+            SearchBackend::Bing => self.search_bing(query, num, search).await?,
+            SearchBackend::DuckDuckGo => self.search_duckduckgo(query, num).await?,
+        };
+        Ok(filter_domains(hits, allowed, blocked))
     }
 
-    async fn search_brave(&self, query: &str, num: usize, key: &str) -> Result<Vec<SearchHit>> {
-        let response = self
-            .client
-            .get("https://api.search.brave.com/res/v1/web/search")
-            .query(&[("q", query), ("count", &num.to_string())])
-            .header("X-Subscription-Token", key)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("brave: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("brave HTTP {}", response.status()),
-            ));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("brave json: {e}")))?;
+    async fn search_brave(
+        &self,
+        query: &str,
+        num: usize,
+        search: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        let key = require_credential(search, SearchBackend::Brave)?;
+        let value = json_api(
+            self.client
+                .get("https://api.search.brave.com/res/v1/web/search")
+                .query(&[("q", query), ("count", &num.to_string())])
+                .header("X-Subscription-Token", key.as_str()),
+            "brave",
+        )
+        .await?;
         Ok(parse_brave(&value, num))
     }
 
-    async fn search_tavily(&self, query: &str, num: usize, key: &str) -> Result<Vec<SearchHit>> {
-        let response = self
-            .client
-            .post("https://api.tavily.com/search")
-            .json(&json!({
-                "api_key": key,
-                "query": query,
-                "max_results": num,
-                "search_depth": "basic",
-                "include_answer": false,
-            }))
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("tavily: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("tavily HTTP {}", response.status()),
-            ));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("tavily json: {e}")))?;
+    async fn search_tavily(
+        &self,
+        query: &str,
+        num: usize,
+        search: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        let key = require_credential(search, SearchBackend::Tavily)?;
+        let value = json_api(
+            self.client
+                .post("https://api.tavily.com/search")
+                .json(&json!({
+                    "api_key": key,
+                    "query": query,
+                    "max_results": num,
+                    "search_depth": "basic",
+                    "include_answer": false,
+                })),
+            "tavily",
+        )
+        .await?;
         Ok(parse_tavily(&value, num))
     }
 
     /// A SearXNG instance with the JSON API enabled (`format=json`).
-    async fn search_searxng(&self, query: &str, num: usize, base: &str) -> Result<Vec<SearchHit>> {
-        let url = format!("{}/search", base.trim().trim_end_matches('/'));
-        let response = self
-            .client
-            .get(&url)
-            .query(&[("q", query), ("format", "json")])
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("searxng: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("searxng HTTP {}", response.status()),
-            ));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("searxng json: {e}")))?;
+    async fn search_searxng(
+        &self,
+        query: &str,
+        num: usize,
+        search: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        let base = require_credential(search, SearchBackend::SearXng)?;
+        let url = format!("{}/search", base.trim_end_matches('/'));
+        let value = json_api(
+            self.client
+                .get(&url)
+                .query(&[("q", query), ("format", "json")]),
+            "searxng",
+        )
+        .await?;
         Ok(parse_searxng(&value, num))
     }
 
-    /// Bing. With a key this is the official v7 API; without one it scrapes the
-    /// public results page, which keeps Bing reachable with no account at all.
+    /// Bing. A key switches to the official v7 API; without one the public
+    /// results page is scraped, so Bing works with no account at all.
     async fn search_bing(
         &self,
         query: &str,
         num: usize,
-        key: Option<&str>,
+        search: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
-        let Some(key) = key.filter(|key| !key.is_empty()) else {
+        let Some(key) = search.credential(SearchBackend::Bing) else {
             return self.search_bing_html(query, num).await;
         };
-        let response = self
-            .client
-            .get("https://api.bing.microsoft.com/v7.0/search")
-            .query(&[("q", query), ("count", &num.to_string())])
-            .header("Ocp-Apim-Subscription-Key", key)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("bing HTTP {}", response.status()),
-            ));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing json: {e}")))?;
+        let value = json_api(
+            self.client
+                .get("https://api.bing.microsoft.com/v7.0/search")
+                .query(&[("q", query), ("count", &num.to_string())])
+                .header("Ocp-Apim-Subscription-Key", key.as_str()),
+            "bing",
+        )
+        .await?;
         Ok(parse_bing_api(&value, num))
     }
 
-    /// Keyless Bing web search. Reachable from regions where other search
-    /// engines are blocked; parses the classic `b_algo` result blocks.
+    /// Keyless Bing: the classic `b_algo` result blocks.
     async fn search_bing_html(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
-        let response = self
-            .client
-            .get("https://www.bing.com/search")
-            .query(&[("q", query), ("count", &num.to_string())])
-            .header(
-                reqwest::header::USER_AGENT,
-                "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
-            )
-            .header("Accept", "text/html")
-            .header("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("bing HTTP {}", response.status()),
-            ));
-        }
-        let html = response
-            .text()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("bing body: {e}")))?;
-        let hits = parse_bing_html(&html, num);
-        if hits.is_empty() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                "bing returned no parseable results (HTML layout may have changed; \
-                 set a bing api key in /settings -> web search)",
-            ));
-        }
-        Ok(hits)
+        let html = scrape(
+            self.client
+                .get("https://www.bing.com/search")
+                .query(&[("q", query), ("count", &num.to_string())]),
+            "bing",
+        )
+        .await?;
+        scraped(
+            parse_bing_html(&html, num),
+            "bing",
+            "its page layout may have changed; set a bing api key in /settings -> web search",
+        )
     }
 
-    /// DuckDuckGo's HTML endpoint, which needs no account. Its result links are
-    /// redirects (`/l/?uddg=<encoded target>`), so the target is unwrapped.
+    /// DuckDuckGo's HTML endpoint. Its result links are `/l/?uddg=` redirects,
+    /// which `parse_duckduckgo_html` unwraps.
     async fn search_duckduckgo(&self, query: &str, num: usize) -> Result<Vec<SearchHit>> {
-        let response = self
-            .client
-            .post("https://html.duckduckgo.com/html/")
-            .form(&[("q", query)])
-            .header(
-                reqwest::header::USER_AGENT,
-                "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
-            )
-            .header("Accept", "text/html")
-            .send()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("duckduckgo: {e}")))?;
-        if !response.status().is_success() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                format!("duckduckgo HTTP {}", response.status()),
-            ));
-        }
-        let html = response
-            .text()
-            .await
-            .map_err(|e| HarnessError::tool("E_SEARCH", format!("duckduckgo body: {e}")))?;
-        let hits = parse_duckduckgo_html(&html, num);
-        if hits.is_empty() {
-            return Err(HarnessError::tool(
-                "E_SEARCH",
-                "duckduckgo returned no parseable results (it rate-limits scraping; \
-                 try again later or pick another backend in /settings -> web search)",
-            ));
-        }
-        Ok(hits)
+        let html = scrape(
+            self.client
+                .post("https://html.duckduckgo.com/html/")
+                .form(&[("q", query)]),
+            "duckduckgo",
+        )
+        .await?;
+        scraped(
+            parse_duckduckgo_html(&html, num),
+            "duckduckgo",
+            "it rate-limits scraping; try again later or pick another backend in /settings -> web search",
+        )
     }
 }
 
-/// Credential for a backend that cannot work without one.
-fn credential(search: &SearchConfig, backend: SearchBackend) -> Result<String> {
+/// A browser user agent, because the keyless result pages refuse anything else.
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0";
+
+/// Send a JSON request and decode the body, naming the backend in every error.
+async fn json_api(request: RequestBuilder, backend: &str) -> Result<Value> {
+    let response = request
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| search_error(backend, e))?;
+    check_status(&response, backend)?;
+    response.json().await.map_err(|e| search_error(backend, e))
+}
+
+/// Fetch a public results page. Both keyless backends need a browser user
+/// agent: the default one is the first thing they refuse.
+async fn scrape(request: RequestBuilder, backend: &str) -> Result<String> {
+    let response = request
+        .header(reqwest::header::USER_AGENT, BROWSER_USER_AGENT)
+        .header("Accept", "text/html")
+        .header("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
+        .send()
+        .await
+        .map_err(|e| search_error(backend, e))?;
+    check_status(&response, backend)?;
+    response.text().await.map_err(|e| search_error(backend, e))
+}
+
+/// A keyless backend scrapes a public page: one that parses to nothing means
+/// the layout changed or the host is refusing scrapers.
+fn scraped(hits: Vec<SearchHit>, backend: &str, hint: &str) -> Result<Vec<SearchHit>> {
+    if hits.is_empty() {
+        return Err(HarnessError::tool(
+            "E_SEARCH",
+            format!("{backend} returned no parseable results ({hint})"),
+        ));
+    }
+    Ok(hits)
+}
+
+fn search_error(backend: &str, error: impl std::fmt::Display) -> HarnessError {
+    HarnessError::tool("E_SEARCH", format!("{backend}: {error}"))
+}
+
+fn check_status(response: &reqwest::Response, backend: &str) -> Result<()> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(HarnessError::tool(
+        "E_SEARCH",
+        format!("{backend} HTTP {status}"),
+    ))
+}
+
+/// The credential a backend cannot search without.
+fn require_credential(search: &SearchConfig, backend: SearchBackend) -> Result<String> {
     search.credential(backend).ok_or_else(|| {
-        let what = if backend.needs_url() {
-            "instance url"
-        } else {
-            "api key"
+        let what = match backend.credential().map(|spec| spec.kind) {
+            Some(CredentialKind::Url) => "an instance url",
+            _ => "an api key",
         };
         HarnessError::tool(
             "E_SEARCH",
             format!(
-                "web search backend `{}` needs an {what}: set it in /settings -> web search",
+                "web search backend `{}` needs {what}: set it in /settings -> web search",
                 backend.label()
             ),
         )
@@ -797,6 +768,7 @@ fn collapse_blank_lines(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CredentialSource;
     use crate::provider::{Completion, StreamEvent};
     use tokio::sync::mpsc::UnboundedSender;
 
@@ -886,7 +858,10 @@ mod tests {
             search.credential(SearchBackend::Brave).as_deref(),
             Some("key")
         );
-        assert_eq!(search.credential_source(SearchBackend::Brave), "config");
+        assert_eq!(
+            search.credential_source(SearchBackend::Brave),
+            Some(CredentialSource::Config)
+        );
 
         // Bing works without a key (it scrapes) and with one (official API).
         let search = SearchConfig {
@@ -894,19 +869,38 @@ mod tests {
             ..Default::default()
         };
         assert!(search.ready());
-        assert_eq!(search.credential_source(SearchBackend::Bing), "");
+        assert_eq!(search.credential_source(SearchBackend::Bing), None);
 
-        // SearXNG needs an instance url, not a key.
+        // SearXNG needs an instance url, whose absence makes it unusable.
         let mut search = SearchConfig {
             backend: SearchBackend::SearXng,
             ..Default::default()
         };
         assert!(!search.ready());
-        assert!(SearchBackend::SearXng.needs_url());
         search.searxng_url = Some("https://searx.example.com".into());
         assert!(search.ready());
 
-        assert!(SearchBackend::DuckDuckGo.needs_key().eq(&false));
+        // Every backend names the credential it needs in one place.
+        assert_eq!(
+            SearchBackend::ALL.map(|backend| backend.credential().map(|spec| spec.key)),
+            [
+                Some("braveApiKey"),
+                Some("tavilyApiKey"),
+                Some("searxngUrl"),
+                Some("bingApiKey"),
+                None
+            ]
+        );
+        assert_eq!(
+            SearchBackend::ALL.map(|backend| backend.credential().map(|spec| spec.kind)),
+            [
+                Some(CredentialKind::Key),
+                Some(CredentialKind::Key),
+                Some(CredentialKind::Url),
+                Some(CredentialKind::OptionalKey),
+                None
+            ]
+        );
         assert_eq!(
             SearchBackend::ALL.map(|backend| backend.label()),
             ["brave", "tavily", "searxng", "bing", "duckduckgo"]

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::cache::CacheWatch;
+use crate::cache::{CacheMiss, CacheWatch};
 use crate::compact::{Compactor, SummaryMode, SummaryRequest};
 use crate::config::{
     model_display, CompactionSettings, Config, NewModel, SearchBackend, StripContent, ThinkingLevel,
@@ -22,7 +22,7 @@ use crate::mcp::McpManager;
 use crate::paths::WorkspacePathResolver;
 use crate::proc::ProcRegistry;
 use crate::protocol::{HarnessEvent, SessionSnapshot};
-use crate::provider::{Backend, ChatMessage, ChatRequest, Completion, Role, StreamEvent};
+use crate::provider::{Backend, ChatMessage, ChatRequest, Completion, Role, StreamEvent, Usage};
 use crate::session::{
     canonical_tool_arguments, LoadedSession, SessionMeta, SessionStore, SessionWriter,
 };
@@ -973,15 +973,19 @@ impl Agent {
     /// already cached. Providers do not report why an entry was dropped, so the
     /// notice states what was observed — the missed tokens, a model switch and
     /// the gap since the previous request — and never claims a cache lifetime.
-    fn note_cache_miss(&self, usage: &crate::provider::Usage) {
-        let Some(miss) = self.cache_watch.lock().unwrap().observe(
-            &self.agent_model.read().unwrap().clone(),
-            usage,
-            Instant::now(),
-        ) else {
+    fn note_cache_miss(&self, usage: &Usage) {
+        let model = self.agent_model.read().unwrap().clone();
+        // The watch is fed whether or not notices are on, so turning them on
+        // never reports a stale gap from before.
+        let miss = self
+            .cache_watch
+            .lock()
+            .unwrap()
+            .observe(&model, usage, Instant::now());
+        let Some(miss) = miss.filter(CacheMiss::is_significant) else {
             return;
         };
-        if !self.show_cache_miss_notices.load(Ordering::Relaxed) || !miss.is_significant() {
+        if !self.show_cache_miss_notices.load(Ordering::Relaxed) {
             return;
         }
         let label = if miss.model_changed {
@@ -1028,23 +1032,22 @@ impl Agent {
         self.reload_config()
     }
 
-    /// Store (or clear, with an empty value) the credential a backend needs:
-    /// an API key, or the instance URL for SearXNG.
+    /// Store (or clear, with an empty value) the credential a backend needs: an
+    /// API key, or the instance URL for SearXNG.
     pub fn set_search_credential(&self, backend: SearchBackend, value: &str) -> Result<()> {
-        let key = backend.credential_key();
-        if key.is_empty() {
+        let Some(spec) = backend.credential() else {
             return Err(HarnessError::Config(format!(
                 "{} needs no credential",
                 backend.label()
             )));
-        }
+        };
         let value = value.trim();
         let stored = if value.is_empty() {
             Value::Null
         } else {
             json!(value)
         };
-        self.config().save_setting(&["search", key], stored)?;
+        self.config().save_setting(&["search", spec.key], stored)?;
         self.reload_config()
     }
 

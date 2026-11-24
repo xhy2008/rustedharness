@@ -60,10 +60,10 @@ impl Tool for WebSearchTool {
         let num = args.num_results.unwrap_or(5).clamp(1, 10);
         let allowed = args.allowed_domains.unwrap_or_default();
         let blocked = args.blocked_domains.unwrap_or_default();
-        let search = ctx.config.search.clone();
+        let search = &ctx.config.search;
         let hits = ctx
             .web
-            .search(query, num, &allowed, &blocked, &search)
+            .search(query, num, &allowed, &blocked, search)
             .await?;
 
         if hits.is_empty() {

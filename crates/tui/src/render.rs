@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
+use rustedharness_core::config::CredentialKind;
 use rustedharness_core::discovery::CatalogModel;
 
 use crate::app::{
@@ -1091,30 +1092,27 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             backend,
             text,
             cursor,
-            ..
         } => {
-            let label = if backend.needs_url() {
-                "instance url"
+            // A url is not a secret, so only keys are masked.
+            let url = backend
+                .credential()
+                .is_some_and(|spec| spec.kind == CredentialKind::Url);
+            let label = if url { "instance url" } else { "api key" };
+            let hint = if url {
+                "the base url of a searxng instance with the json api enabled"
             } else {
-                "api key"
+                "the key is kept in config.json in plain text"
             };
             let lines = vec![
                 panel_title(&format!("{} {}", backend.label(), label)),
                 Line::from(""),
-                text_field(label, text, true, *cursor, !backend.needs_url()),
+                text_field(label, text, true, *cursor, !url),
                 Line::from(""),
                 Line::from(Span::styled(
                     "enter save   esc cancel   (stored in config.json)",
                     style(FAINT),
                 )),
-                Line::from(Span::styled(
-                    if backend.needs_url() {
-                        "the base url of a searxng instance with the json api enabled"
-                    } else {
-                        "the key is kept in config.json in plain text"
-                    },
-                    style(FAINT),
-                )),
+                Line::from(Span::styled(hint, style(FAINT))),
             ];
             draw_info_block(frame, body, lines);
         }

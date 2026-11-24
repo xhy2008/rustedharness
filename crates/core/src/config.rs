@@ -436,17 +436,7 @@ pub fn provider_id_from_url(base_url: &str) -> String {
     }
 }
 
-/// Get (or create) an object field under `key`.
-fn object_field<'a>(parent: &'a mut Value, key: &str) -> &'a mut serde_json::Map<String, Value> {
-    if !parent.is_object() {
-        *parent = json!({});
-    }
-    object_entry(
-        parent.as_object_mut().expect("object guaranteed above"),
-        key,
-    )
-}
-
+/// Get (or create) the object under `key`, replacing a non-object value.
 fn object_entry<'a>(
     map: &'a mut serde_json::Map<String, Value>,
     key: &str,
@@ -721,31 +711,42 @@ impl SearchBackend {
         }
     }
 
-    /// Whether the backend cannot answer without a credential.
-    pub fn needs_key(self) -> bool {
-        matches!(self, Self::Brave | Self::Tavily)
-    }
-
-    /// Whether the backend has an optional key that upgrades it (Bing serves
-    /// the same results through the official API when a key is set).
-    pub fn key_optional(self) -> bool {
-        matches!(self, Self::Bing)
-    }
-
-    /// Whether the backend needs an instance URL instead of a key.
-    pub fn needs_url(self) -> bool {
-        matches!(self, Self::SearXng)
-    }
-
-    /// Config key that stores this backend's credential.
-    pub fn credential_key(self) -> &'static str {
+    /// What this backend needs before it can search; `None` when it needs no
+    /// account at all.
+    pub fn credential(self) -> Option<Credential> {
+        let credential = |key, kind| Some(Credential { key, kind });
         match self {
-            Self::Brave => "braveApiKey",
-            Self::Tavily => "tavilyApiKey",
-            Self::SearXng => "searxngUrl",
-            Self::Bing => "bingApiKey",
-            Self::DuckDuckGo => "",
+            Self::Brave => credential("braveApiKey", CredentialKind::Key),
+            Self::Tavily => credential("tavilyApiKey", CredentialKind::Key),
+            Self::SearXng => credential("searxngUrl", CredentialKind::Url),
+            Self::Bing => credential("bingApiKey", CredentialKind::OptionalKey),
+            Self::DuckDuckGo => None,
         }
+    }
+}
+
+/// What a backend needs before it can search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Credential {
+    /// `[search]` key that stores the value.
+    pub key: &'static str,
+    pub kind: CredentialKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    /// An API key; the backend cannot search without it.
+    Key,
+    /// An API key that only upgrades the backend to its official API.
+    OptionalKey,
+    /// The base URL of a self-hosted instance, not a secret.
+    Url,
+}
+
+impl CredentialKind {
+    /// Whether the backend is unusable until the value is set.
+    pub fn required(self) -> bool {
+        matches!(self, Self::Key | Self::Url)
     }
 }
 
@@ -768,56 +769,60 @@ pub struct SearchConfig {
     pub searxng_url: Option<String>,
 }
 
+/// Where a backend's credential comes from, for the settings panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// Stored in `config.json` under `[search]`.
+    Config,
+    /// Read from the backend's environment variable.
+    Environment,
+}
+
+/// Trim a configured value, treating a blank string as unset.
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 impl SearchConfig {
-    /// Stored credential, or the environment variable that has always worked
-    /// when the config file says nothing.
-    pub fn credential(&self, backend: SearchBackend) -> Option<String> {
-        let stored = match backend {
-            SearchBackend::Brave => self.brave_api_key.clone(),
-            SearchBackend::Tavily => self.tavily_api_key.clone(),
-            SearchBackend::Bing => self.bing_api_key.clone(),
-            SearchBackend::SearXng => self.searxng_url.clone(),
+    /// The stored value and the environment variable behind it. `None` for a
+    /// backend that needs no credential.
+    fn slots(&self, backend: SearchBackend) -> Option<(&Option<String>, Option<&'static str>)> {
+        match backend {
+            SearchBackend::Brave => Some((&self.brave_api_key, Some("BRAVE_API_KEY"))),
+            SearchBackend::Tavily => Some((&self.tavily_api_key, Some("TAVILY_API_KEY"))),
+            SearchBackend::SearXng => Some((&self.searxng_url, Some("SEARXNG_URL"))),
+            SearchBackend::Bing => Some((&self.bing_api_key, None)),
             SearchBackend::DuckDuckGo => None,
-        };
-        if let Some(value) = stored.filter(|value| !value.trim().is_empty()) {
-            return Some(value.trim().to_string());
         }
-        let env = match backend {
-            SearchBackend::Brave => "BRAVE_API_KEY",
-            SearchBackend::Tavily => "TAVILY_API_KEY",
-            SearchBackend::SearXng => "SEARXNG_URL",
-            SearchBackend::Bing | SearchBackend::DuckDuckGo => return None,
-        };
-        std::env::var(env)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
     }
 
-    /// Where a credential came from, for the settings panel.
-    pub fn credential_source(&self, backend: SearchBackend) -> &'static str {
-        let stored = match backend {
-            SearchBackend::Brave => self.brave_api_key.is_some(),
-            SearchBackend::Tavily => self.tavily_api_key.is_some(),
-            SearchBackend::Bing => self.bing_api_key.is_some(),
-            SearchBackend::SearXng => self.searxng_url.is_some(),
-            SearchBackend::DuckDuckGo => false,
-        };
-        if stored {
-            "config"
+    /// The credential a backend searches with: the stored value, else the
+    /// environment variable that has always worked when the file says nothing.
+    pub fn credential(&self, backend: SearchBackend) -> Option<String> {
+        let (stored, env) = self.slots(backend)?;
+        stored.as_deref().and_then(non_empty).or_else(|| {
+            let value = std::env::var(env?).ok()?;
+            non_empty(&value)
+        })
+    }
+
+    pub fn credential_source(&self, backend: SearchBackend) -> Option<CredentialSource> {
+        let (stored, _) = self.slots(backend)?;
+        if stored.as_deref().and_then(non_empty).is_some() {
+            Some(CredentialSource::Config)
         } else if self.credential(backend).is_some() {
-            "environment"
+            Some(CredentialSource::Environment)
         } else {
-            ""
+            None
         }
     }
 
     /// Whether the selected backend can answer as configured.
     pub fn ready(&self) -> bool {
-        match self.backend {
-            backend if backend.needs_key() || backend.needs_url() => {
-                self.credential(backend).is_some()
-            }
+        let backend = self.backend;
+        match backend.credential() {
+            Some(spec) if spec.kind.required() => self.credential(backend).is_some(),
             _ => true,
         }
     }
@@ -859,6 +864,27 @@ impl Default for McpConfig {
             call_timeout_ms: 30_000,
         }
     }
+}
+
+/// Read a JSON or JSONC file as an object. A missing or damaged file becomes an
+/// empty object, so the edit saves instead of failing.
+fn load_json_object(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| parse_jsonc::<Value>(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Write `root` back as pretty JSON, creating its directory first.
+fn save_json_object(path: &Path, root: &Value) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut text = serde_json::to_string_pretty(root)?;
+    text.push('\n');
+    std::fs::write(path, text)?;
+    Ok(())
 }
 
 impl Config {
@@ -1070,14 +1096,8 @@ impl Config {
         let (last, parents) = path
             .split_last()
             .ok_or_else(|| HarnessError::Config("empty settings path".to_string()))?;
-        let dir = self.source_dir();
-        std::fs::create_dir_all(&dir)?;
-        let path_on_disk = dir.join("config.json");
-        let mut root: Value = std::fs::read_to_string(&path_on_disk)
-            .ok()
-            .and_then(|raw| parse_jsonc::<Value>(&raw).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| Value::Object(Default::default()));
+        let path_on_disk = self.source_dir().join("config.json");
+        let mut root = load_json_object(&path_on_disk);
         let mut slot = &mut root;
         for key in parents {
             if !slot.is_object() {
@@ -1094,10 +1114,7 @@ impl Config {
         slot.as_object_mut()
             .expect("object inserted above")
             .insert((*last).to_string(), value);
-        let mut text = serde_json::to_string_pretty(&root)?;
-        text.push('\n');
-        std::fs::write(&path_on_disk, text)?;
-        Ok(())
+        save_json_object(&path_on_disk, &root)
     }
 
     /// Append one provider/model pair to `models.json`, returning the
@@ -1115,25 +1132,24 @@ impl Config {
         }
         let provider_id = provider_id_from_url(&base_url);
         let path = self.source_dir().join("models.json");
-        let mut root: Value = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| parse_jsonc::<Value>(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
-        let providers = object_field(&mut root, "providers");
-        let provider = object_entry(providers, &provider_id);
+        let mut root = load_json_object(&path);
+        let provider = object_entry(
+            object_entry(
+                root.as_object_mut().expect("loaded as an object"),
+                "providers",
+            ),
+            &provider_id,
+        );
         provider.insert("baseUrl".to_string(), json!(base_url));
+        // The wizard only speaks `openai-completions`, but a provider that is
+        // already configured keeps the protocol its other models were written
+        // for.
         provider
             .entry("api".to_string())
             .or_insert_with(|| json!("openai-completions"));
         let api_key = new.api_key.trim();
         if !api_key.is_empty() {
             provider.insert("apiKey".to_string(), json!(api_key));
-        }
-        if new.context_window > 0 {
-            provider
-                .entry("contextWindow".to_string())
-                .or_insert_with(|| json!(new.context_window));
         }
         let models = provider
             .entry("models".to_string())
@@ -1152,11 +1168,7 @@ impl Config {
         }
         models.push(entry);
 
-        let dir = self.source_dir();
-        std::fs::create_dir_all(&dir)?;
-        let mut text = serde_json::to_string_pretty(&root)?;
-        text.push('\n');
-        std::fs::write(&path, text)?;
+        save_json_object(&path, &root)?;
         Ok(format!("{provider_id}/{model_id}"))
     }
 
