@@ -212,6 +212,7 @@ and model selection loads unchanged.
     "compactStripContext": true,
     "sendRecentTurns": 16,
     "stripContent": "toolOutputAndThinking",
+    "compactThinking": "off",
     "temperature": 0.2,
     "chaseLimit": 3,
     "maxOutputTokens": 8192,
@@ -288,9 +289,13 @@ appended to the tool result.
   full; older turns lose the content selected by `stripContent` (`none`,
   `toolOutput`, or
   `toolOutputAndThinking`). `keepRecentTurns` separately controls how many
-  turns stay verbatim after compaction. `/settings` opens a compaction
-  submenu for all of these. Auto-compaction is always on. Changes apply
-  immediately and are written to `config.json`.
+  turns stay verbatim after compaction. `compactThinking` asks for a reasoning
+  effort on the summary request (`off`, `low`, `medium`, `high`, `xhigh` or
+  `max`) and applies to both compaction paths; `off` sends no effort field, and
+  the value is only sent when the compaction model declares `reasoning` and its
+  provider accepts `reasoning_effort`. `/settings` opens a compaction submenu
+  for all of these. Auto-compaction is always on. Changes apply immediately and
+  are written to `config.json`.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
   retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
   for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).

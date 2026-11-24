@@ -223,6 +223,7 @@ pub struct Compat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedCompat {
     pub supports_store: bool,
+    pub supports_reasoning_effort: bool,
     pub supports_developer_role: bool,
     pub supports_usage_in_streaming: bool,
     pub supports_finish_reason: bool,
@@ -289,6 +290,9 @@ impl Compat {
         let detected_developer = if is_responses { true } else { is_openai };
         ResolvedCompat {
             supports_store: self.supports_store.unwrap_or(!is_non_standard),
+            supports_reasoning_effort: self
+                .supports_reasoning_effort
+                .unwrap_or(is_responses || !is_non_standard),
             supports_developer_role: self.supports_developer_role.unwrap_or(detected_developer),
             supports_usage_in_streaming: self.supports_usage_in_streaming.unwrap_or(true),
             supports_finish_reason: self.supports_finish_reason.unwrap_or(true),
@@ -329,6 +333,9 @@ pub struct AgentConfig {
     pub send_recent_turns: usize,
     /// What to remove from turns older than `sendRecentTurns`.
     pub strip_content: StripContent,
+    /// Reasoning effort for the summary request. Applies to both compaction
+    /// paths; `off` sends no effort at all.
+    pub compact_thinking: ThinkingLevel,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Max todo chase injections per stall event.
@@ -351,6 +358,7 @@ impl Default for AgentConfig {
             compact_strip_context: true,
             send_recent_turns: 16,
             strip_content: StripContent::ToolOutputAndThinking,
+            compact_thinking: ThinkingLevel::Off,
             temperature: Some(0.2),
             chase_limit: 3,
             max_output_tokens: 8_192,
@@ -370,6 +378,7 @@ pub struct CompactionSettings {
     pub compact_strip_context: bool,
     pub send_recent_turns: usize,
     pub strip_content: StripContent,
+    pub compact_thinking: ThinkingLevel,
 }
 
 impl From<&AgentConfig> for CompactionSettings {
@@ -380,6 +389,7 @@ impl From<&AgentConfig> for CompactionSettings {
             compact_strip_context: cfg.compact_strip_context,
             send_recent_turns: cfg.send_recent_turns,
             strip_content: cfg.strip_content,
+            compact_thinking: cfg.compact_thinking,
         }
     }
 }
@@ -409,6 +419,56 @@ impl StripContent {
             Self::Nothing => Self::ToolOutput,
             Self::ToolOutput => Self::ToolOutputAndThinking,
             Self::ToolOutputAndThinking => Self::Nothing,
+        }
+    }
+}
+
+/// Reasoning effort requested for a compaction summary. `Off` sends no
+/// `reasoning_effort` field, so the provider's default applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ThinkingLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Wire value for `reasoning_effort`; `None` omits the field.
+    pub fn effort(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::XHigh,
+            Self::XHigh => Self::Max,
+            Self::Max => Self::Off,
         }
     }
 }
@@ -1114,13 +1174,33 @@ mod tests {
     #[test]
     fn separated_compaction_options_parse() {
         let cfg: Config = serde_json::from_str(
-            r#"{"agent":{"keepRecentTurns":4,"sendRecentTurns":6,"stripContent":"toolOutput"}}"#,
+            r#"{"agent":{"keepRecentTurns":4,"sendRecentTurns":6,"stripContent":"toolOutput","compactThinking":"xhigh"}}"#,
         )
         .unwrap();
         let settings = CompactionSettings::from(&cfg.agent);
         assert_eq!(settings.keep_recent_turns, 4);
         assert_eq!(settings.send_recent_turns, 6);
         assert_eq!(settings.strip_content, StripContent::ToolOutput);
+        assert_eq!(settings.compact_thinking, ThinkingLevel::XHigh);
+    }
+
+    /// Every level the settings panel cycles through round-trips through JSON,
+    /// and `off` is the default so no effort is requested unless asked for.
+    #[test]
+    fn thinking_levels_round_trip_and_cycle_in_order() {
+        assert_eq!(ThinkingLevel::default(), ThinkingLevel::Off);
+        assert_eq!(ThinkingLevel::default().effort(), None);
+        let mut level = ThinkingLevel::Off;
+        let mut labels = Vec::new();
+        for _ in 0..6 {
+            labels.push(level.label());
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(serde_json::from_str::<ThinkingLevel>(&json).unwrap(), level);
+            level = level.next();
+        }
+        assert_eq!(labels, ["off", "low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(level, ThinkingLevel::Off, "the cycle wraps around");
+        assert_eq!(ThinkingLevel::Max.effort(), Some("max"));
     }
 
     #[test]

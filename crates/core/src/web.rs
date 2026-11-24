@@ -455,6 +455,7 @@ async fn extract_with_compact(
         max_tokens: Some(1_500),
         stream: false,
         model_reasoning: false,
+        reasoning_effort: None,
     };
     let completion = backend.complete(request).await?;
     Ok(completion.content)

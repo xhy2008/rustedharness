@@ -952,3 +952,16 @@ rm -rf target/debug/incremental                                       # 顺手�
     百分号编码的 URL 会被当成 base64 发出去）；浏览器打开改用 `webbrowser`；
     `config edit` 用 `shell-words` 切分 `$VISUAL`/`$EDITOR`——它们存的是命令行而不是
     程序名，旧代码把整串交给 `Command::new`，`EDITOR="code -w"` 直接 ENOENT。
+
+## 已完成：压缩思考档位（2026-11-16）
+
+- 删掉 `/compact-model` 斜杠命令：压缩模型只从 `/settings` → compaction → model 修改，
+  和其余压缩参数放在一起（`ModelTarget::Compact` 与 `set_model` 保留给设置页用）。
+- 新增 `agent.compactThinking`：`off` / `low` / `medium` / `high` / `xhigh` / `max`，
+  `/settings` 里 Enter 循环切换。**主模型压缩和独立模型压缩都生效**——档位写在
+  `ChatRequest.reasoning_effort` 上，两条路径共用同一个请求构造。
+- `off` 不发送任何字段（交给 provider 默认值）；其余档位在 Chat Completions 上写
+  `reasoning_effort`，在 Responses 上写 `reasoning.effort`。
+- 只有压缩模型声明 `reasoning` 且 provider 的 `compat.supportsReasoningEffort` 为真
+  时才发送（`Router::stream_chat` 清掉非推理模型上的档位）。该 compat 项此前只解析
+  不使用，现在接上了。

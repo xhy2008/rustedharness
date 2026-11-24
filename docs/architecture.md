@@ -141,8 +141,13 @@ separate summary model starts cold. `compactStripContext` enables trimming:
 full, while older turns lose the content selected by `stripContent` (`none`,
 `toolOutput`, or
 `toolOutputAndThinking`). `keepRecentTurns` independently controls how many
-turns are kept verbatim after compaction. `/settings` exposes the model,
-threshold, both turn counts and the strip controls. Auto-compaction is always
+turns are kept verbatim after compaction. `compactThinking` sets the reasoning
+effort of the summary request for both paths: `off` omits the field, otherwise
+the level is sent as `reasoning_effort` on Chat Completions and as
+`reasoning.effort` on Responses, but only when the compaction model declares
+`reasoning` and the provider's compat allows reasoning effort. `/settings`
+exposes the model, thinking, threshold, both turn counts and the strip
+controls. Auto-compaction is always
 on, and each change applies to the running agent and is persisted under
 `agent` in `config.json`. While the model is `None` or
 `compactStripContext` is off, the dependent trim controls are disabled.

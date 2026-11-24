@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::compact::{Compactor, SummaryMode};
-use crate::config::{model_display, CompactionSettings, Config, StripContent};
+use crate::config::{model_display, CompactionSettings, Config, StripContent, ThinkingLevel};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
 use crate::lsp::LspHub;
@@ -336,6 +336,15 @@ impl Agent {
         Ok(())
     }
 
+    pub fn set_compact_thinking(&self, level: ThinkingLevel) -> Result<()> {
+        let mut settings = self.compaction_settings();
+        settings.compact_thinking = level;
+        self.config
+            .save_setting(&["agent", "compactThinking"], json!(level))?;
+        *self.compaction.write().unwrap() = settings;
+        Ok(())
+    }
+
     pub fn set_strip_content(&self, content: StripContent) -> Result<()> {
         let mut settings = self.compaction_settings();
         settings.strip_content = content;
@@ -632,6 +641,7 @@ impl Agent {
                     .resolve_model(&self.agent_model.read().unwrap().clone())
                     .map(|spec| spec.reasoning)
                     .unwrap_or(false),
+                reasoning_effort: None,
             };
 
             let (sink, mut stream_rx) = mpsc::unbounded_channel();

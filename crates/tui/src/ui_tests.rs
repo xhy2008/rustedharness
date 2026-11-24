@@ -378,7 +378,7 @@ fn compaction_settings_explain_the_disabled_strip_option() {
     app.compact_model = app.agent_model.clone();
     app.overlay = Overlay::Settings {
         page: SettingsPage::Compaction,
-        sel: 3,
+        sel: 4,
     };
     let json = dump(&mut app, 140, 30);
     let screen: String = (0..30)

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, ProviderConfig, ResolvedCompat};
+use crate::config::{Compat, ProviderConfig, ResolvedCompat, ThinkingLevel};
 use crate::error::{HarnessError, Result};
 use crate::provider::{
     openai_client, Backend, ChatRequest, Completion, FunctionCall, Role, StreamEvent, ToolCall,
@@ -135,6 +135,13 @@ impl ResponsesProvider {
         }
         if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
+        }
+        if let Some(effort) = request
+            .reasoning_effort
+            .and_then(ThinkingLevel::effort)
+            .filter(|_| request.model_reasoning && compat.supports_reasoning_effort)
+        {
+            body.insert("reasoning".into(), json!({ "effort": effort }));
         }
         if let Some(max_tokens) = request.max_tokens {
             body.insert("max_output_tokens".into(), json!(max_tokens));
@@ -520,6 +527,17 @@ mod tests {
         );
     }
 
+    /// The Responses API nests the effort under `reasoning` instead of using
+    /// the flat `reasoning_effort` field of Chat Completions.
+    #[test]
+    fn reasoning_effort_nests_under_reasoning() {
+        let provider = provider();
+        let mut request = ChatRequest::new("gpt-5", vec![crate::provider::ChatMessage::user("hi")]);
+        request.model_reasoning = true;
+        request.reasoning_effort = Some(crate::config::ThinkingLevel::Max);
+        assert_eq!(provider.body(&request)["reasoning"]["effort"], "max");
+    }
+
     #[test]
     fn body_translates_messages_and_tools() {
         let provider = provider();
@@ -550,6 +568,7 @@ mod tests {
             max_tokens: Some(100),
             stream: true,
             model_reasoning: false,
+            reasoning_effort: None,
         };
 
         let body = provider.body(&request);
@@ -560,6 +579,7 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 100);
         assert_eq!(body["temperature"].as_f64().unwrap(), 0.2f32 as f64);
         assert!(body.get("messages").is_none());
+        assert!(body.get("reasoning").is_none(), "no effort was requested");
 
         let input = body["input"].as_array().unwrap();
         assert_eq!(input[0]["type"], "message");

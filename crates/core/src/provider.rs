@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{Compat, Config, MaxTokensField, ProviderConfig, ResolvedCompat};
+use crate::config::{
+    Compat, Config, MaxTokensField, ProviderConfig, ResolvedCompat, ThinkingLevel,
+};
 use crate::error::{HarnessError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -301,6 +303,9 @@ pub struct ChatRequest {
     /// Whether the routed model is a reasoning model. Pi only uses the
     /// developer role for reasoning models on Chat Completions.
     pub model_reasoning: bool,
+    /// Requested reasoning effort; only sent when the model is a reasoning
+    /// model and the provider's compat allows `reasoning_effort`.
+    pub reasoning_effort: Option<ThinkingLevel>,
 }
 
 impl ChatRequest {
@@ -313,6 +318,7 @@ impl ChatRequest {
             max_tokens: None,
             stream: true,
             model_reasoning: false,
+            reasoning_effort: None,
         }
     }
 }
@@ -566,6 +572,13 @@ impl Provider {
         if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
+        if let Some(effort) = request
+            .reasoning_effort
+            .and_then(ThinkingLevel::effort)
+            .filter(|_| request.model_reasoning && compat.supports_reasoning_effort)
+        {
+            body.insert("reasoning_effort".into(), json!(effort));
+        }
         if let Some(max_tokens) = request.max_tokens {
             match compat.max_tokens_field {
                 MaxTokensField::MaxTokens => {
@@ -753,6 +766,9 @@ impl Backend for Router {
             .resolve_model(&request.model)
             .map(|spec| spec.reasoning)
             .unwrap_or(false);
+        if !request.model_reasoning {
+            request.reasoning_effort = None;
+        }
         request.model = model_id;
         provider.stream_chat(request, sink, cancel).await
     }
@@ -1471,6 +1487,38 @@ mod tests {
         assert_eq!(messages[2]["role"], "assistant");
         assert_eq!(messages[2]["content"], "I have processed the tool results.");
         assert_eq!(messages[3]["role"], "user");
+    }
+
+    /// Compaction asks for an effort level; the request keeps it only when the
+    /// routed model reasons and the provider accepts `reasoning_effort`.
+    #[test]
+    fn reasoning_effort_is_sent_only_for_reasoning_models() {
+        let p = provider();
+        let mut request = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        request.reasoning_effort = Some(ThinkingLevel::High);
+        assert!(p.body(&request).get("reasoning_effort").is_none());
+
+        request.model_reasoning = true;
+        assert_eq!(p.body(&request)["reasoning_effort"], "high");
+
+        request.reasoning_effort = Some(ThinkingLevel::Off);
+        assert!(
+            p.body(&request).get("reasoning_effort").is_none(),
+            "off sends no effort field at all"
+        );
+
+        let mut config = ProviderConfig {
+            base_url: "http://127.0.0.1:1/v1".into(),
+            ..Default::default()
+        };
+        config.compat.supports_reasoning_effort = Some(false);
+        let mut cfg = Config::default();
+        cfg.providers.insert("mock".into(), config);
+        cfg.provider = "mock".into();
+        cfg.model = "mock/m".into();
+        let p = Provider::from_config(&cfg).unwrap();
+        request.reasoning_effort = Some(ThinkingLevel::Medium);
+        assert!(p.body(&request).get("reasoning_effort").is_none());
     }
 
     #[test]

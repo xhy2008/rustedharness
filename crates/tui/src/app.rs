@@ -231,12 +231,14 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/help", "show this command list"),
     ("/hotkeys", "keyboard shortcut reference"),
     ("/model", "open the model picker"),
-    ("/compact-model", "switch the compaction model"),
     ("/cwd <dir>", "move the workspace root"),
     ("/new", "start a fresh session"),
     ("/resume", "pick a saved session"),
     ("/session", "show session id, models and context usage"),
-    ("/settings", "open settings (compaction model and limits)"),
+    (
+        "/settings",
+        "open settings (compaction model, thinking and limits)",
+    ),
     ("/files", "browse the workspace file tree"),
     ("/view <path>", "open a file read-only"),
     ("/lsp", "language server status"),
@@ -1567,6 +1569,19 @@ impl App {
                                     Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                                 }
                             }
+                            "thinking" => {
+                                let level = self.compaction.compact_thinking.next();
+                                match self.agent.set_compact_thinking(level) {
+                                    Ok(()) => {
+                                        self.compaction = self.agent.compaction_settings();
+                                        self.notice(format!(
+                                            "compaction thinking: {}",
+                                            level.label()
+                                        ));
+                                    }
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                                }
+                            }
                             "content" => {
                                 let content = self.compaction.strip_content.next();
                                 match self.agent.set_strip_content(content) {
@@ -1602,10 +1617,6 @@ impl App {
             "/hotkeys" => self.overlay = Overlay::Hotkeys,
             "/model" if arg.is_empty() => self.open_model_picker(ModelTarget::Agent, false),
             "/model" => self.set_model(&arg, ModelTarget::Agent),
-            "/compact-model" if arg.is_empty() => {
-                self.open_model_picker(ModelTarget::Compact, false)
-            }
-            "/compact-model" => self.set_model(&arg, ModelTarget::Compact),
             "/cwd" if arg.is_empty() => self.notice(format!("cwd: {}", self.cwd)),
             "/cwd" => match self.agent.set_cwd(Path::new(&arg)).await {
                 Ok(()) => {
@@ -1786,17 +1797,32 @@ impl App {
         self.settings_items_for(page)
     }
 
+    /// Whether the model that writes summaries declares `reasoning`; a level
+    /// set for a non-reasoning model is never sent.
+    fn compaction_model_reasons(&self) -> bool {
+        let model = if self.compact_is_separate {
+            &self.compact_model
+        } else {
+            &self.agent_model
+        };
+        self.config
+            .resolve_model(model)
+            .map(|spec| spec.reasoning)
+            .unwrap_or(false)
+    }
+
     fn settings_items_for(&self, page: SettingsPage) -> Vec<PickerItem> {
         match page {
             SettingsPage::Root => vec![PickerItem {
                 label: "compaction".to_string(),
                 detail: format!(
-                    "model {} | {:.0}% threshold | keep {}",
+                    "model {} | {} thinking | {:.0}% threshold | keep {}",
                     if self.compact_is_separate {
                         rustedharness_core::config::model_display(&self.compact_model).to_string()
                     } else {
                         "None (main model)".to_string()
                     },
+                    self.compaction.compact_thinking.label(),
                     self.compaction.compact_threshold * 100.0,
                     self.compaction.keep_recent_turns
                 ),
@@ -1815,6 +1841,22 @@ impl App {
                         "None - reuse the main model's cached prompt".to_string()
                     },
                     value: "model".to_string(),
+                    disabled: false,
+                },
+                PickerItem {
+                    label: "thinking".to_string(),
+                    detail: if self.compaction_model_reasons() {
+                        format!(
+                            "{} - reasoning effort for the summary request",
+                            self.compaction.compact_thinking.label()
+                        )
+                    } else {
+                        format!(
+                            "{} - the compaction model does not declare reasoning",
+                            self.compaction.compact_thinking.label()
+                        )
+                    },
+                    value: "thinking".to_string(),
                     disabled: false,
                 },
                 PickerItem {
@@ -1888,6 +1930,7 @@ impl App {
             .unwrap_or_default();
         match value.as_str() {
             "model" => "None reuses the main model. The summary request then sends the same system prompt, tools and old messages as the live turn, so the provider can serve the whole prefix from prompt cache. A separate model starts with a cold cache; it is useful only when its lower price outweighs the uncached input.".to_string(),
+            "thinking" => "Reasoning effort requested for the summary request, for both the main model and a separate compaction model. Enter cycles off, low, medium, high, xhigh and max. Off sends no effort field, so the provider default applies. The value is only sent when the compaction model declares reasoning and its provider supports reasoning effort.".to_string(),
             "threshold" => "Compaction starts when the provider-reported context reaches this share of the model's context window. Use Left/Right to change it by 5%. Lower values compact earlier and keep more headroom; higher values spend more context before summarising.".to_string(),
             "keep" => "After compaction this many recent user turns stay verbatim below the summary. They are the model's immediate working context. Use Left/Right to change the count.".to_string(),
             "strip" if self.compact_is_separate => "Turn trimming on for the separate model. When enabled, the two options below decide how many recent turns are sent in full and what is removed from older turns. When disabled, the complete transcript is sent.".to_string(),
@@ -2309,6 +2352,7 @@ fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustedharness_core::config::ThinkingLevel;
 
     /// Everything language-server related is a `/lsp` subcommand.
     #[test]
@@ -2549,6 +2593,10 @@ mod tests {
             assert_ne!(*command, "/model <name>", "the picker covers this");
             assert_ne!(*command, "/clear", "/clear was removed");
             assert_ne!(*command, "/todo", "ctrl+t shows the todo list");
+            assert_ne!(
+                *command, "/compact-model",
+                "the settings panel owns the compaction model"
+            );
         }
         // The settings panel is back and drives compaction.
         assert!(COMMANDS.iter().any(|(command, _)| *command == "/settings"));
@@ -2581,7 +2629,7 @@ mod tests {
         ));
         app.overlay = Overlay::Settings {
             page: SettingsPage::Compaction,
-            sel: 1,
+            sel: 2,
         };
         let threshold = app.compaction.compact_threshold;
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
@@ -2601,11 +2649,11 @@ mod tests {
         assert_eq!(app.agent.compact_model(), app.agent_model);
         app.overlay = Overlay::Settings {
             page: SettingsPage::Compaction,
-            sel: 3,
+            sel: 4,
         };
-        assert!(app.settings_items()[3].disabled);
-        assert!(app.settings_items()[4].disabled);
-        assert!(app.settings_items()[5].disabled);
+        for index in 4..=6 {
+            assert!(app.settings_items()[index].disabled, "item {index}");
+        }
         assert!(app.settings_description().contains("complete live history"));
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(
@@ -2617,11 +2665,11 @@ mod tests {
         app.compaction.compact_strip_context = false;
         app.overlay = Overlay::Settings {
             page: SettingsPage::Compaction,
-            sel: 4,
+            sel: 5,
         };
-        assert!(!app.settings_items()[3].disabled);
-        assert!(app.settings_items()[4].disabled);
+        assert!(!app.settings_items()[4].disabled);
         assert!(app.settings_items()[5].disabled);
+        assert!(app.settings_items()[6].disabled);
         let send = app.compaction.send_recent_turns;
         app.adjust_setting(true);
         assert_eq!(
@@ -2632,11 +2680,55 @@ mod tests {
         app.compaction.compact_strip_context = true;
         app.overlay = Overlay::Settings {
             page: SettingsPage::Compaction,
-            sel: 5,
+            sel: 6,
         };
         let content = app.compaction.strip_content;
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert_ne!(app.compaction.strip_content, content);
+    }
+
+    /// `thinking` is a compaction option like `strip content`: Enter cycles the
+    /// level, the agent keeps it, and both compaction paths read it.
+    #[test]
+    fn settings_cycle_the_compaction_thinking_level() {
+        let mut app = crate::ui_tests::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let index = app
+            .settings_items_for(SettingsPage::Compaction)
+            .iter()
+            .position(|item| item.value == "thinking")
+            .expect("thinking row");
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Compaction,
+            sel: index,
+        };
+        assert!(
+            !app.settings_items()[index].disabled,
+            "both paths honour it"
+        );
+
+        for expected in [
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+            ThinkingLevel::Off,
+        ] {
+            runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+            assert_eq!(app.compaction.compact_thinking, expected);
+            assert_eq!(app.agent.compaction_settings().compact_thinking, expected);
+            assert!(matches!(
+                app.overlay,
+                Overlay::Settings {
+                    page: SettingsPage::Compaction,
+                    ..
+                }
+            ));
+        }
+        assert!(app.settings_description().contains("off, low, medium"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{CompactionSettings, StripContent};
+use crate::config::{CompactionSettings, StripContent, ThinkingLevel};
 use crate::error::Result;
 use crate::provider::{Backend, ChatMessage, ChatRequest, Role, ToolDefinition};
 use crate::session::{COMPACTION_PREFIX, SUMMARY_SUFFIX};
@@ -43,6 +43,7 @@ pub struct Compactor {
     pub context_limit: u64,
     pub strip_context: bool,
     pub strip_content: StripContent,
+    pub compact_thinking: ThinkingLevel,
     pub counter: Arc<UsageTracker>,
 }
 
@@ -59,6 +60,7 @@ impl Compactor {
             context_limit,
             strip_context: settings.compact_strip_context,
             strip_content: settings.strip_content,
+            compact_thinking: settings.compact_thinking,
             counter,
         }
     }
@@ -155,6 +157,7 @@ impl Compactor {
             max_tokens: Some(1_500),
             stream: false,
             model_reasoning: false,
+            reasoning_effort: Some(self.compact_thinking),
         };
         let completion = backend.complete(request).await?;
         let mut summary = completion.content.trim().to_string();
@@ -302,6 +305,7 @@ mod tests {
             context_limit: 1_000,
             strip_context: true,
             strip_content: StripContent::ToolOutputAndThinking,
+            compact_thinking: ThinkingLevel::High,
             counter: Arc::new(UsageTracker::new()),
         }
     }
@@ -371,6 +375,7 @@ mod tests {
             .unwrap();
         let request = fake.request();
         assert_eq!(request.model, "compact-model");
+        assert_eq!(request.reasoning_effort, Some(ThinkingLevel::High));
         assert_eq!(request.messages[0].content.as_deref(), Some(SUMMARY_SYSTEM));
         assert!(request.tools.is_empty());
         let transcript = request.messages[1].content.as_deref().unwrap();
