@@ -983,3 +983,25 @@ rm -rf target/debug/incremental                                       # 顺手�
    观察到的事实（重计费 token 数、距上一次请求的空闲时长、是否换了模型），不声称
    任何寿命。压缩会重写 prompt，所以压缩后 `reset()`，下一轮不算 miss。`agent.showCacheMissNotices`（默认开）可关，`/settings` 根页第一项就是它。
 4. **不做 cache warming**：缺 `cost` 价格数据就算不出收益，盲目重发只会烧钱。
+
+## 已完成：`/settings` 的 429 重试次数与 `/model` 的 Add Model 向导（2026-11-16）
+
+1. **429MaxRetry**：`agent.rateLimitRetries` 从 `Option<u32>`（null=无限）改为 `u32`，默认 5；
+   `/settings` 根页第二行 Enter 在 5/15/30/50/100 之间循环，写回 `config.json` 并立刻生效
+   （`Agent` 用 `AtomicU32` 持有，因为 config 快照不可变）。重试间隔删除可配置项，固定为
+   常量 `RATE_LIMIT_RETRY_INTERVAL = 3s`，避免把被限流的 provider 打得更狠。
+2. **Add Model 向导**：`/model` 选择器最后一行是 `Add model...`，Enter 打开全屏表单
+   （`Overlay::AddModel` / `AddModelState`）：base url → api key → Enter 请求
+   `GET {base}/models` → 选中模型后写入 `models.json` 并立刻切换。空列表时退化为手输
+   model id，Esc 逐级返回。API key 在界面上打码，但**明文存在 models.json 里**（写在提示行上）。
+3. **模型列表解析**（`core/discovery.rs`）：兼容 `data` / `models` / 裸数组等信封，
+   上下文长度认 `context_length` / `context_window` / `max_context_len` / `max_model_len`
+   以及 OpenRouter 的 `top_provider.*`，输出上限认 `max_completion_tokens` /
+   `max_output_tokens` / `max_tokens`；认不出的字段留空，不猜。请求跑在 worker task 上，
+   通过 `OpResult::Catalog` 回传，URL 不匹配当前向导的回复直接丢弃。
+4. **写文件**（`Config::add_model`）：按 JSON 编辑而不是从结构体重新生成，手写字段
+   （如 `compat`）原样保留；provider id 由 URL host 推导（`api.deepseek.com` → `deepseek`，
+   IP 端点保留地址和端口）；未知 context 不写该键；重复添加同一 id 覆盖而非追加。
+5. **热重载**（`Agent::add_model`）：写完后重新加载 `config.json`/`models.json`，重建
+   provider router 并替换 `ToolContext` 的 config/backend，所以向导选中的模型在当前
+   会话里立刻可用，不用重启。为此 `Agent.config`/`backend` 改为 `RwLock<Arc<_>>`。

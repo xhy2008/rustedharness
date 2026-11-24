@@ -39,8 +39,8 @@ protocol.
 5. Optionally chase incomplete todos, then persist every message as a JSONL
    session record.
 
-Rate-limited (429) requests retry at `agent.rateLimitIntervalSecs` up to
-`agent.rateLimitRetries` times, with `null` meaning retry until cancellation;
+Rate-limited (429) requests retry at a fixed three-second interval
+(`RATE_LIMIT_RETRY_INTERVAL`) for up to `agent.rateLimitRetries` attempts;
 quota exhaustion is terminal.
 
 Provider requests have **no timeout by default** (`agent.httpIdleTimeoutMs`
@@ -170,6 +170,25 @@ controls. Auto-compaction is always
 on, and each change applies to the running agent and is persisted under
 `agent` in `config.json`. While the model is `None` or
 `compactStripContext` is off, the dependent trim controls are disabled.
+
+### Adding models at runtime
+
+`/model` lists the configured models and ends with an "Add model..." row that
+opens a full-screen form (`AddModelState` in `tui/src/app.rs`): base URL, API
+key, then the models the endpoint advertises. The list comes from
+`discovery.rs`, which asks `GET {base}/models` and accepts the envelopes and
+field names seen in the wild (`data`/`models`, `context_length`/
+`context_window`/`max_model_len`/OpenRouter's nested `top_provider`), leaving
+anything it does not recognise unknown instead of guessing. The request runs on
+a worker task and comes back as `OpResult::Catalog`, so the UI never blocks on
+the network; a reply whose URL no longer matches the open wizard is dropped.
+
+`Config::add_model` edits `models.json` as JSON rather than regenerating it, so
+hand-written keys and comments-adjacent structure survive; the provider id is
+derived from the endpoint host and an unknown context window writes no key at
+all. `Agent::add_model` then reloads `config.json`/`models.json`, rebuilds the
+router and swaps the `ToolContext`'s config and backend, so the model the wizard
+just saved is usable in the running session.
 
 ### Sessions
 

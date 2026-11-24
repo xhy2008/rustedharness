@@ -4,6 +4,7 @@ pub mod agent;
 pub mod cache;
 pub mod compact;
 pub mod config;
+pub mod discovery;
 pub mod error;
 pub mod hashline;
 pub mod intel;

@@ -20,9 +20,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
+use rustedharness_core::discovery::CatalogModel;
+
 use crate::app::{
-    human_count, model_filtered, ordered, selection_row_span, session_filtered, shorten_path, App,
-    Overlay, PickerItem,
+    human_count, model_filtered, ordered, selection_row_span, session_filtered, shorten_path,
+    AddModelState, AddModelStep, App, Overlay, PickerItem,
 };
 use crate::entries::{Entry, EntryKind};
 use crate::theme::*;
@@ -1083,6 +1085,7 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
             let help = app.settings_description();
             draw_picker(frame, body, title, &items, *sel, "", Some(&help));
         }
+        Overlay::AddModel(state) => draw_add_model(frame, body, state),
         Overlay::Hotkeys => {
             let lines = vec![
                 panel_title("keys"),
@@ -1305,6 +1308,186 @@ fn panel(frame: &mut Frame, body: Rect, height: u16, title: Option<Line<'static>
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
+}
+
+/// Full-screen add-model flow: an endpoint form, then the discovered models.
+/// Both steps are drawn in the same frame so the panel never jumps size while
+/// the user types.
+fn draw_add_model(frame: &mut Frame, body: Rect, state: &AddModelState) {
+    frame.render_widget(Clear, body);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style(BORDER))
+        .style(Style::default().bg(BG_BASE))
+        .padding(ratatui::widgets::Padding::new(1, 1, 0, 0))
+        .title(Line::from(vec![
+            Span::styled(" add model ", style(MUTED)),
+            Span::styled(
+                match state.step {
+                    AddModelStep::Endpoint => "1/2 endpoint",
+                    AddModelStep::Models => "2/2 model",
+                },
+                style(FAINT),
+            ),
+        ]));
+    let inner = block.inner(body);
+    frame.render_widget(block, body);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match state.step {
+        AddModelStep::Endpoint => {
+            lines.push(Line::from(""));
+            lines.push(text_field(
+                "base url",
+                &state.url,
+                state.field == 0,
+                state.cursor,
+                false,
+            ));
+            lines.push(text_field(
+                "api key",
+                &state.key,
+                state.field == 1,
+                state.cursor,
+                true,
+            ));
+            lines.push(Line::from(""));
+            lines.push(action_row("fetch models", state.field == 2, state.busy));
+        }
+        AddModelStep::Models => {
+            let shown = state.filtered();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<14}", "filter"), style(BLUE)),
+                Span::styled(state.filter.clone(), style(TEXT)),
+                Span::styled("_", style(FAINT)),
+                Span::styled(
+                    format!("   {} of {}", shown.len(), state.items.len()),
+                    style(FAINT),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            let rows = inner.height.saturating_sub(7) as usize;
+            let window = shown.len().min(rows.max(1));
+            for (index, model) in shown.iter().take(window).enumerate() {
+                let selected = index == state.sel;
+                let base = if selected {
+                    Style::default().bg(SELECTED_BG)
+                } else {
+                    Style::default()
+                };
+                let mut spans = vec![
+                    Span::styled(if selected { " > " } else { "   " }, base),
+                    Span::styled(
+                        model.id.clone(),
+                        base.fg(if selected { TEXT } else { MUTED }),
+                    ),
+                ];
+                let detail = model_detail(model);
+                if !detail.is_empty() {
+                    spans.push(Span::styled(format!("  {detail}"), base.fg(DIM)));
+                }
+                lines.push(Line::from(spans));
+            }
+            if shown.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "type the model id this endpoint expects",
+                    style(YELLOW),
+                )));
+            }
+        }
+    }
+    if let Some(error) = &state.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            sanitize(error).into_owned(),
+            style(RED),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    let hint = match state.step {
+        AddModelStep::Endpoint if state.busy => "fetching /models...   esc cancel".to_string(),
+        AddModelStep::Endpoint => {
+            "enter fetch /models   tab move   esc close   (the key is stored in models.json)"
+                .to_string()
+        }
+        AddModelStep::Models => {
+            "enter add and select   type to filter or to type an id   esc back".to_string()
+        }
+    };
+    let hint_area = Rect {
+        y: inner.bottom() - 1,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            sanitize(&hint).into_owned(),
+            style(FAINT),
+        ))),
+        hint_area,
+    );
+}
+
+/// One labelled text field; `_` marks the caret while it has focus.
+fn text_field(label: &str, value: &str, focused: bool, cursor: usize, mask: bool) -> Line<'static> {
+    let shown: String = if mask {
+        value.chars().map(|_| '*').collect()
+    } else {
+        value.to_string()
+    };
+    let chars: Vec<char> = shown.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let mut body = String::new();
+    for (index, c) in chars.iter().enumerate() {
+        if index == cursor {
+            body.push('_');
+        }
+        body.push(*c);
+    }
+    if cursor == chars.len() {
+        body.push('_');
+    }
+    Line::from(vec![
+        Span::styled(format!("{label:<14}"), style(BLUE)),
+        Span::styled(body, style(if focused { TEXT } else { DIM })),
+        Span::styled(
+            if mask && !value.is_empty() {
+                "  (hidden)"
+            } else {
+                ""
+            },
+            style(FAINT),
+        ),
+    ])
+}
+
+fn action_row(label: &str, focused: bool, busy: bool) -> Line<'static> {
+    let text = if busy {
+        format!("> {label} ...")
+    } else if focused {
+        format!("> {label}")
+    } else {
+        format!("  {label}")
+    };
+    Line::from(Span::styled(
+        text,
+        style(if focused || busy { ACCENT } else { MUTED }),
+    ))
+}
+
+fn model_detail(model: &CatalogModel) -> String {
+    let mut parts = Vec::new();
+    if model.context_window > 0 {
+        parts.push(format!("ctx {}", human_count(model.context_window)));
+    }
+    if let Some(max) = model.max_tokens {
+        parts.push(format!("max {}", human_count(max as u64)));
+    }
+    if let Some(name) = &model.name {
+        parts.push(name.clone());
+    }
+    parts.join(" | ")
 }
 
 fn draw_info_block(frame: &mut Frame, body: Rect, lines: Vec<Line<'static>>) {

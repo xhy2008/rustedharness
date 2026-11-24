@@ -30,10 +30,13 @@ impl Backend for Stub {
 }
 
 pub(crate) fn demo_app() -> App {
-    // Everything this harness writes while a test runs - sessions, and any
-    // setting a test toggles - has to land in the temp directory, never in the
-    // real one.
-    let scratch = std::env::temp_dir().join("rustedharness-ui-tests");
+    demo_app_in(&std::env::temp_dir().join("rustedharness-ui-tests"))
+}
+
+/// Same app, but everything it writes lands in `scratch`. Tests that touch
+/// `config.json`/`models.json` need their own directory so they cannot race.
+pub(crate) fn demo_app_in(scratch: &std::path::Path) -> App {
+    let scratch = scratch.to_path_buf();
     let config = Config {
         model: "anthropic/claude-sonnet-4.5".into(),
         compact_model: "anthropic/claude-haiku-4.5".into(),
@@ -388,6 +391,61 @@ fn compaction_settings_explain_the_disabled_strip_option() {
     assert!(screen.contains("strip old context"), "{screen}");
     assert!(screen.contains("disabled"), "{screen}");
     assert!(screen.contains("complete live history"), "{screen}");
+}
+
+/// The add-model wizard is a full-screen page: both steps fit, and the
+/// discovered context windows are shown next to the ids.
+#[test]
+fn the_add_model_wizard_renders_both_steps() {
+    let mut app = demo_app();
+    app.overlay = Overlay::AddModel(crate::app::AddModelState::new(
+        crate::app::ModelTarget::Agent,
+        false,
+    ));
+    if let Overlay::AddModel(state) = &mut app.overlay {
+        state.url = "https://api.example.com/v1".into();
+        state.key = "sk-secret".into();
+        state.field = 2;
+    }
+    let json = dump(&mut app, 100, 24);
+    let screen: String = (0..24)
+        .map(|row| row_text(&json, row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("add model"), "{screen}");
+    assert!(screen.contains("1/2 endpoint"), "{screen}");
+    assert!(screen.contains("https://api.example.com/v1"), "{screen}");
+    assert!(screen.contains("**"), "the key is masked: {screen}");
+    assert!(!screen.contains("sk-secret"), "{screen}");
+    assert!(screen.contains("fetch models"), "{screen}");
+
+    if let Overlay::AddModel(state) = &mut app.overlay {
+        state.step = crate::app::AddModelStep::Models;
+        state.items = vec![
+            rustedharness_core::discovery::CatalogModel {
+                id: "model-a".into(),
+                name: None,
+                context_window: 200_000,
+                max_tokens: Some(8_192),
+            },
+            rustedharness_core::discovery::CatalogModel {
+                id: "model-b".into(),
+                name: None,
+                context_window: 0,
+                max_tokens: None,
+            },
+        ];
+    }
+    let json = dump(&mut app, 100, 24);
+    let screen: String = (0..24)
+        .map(|row| row_text(&json, row))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(screen.contains("2/2 model"), "{screen}");
+    assert!(screen.contains("model-a"), "{screen}");
+    assert!(screen.contains("ctx 200.0k"), "{screen}");
+    assert!(screen.contains("max 8.2k"), "{screen}");
+    assert!(screen.contains("model-b"), "{screen}");
 }
 
 /// With compaction on the main model there is no second column to show.

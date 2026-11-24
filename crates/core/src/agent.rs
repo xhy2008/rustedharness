@@ -2,7 +2,7 @@
 //! compaction, cancellation, session persistence and token accounting.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cache::CacheWatch;
 use crate::compact::{Compactor, SummaryMode, SummaryRequest};
-use crate::config::{model_display, CompactionSettings, Config, StripContent, ThinkingLevel};
+use crate::config::{
+    model_display, CompactionSettings, Config, NewModel, StripContent, ThinkingLevel,
+};
 use crate::error::{HarnessError, Result};
 use crate::intel::CodeIndex;
 use crate::lsp::LspHub;
@@ -31,8 +33,10 @@ use crate::tools::{NoopTracker, ToolContext, ToolOutput, ToolRegistry};
 use crate::web::WebTools;
 
 pub struct Agent {
-    config: Arc<Config>,
-    backend: Arc<dyn Backend>,
+    /// Swappable: adding a provider at runtime (the model wizard) reloads the
+    /// config and rebuilds the router without restarting the session.
+    config: RwLock<Arc<Config>>,
+    backend: RwLock<Arc<dyn Backend>>,
     ctx: RwLock<ToolContext>,
     tools: RwLock<ToolRegistry>,
     messages: RwLock<Vec<ChatMessage>>,
@@ -51,6 +55,9 @@ pub struct Agent {
     /// Prompt-cache accounting across turns; also feeds the cache-miss notice.
     cache_watch: Mutex<CacheWatch>,
     show_cache_miss_notices: AtomicBool,
+    /// Live value of `agent.rateLimitRetries`; the config snapshot is immutable
+    /// so `/settings` writes here and to `config.json`.
+    rate_limit_retries: AtomicU32,
 }
 
 struct ResumeData {
@@ -138,6 +145,7 @@ impl Agent {
         let compaction = CompactionSettings::from(&config.agent);
         let separate_compact = !config.compact_model.trim().is_empty();
         let show_cache_miss_notices = config.agent.show_cache_miss_notices;
+        let rate_limit_retries = config.agent.rate_limit_retries;
         let config = Arc::new(config);
         // A pi session may not name a model at all (no `model_change`, no
         // assistant message yet). Use the transcript's model when config.json
@@ -181,8 +189,8 @@ impl Agent {
         .await?;
         let tools = ToolRegistry::builtin(&ctx);
         let agent = Arc::new(Self {
-            config,
-            backend,
+            config: RwLock::new(config.clone()),
+            backend: RwLock::new(backend.clone()),
             ctx: RwLock::new(ctx),
             tools: RwLock::new(tools),
             messages: RwLock::new(messages),
@@ -209,6 +217,7 @@ impl Agent {
             busy: AtomicBool::new(false),
             cache_watch: Mutex::new(CacheWatch::new()),
             show_cache_miss_notices: AtomicBool::new(show_cache_miss_notices),
+            rate_limit_retries: AtomicU32::new(rate_limit_retries),
         });
         agent.refresh_system();
         let (cwd_display, session_id) = {
@@ -301,6 +310,38 @@ impl Agent {
         self.separate_compact.load(Ordering::Relaxed)
     }
 
+    /// Snapshot of the loaded configuration.
+    pub fn config(&self) -> Arc<Config> {
+        self.config.read().unwrap().clone()
+    }
+
+    fn backend(&self) -> Arc<dyn Backend> {
+        self.backend.read().unwrap().clone()
+    }
+
+    /// Re-read `config.json`/`models.json` and rebuild the provider router.
+    /// Used after the model wizard appends to `models.json`: the session keeps
+    /// running and the new provider is usable immediately.
+    pub fn reload_config(&self) -> Result<()> {
+        let config = Arc::new(Config::load_from_dir(&self.config().source_dir())?);
+        let backend = Self::backend_for(&config)?;
+        *self.backend.write().unwrap() = backend.clone();
+        *self.config.write().unwrap() = config.clone();
+        if let Ok(mut ctx) = self.ctx.write() {
+            ctx.config = config;
+            ctx.provider = backend;
+        }
+        Ok(())
+    }
+
+    /// Append a provider/model pair to `models.json` and reload, returning the
+    /// `provider/model` reference that the caller can select.
+    pub fn add_model(&self, new: &NewModel) -> Result<String> {
+        let reference = self.config().add_model(new)?;
+        self.reload_config()?;
+        Ok(reference)
+    }
+
     pub fn compaction_settings(&self) -> CompactionSettings {
         *self.compaction.read().unwrap()
     }
@@ -309,7 +350,7 @@ impl Agent {
         let threshold = threshold.clamp(0.1, 0.99);
         let mut settings = self.compaction_settings();
         settings.compact_threshold = threshold;
-        self.config
+        self.config()
             .save_setting(&["agent", "compactThreshold"], json!(threshold))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
@@ -319,7 +360,7 @@ impl Agent {
         let turns = turns.max(1);
         let mut settings = self.compaction_settings();
         settings.keep_recent_turns = turns;
-        self.config
+        self.config()
             .save_setting(&["agent", "keepRecentTurns"], json!(turns))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
@@ -328,7 +369,7 @@ impl Agent {
     pub fn set_compact_strip_context(&self, on: bool) -> Result<()> {
         let mut settings = self.compaction_settings();
         settings.compact_strip_context = on;
-        self.config
+        self.config()
             .save_setting(&["agent", "compactStripContext"], json!(on))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
@@ -338,7 +379,7 @@ impl Agent {
         let turns = turns.max(1);
         let mut settings = self.compaction_settings();
         settings.send_recent_turns = turns;
-        self.config
+        self.config()
             .save_setting(&["agent", "sendRecentTurns"], json!(turns))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
@@ -347,7 +388,7 @@ impl Agent {
     pub fn set_compact_thinking(&self, level: ThinkingLevel) -> Result<()> {
         let mut settings = self.compaction_settings();
         settings.compact_thinking = level;
-        self.config
+        self.config()
             .save_setting(&["agent", "compactThinking"], json!(level))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
@@ -356,20 +397,20 @@ impl Agent {
     pub fn set_strip_content(&self, content: StripContent) -> Result<()> {
         let mut settings = self.compaction_settings();
         settings.strip_content = content;
-        self.config
+        self.config()
             .save_setting(&["agent", "stripContent"], json!(content))?;
         *self.compaction.write().unwrap() = settings;
         Ok(())
     }
 
     fn context_limit(&self) -> u64 {
-        self.config.model_context_window(&self.agent_model())
+        self.config().model_context_window(&self.agent_model())
     }
 
     fn output_limit(&self) -> u32 {
-        self.config
+        self.config()
             .model_max_tokens(&self.agent_model())
-            .unwrap_or(self.config.agent.max_output_tokens)
+            .unwrap_or(self.config().agent.max_output_tokens)
     }
 
     pub fn messages(&self) -> Vec<ChatMessage> {
@@ -423,7 +464,7 @@ impl Agent {
     /// Install or update a language server on the user's behalf (TUI action).
     pub async fn install_lsp(&self, server: &str, update: bool) -> Result<PathBuf> {
         crate::lsp::install_server(
-            &self.config.lsp,
+            &self.config().lsp,
             &self.cwd(),
             server,
             update,
@@ -433,7 +474,7 @@ impl Agent {
     }
 
     pub fn set_agent_model(&self, model: &str) -> Result<()> {
-        let spec = self.config.resolve_model(model)?;
+        let spec = self.config().resolve_model(model)?;
         let reference = spec.reference();
         *self.agent_model.write().unwrap() = reference.clone();
         let compact = if self.compact_is_separate() {
@@ -457,10 +498,11 @@ impl Agent {
         let (stored, actual) = if model.trim().is_empty() {
             (String::new(), agent.clone())
         } else {
-            let reference = self.config.resolve_model(model)?.reference();
+            let reference = self.config().resolve_model(model)?.reference();
             (reference.clone(), reference)
         };
-        self.config.save_setting(&["compactModel"], json!(stored))?;
+        self.config()
+            .save_setting(&["compactModel"], json!(stored))?;
         *self.compact_model.write().unwrap() = actual.clone();
         self.separate_compact
             .store(!stored.is_empty(), Ordering::Relaxed);
@@ -498,10 +540,10 @@ impl Agent {
         let old_ctx = self.ctx.read().unwrap().clone();
         let compact_model = self.compact_model.read().unwrap().clone();
         let ctx = Self::make_workspace_ctx(
-            self.config.clone(),
+            self.config().clone(),
             &cwd,
             self.events.clone(),
-            self.backend.clone(),
+            self.backend(),
             self.todos.clone(),
             &compact_model,
             old_ctx.session_id.clone(),
@@ -599,8 +641,8 @@ impl Agent {
         // per turn instead of regenerating it before every model call.
         let definitions = self.tools.read().unwrap().definitions();
 
-        let max_turns = self.config.agent.max_turns.max(1);
-        let chase_limit = self.config.agent.chase_limit;
+        let max_turns = self.config().agent.max_turns.max(1);
+        let chase_limit = self.config().agent.chase_limit;
         let mut turn = 0usize;
         let mut chases = 0u32;
 
@@ -641,11 +683,11 @@ impl Agent {
                 model: self.agent_model.read().unwrap().clone(),
                 messages,
                 tools: definitions.clone(),
-                temperature: self.config.agent.temperature.map(|value| value as f32),
+                temperature: self.config().agent.temperature.map(|value| value as f32),
                 max_tokens: Some(self.output_limit()),
                 stream: true,
                 model_reasoning: self
-                    .config
+                    .config()
                     .resolve_model(&self.agent_model.read().unwrap().clone())
                     .map(|spec| spec.reasoning)
                     .unwrap_or(false),
@@ -837,10 +879,10 @@ impl Agent {
         }
     }
 
-    /// Ask the backend, retrying rate-limit failures at the configured cadence
-    /// and limit (`agent.rateLimitRetries` / `agent.rateLimitIntervalSecs`).
-    /// Quota/credit exhaustion is terminal: no amount of waiting refills it,
-    /// so the error surfaces immediately with an explicit notice.
+    /// Ask the backend, retrying rate-limit failures `agent.rateLimitRetries`
+    /// times, three seconds apart. Quota/credit exhaustion is terminal: no
+    /// amount of waiting refills it, so the error surfaces immediately with an
+    /// explicit notice.
     async fn stream_with_retry(
         &self,
         request: ChatRequest,
@@ -848,13 +890,12 @@ impl Agent {
         token: CancellationToken,
         turn: usize,
     ) -> Result<Completion> {
-        let max_retries = self.config.agent.rate_limit_retries;
-        let interval =
-            std::time::Duration::from_secs(self.config.agent.rate_limit_interval_secs.max(1));
+        let max = self.rate_limit_retries.load(Ordering::Relaxed);
+        let interval = RATE_LIMIT_RETRY_INTERVAL;
         let mut attempt = 0u32;
         loop {
             let result = self
-                .backend
+                .backend()
                 .stream_chat(request.clone(), Some(sink.clone()), token.clone())
                 .await;
             let err = match result {
@@ -875,23 +916,20 @@ impl Agent {
                 return Err(err);
             }
             attempt += 1;
-            if let Some(max) = max_retries {
-                if attempt > max {
-                    let _ = self.events.send(HarnessEvent::Notice {
-                        level: "error".to_string(),
-                        message: format!(
-                            "rate limited (429) during turn {turn}; retry limit ({max}) reached"
-                        ),
-                    });
-                    return Err(err);
-                }
+            if attempt > max {
+                let _ = self.events.send(HarnessEvent::Notice {
+                    level: "error".to_string(),
+                    message: format!(
+                        "rate limited (429) during turn {turn}; retry limit ({max}) reached"
+                    ),
+                });
+                return Err(err);
             }
             if attempt == 1 || attempt.is_multiple_of(5) {
-                let limit = max_retries.map(|max| format!("/{max}")).unwrap_or_default();
                 let _ = self.events.send(HarnessEvent::Notice {
                     level: "warning".to_string(),
                     message: format!(
-                        "rate limited (429) during turn {turn}; retrying in {}s (attempt {attempt}{limit})",
+                        "rate limited (429) during turn {turn}; retrying in {}s (attempt {attempt}/{max})",
                         interval.as_secs()
                     ),
                 });
@@ -967,7 +1005,7 @@ impl Agent {
 
     /// Toggle cache-miss notices at runtime.
     pub fn set_show_cache_miss_notices(&self, on: bool) -> Result<()> {
-        self.config
+        self.config()
             .save_setting(&["agent", "showCacheMissNotices"], json!(on))?;
         self.show_cache_miss_notices.store(on, Ordering::Relaxed);
         Ok(())
@@ -975,6 +1013,20 @@ impl Agent {
 
     pub fn show_cache_miss_notices(&self) -> bool {
         self.show_cache_miss_notices.load(Ordering::Relaxed)
+    }
+
+    pub fn rate_limit_retries(&self) -> u32 {
+        self.rate_limit_retries.load(Ordering::Relaxed)
+    }
+
+    /// How many 429 retries a turn may spend. The interval is fixed
+    /// (`RATE_LIMIT_RETRY_INTERVAL`), so only the count is tunable.
+    pub fn set_rate_limit_retries(&self, retries: u32) -> Result<()> {
+        let retries = retries.max(1);
+        self.config()
+            .save_setting(&["agent", "rateLimitRetries"], json!(retries))?;
+        self.rate_limit_retries.store(retries, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn maybe_compact(
@@ -1002,7 +1054,7 @@ impl Agent {
         };
         let summary = compactor
             .summarize(
-                self.backend.as_ref(),
+                self.backend().as_ref(),
                 SummaryRequest {
                     model: &compact_model,
                     messages: &messages,
@@ -1041,6 +1093,11 @@ impl Agent {
         Ok(())
     }
 }
+
+/// Gap between 429 retries. Fixed: the settings panel only chooses how many
+/// attempts are allowed, so a rate-limited provider is not hammered faster
+/// than one request every three seconds.
+pub const RATE_LIMIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn truncate_tool_output(content: &str) -> String {
     const MAX_CHARS: usize = 256_000;
@@ -1412,8 +1469,7 @@ mod tests {
     async fn rate_limit_retries_stop_at_the_configured_limit() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = test_config(dir.path());
-        config.agent.rate_limit_retries = Some(0);
-        config.agent.rate_limit_interval_secs = 1;
+        config.agent.rate_limit_retries = 0;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let agent =
             Agent::with_backend(config, dir.path().to_path_buf(), tx, Arc::new(RateLimited))

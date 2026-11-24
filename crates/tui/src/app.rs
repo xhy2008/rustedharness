@@ -19,7 +19,8 @@ use crossterm::execute;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use rustedharness_core::agent::Agent;
-use rustedharness_core::config::Config;
+use rustedharness_core::config::{Config, NewModel};
+use rustedharness_core::discovery::CatalogModel;
 use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
 use rustedharness_core::provider::{ChatMessage, Role};
@@ -38,6 +39,12 @@ pub enum OpResult {
     Highlighted {
         path: String,
         lines: Vec<Line<'static>>,
+    },
+    /// `GET {base}/models` answered for the add-model flow. The url is echoed so
+    /// a reply cannot land in a different wizard.
+    Catalog {
+        url: String,
+        result: std::result::Result<Vec<CatalogModel>, String>,
     },
 }
 
@@ -107,6 +114,66 @@ pub enum Overlay {
     Todos,
     Processes,
     Lsp,
+    /// Full-screen "add model" flow opened from the model picker.
+    AddModel(AddModelState),
+}
+
+/// Which half of the add-model flow is on screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AddModelStep {
+    /// Base URL and API key, then a fetch.
+    Endpoint,
+    /// Models the endpoint listed; Enter saves the selection.
+    Models,
+}
+
+/// Progress of the add-model flow.
+pub struct AddModelState {
+    pub step: AddModelStep,
+    pub url: String,
+    pub key: String,
+    /// Focused row on the endpoint step: 0 base url, 1 api key, 2 fetch.
+    pub field: usize,
+    /// Caret inside the focused text field.
+    pub cursor: usize,
+    pub items: Vec<CatalogModel>,
+    pub sel: usize,
+    /// Narrows the list, and doubles as a hand-typed model id.
+    pub filter: String,
+    pub busy: bool,
+    pub error: Option<String>,
+    /// Which model slot the wizard saves into.
+    pub target: ModelTarget,
+    /// Opened from `/settings`; return there once the model is saved.
+    pub from_settings: bool,
+}
+
+impl AddModelState {
+    pub fn new(target: ModelTarget, from_settings: bool) -> Self {
+        Self {
+            step: AddModelStep::Endpoint,
+            url: String::new(),
+            key: String::new(),
+            field: 0,
+            cursor: 0,
+            items: Vec::new(),
+            sel: 0,
+            filter: String::new(),
+            busy: false,
+            error: None,
+            target,
+            from_settings,
+        }
+    }
+
+    /// Models matching the filter, or every model while it is empty.
+    pub fn filtered(&self) -> Vec<&CatalogModel> {
+        let needle = self.filter.trim().to_lowercase();
+        self.items
+            .iter()
+            .filter(|model| needle.is_empty() || model.id.to_lowercase().contains(&needle))
+            .collect()
+    }
 }
 
 /// Which model slot the picker edits.
@@ -592,6 +659,9 @@ impl App {
                 Ok(path) => self.notice(format!("{server} ready at {}", path.display())),
                 Err(err) => self.push(EntryKind::Error, "", format!("{server} install: {err}")),
             },
+            OpResult::Catalog { url, result } => {
+                self.apply_catalog(&url, result);
+            }
             OpResult::Highlighted { path, lines } => {
                 // Only swap if that file is still on screen: the user may have
                 // closed the viewer or opened another file in the meantime.
@@ -1207,6 +1277,9 @@ impl App {
         key: KeyEvent,
         op_tx: &UnboundedSender<OpResult>,
     ) -> Result<()> {
+        if matches!(self.overlay, Overlay::AddModel(_)) {
+            return self.add_model_key(key, op_tx).await;
+        }
         match key.code {
             KeyCode::Esc => {
                 // From a file back to the list it was opened from; the next
@@ -1318,6 +1391,7 @@ impl App {
             Overlay::Todos => Some(8),
             Overlay::Processes => Some(9),
             Overlay::Lsp => Some(10),
+            Overlay::AddModel(_) => Some(11),
         }
     }
 
@@ -1482,6 +1556,10 @@ impl App {
             } => {
                 if let Some(item) = model_filtered(&items, &filter).get(sel) {
                     let model = item.value.clone();
+                    if model == ADD_MODEL_ROW {
+                        self.overlay = Overlay::AddModel(AddModelState::new(target, from_settings));
+                        return Ok(());
+                    }
                     self.set_model(&model, target);
                     if from_settings {
                         self.overlay = Overlay::Settings {
@@ -1542,6 +1620,13 @@ impl App {
                                 self.overlay = Overlay::Settings {
                                     page: SettingsPage::Compaction,
                                     sel: 0,
+                                }
+                            }
+                            "retry" => {
+                                let next = next_retry_preset(self.agent.rate_limit_retries());
+                                match self.agent.set_rate_limit_retries(next) {
+                                    Ok(()) => self.notice(format!("429 retries: {next}, 3s apart")),
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                                 }
                             }
                             "notices" => {
@@ -1761,6 +1846,196 @@ impl App {
         }
     }
 
+    /// Send the endpoint to `GET /models` on a worker task; the reply arrives
+    /// as `OpResult::Catalog` so the UI never blocks on the network.
+    fn fetch_catalog(&mut self, op_tx: &UnboundedSender<OpResult>) {
+        let Overlay::AddModel(state) = &mut self.overlay else {
+            return;
+        };
+        let url = state.url.trim().to_string();
+        if url.is_empty() {
+            state.error =
+                Some("enter a base url first, e.g. https://api.openai.com/v1".to_string());
+            return;
+        }
+        state.busy = true;
+        state.error = None;
+        let key = state.key.clone();
+        let tx = op_tx.clone();
+        tokio::spawn(async move {
+            let result = rustedharness_core::discovery::fetch_catalog(&url, &key)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(OpResult::Catalog { url, result });
+        });
+    }
+
+    /// Fold a `GET /models` answer into the wizard. A url mismatch means the
+    /// user already closed or restarted the flow, so the reply is dropped.
+    fn apply_catalog(&mut self, url: &str, result: std::result::Result<Vec<CatalogModel>, String>) {
+        let Overlay::AddModel(state) = &mut self.overlay else {
+            return;
+        };
+        if state.url.trim() != url {
+            return;
+        }
+        state.busy = false;
+        match result {
+            Ok(items) => {
+                let empty = items.is_empty();
+                state.items = items;
+                state.sel = 0;
+                state.filter.clear();
+                state.step = AddModelStep::Models;
+                if empty {
+                    state.error =
+                        Some("the endpoint listed no models; type the model id".to_string());
+                }
+            }
+            Err(err) => state.error = Some(err),
+        }
+    }
+
+    /// Keys for the add-model wizard. Text fields own every printable key, so
+    /// this runs before the generic overlay handling.
+    async fn add_model_key(
+        &mut self,
+        key: KeyEvent,
+        op_tx: &UnboundedSender<OpResult>,
+    ) -> Result<()> {
+        let Overlay::AddModel(state) = &mut self.overlay else {
+            return Ok(());
+        };
+        // While a fetch is in flight only Esc is accepted; Enter would start a
+        // second request against the same endpoint.
+        if state.busy && !matches!(key.code, KeyCode::Esc) {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => match state.step {
+                AddModelStep::Endpoint => self.overlay = Overlay::None,
+                AddModelStep::Models => {
+                    state.step = AddModelStep::Endpoint;
+                    state.filter.clear();
+                    state.error = None;
+                    state.field = 2;
+                }
+            },
+            KeyCode::Tab | KeyCode::Up | KeyCode::Down if state.step == AddModelStep::Endpoint => {
+                let step = if matches!(key.code, KeyCode::Tab | KeyCode::Down) {
+                    1
+                } else {
+                    usize::MAX
+                };
+                state.field = if step == usize::MAX {
+                    state.field.saturating_sub(1)
+                } else {
+                    (state.field + 1).min(2)
+                };
+                state.cursor = match state.field {
+                    0 => state.url.chars().count(),
+                    1 => state.key.chars().count(),
+                    _ => 0,
+                };
+            }
+            KeyCode::Up => {
+                state.sel = state.sel.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                state.sel = (state.sel + 1).min(state.filtered().len().saturating_sub(1));
+            }
+            KeyCode::Backspace => match state.step {
+                AddModelStep::Endpoint if state.field == 0 => {
+                    delete_before(&mut state.url, &mut state.cursor);
+                }
+                AddModelStep::Endpoint if state.field == 1 => {
+                    delete_before(&mut state.key, &mut state.cursor);
+                }
+                AddModelStep::Endpoint => {}
+                AddModelStep::Models => {
+                    state.filter.pop();
+                    state.sel = 0;
+                }
+            },
+            KeyCode::Char(c) => match state.step {
+                AddModelStep::Endpoint if state.field == 0 => {
+                    insert_at(&mut state.url, &mut state.cursor, c);
+                    state.error = None;
+                }
+                AddModelStep::Endpoint if state.field == 1 => {
+                    insert_at(&mut state.key, &mut state.cursor, c);
+                    state.error = None;
+                }
+                AddModelStep::Endpoint => {}
+                AddModelStep::Models => {
+                    state.filter.push(c);
+                    state.sel = 0;
+                }
+            },
+            KeyCode::Enter => match state.step {
+                AddModelStep::Endpoint => self.fetch_catalog(op_tx),
+                AddModelStep::Models => self.save_added_model(),
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Write the chosen model into `models.json`, reload the config and select
+    /// it in the slot the picker was editing.
+    fn save_added_model(&mut self) {
+        let Overlay::AddModel(state) = &self.overlay else {
+            return;
+        };
+        let chosen = state
+            .filtered()
+            .get(state.sel)
+            .map(|model| (*model).clone());
+        let manual = state.filter.trim().to_string();
+        let model_id = chosen
+            .as_ref()
+            .map(|model| model.id.clone())
+            .unwrap_or(manual);
+        if model_id.is_empty() {
+            if let Overlay::AddModel(state) = &mut self.overlay {
+                state.error = Some("pick a model or type its id".to_string());
+            }
+            return;
+        }
+        let new = NewModel {
+            base_url: state.url.clone(),
+            api_key: state.key.clone(),
+            model_id,
+            context_window: chosen.as_ref().map(|m| m.context_window).unwrap_or(0),
+            max_tokens: chosen.as_ref().and_then(|m| m.max_tokens),
+        };
+        let target = state.target;
+        let from_settings = state.from_settings;
+        let reference = match self.agent.add_model(&new) {
+            Ok(reference) => reference,
+            Err(err) => {
+                if let Overlay::AddModel(state) = &mut self.overlay {
+                    state.error = Some(err.to_string());
+                }
+                return;
+            }
+        };
+        // Pick up the file we just wrote so the picker and `/session` see it.
+        if let Ok(config) = Config::load_from_dir(&self.config.source_dir()) {
+            self.config = config;
+        }
+        self.set_model(&reference, target);
+        self.overlay = if from_settings {
+            Overlay::Settings {
+                page: SettingsPage::Compaction,
+                sel: 0,
+            }
+        } else {
+            Overlay::None
+        };
+        self.notice(format!("added {reference} to models.json"));
+    }
+
     fn open_model_picker(&mut self, target: ModelTarget, from_settings: bool) {
         let mut items: Vec<PickerItem> = self
             .config
@@ -1773,10 +2048,6 @@ impl App {
                 disabled: false,
             })
             .collect();
-        if items.is_empty() {
-            self.notice("no models configured — add providers to models.json");
-            return;
-        }
         if target == ModelTarget::Compact {
             items.insert(
                 0,
@@ -1788,6 +2059,14 @@ impl App {
                 },
             );
         }
+        // Always offered, including on a bare install: this is how a provider
+        // gets into models.json in the first place.
+        items.push(PickerItem {
+            label: "Add model...".to_string(),
+            detail: "save a new provider and model to models.json".to_string(),
+            value: ADD_MODEL_ROW.to_string(),
+            disabled: false,
+        });
         let current = match target {
             ModelTarget::Agent => &self.agent_model,
             ModelTarget::Compact if self.compact_is_separate => &self.compact_model,
@@ -1839,6 +2118,12 @@ impl App {
                         "off".to_string()
                     },
                     value: "notices".to_string(),
+                    disabled: false,
+                },
+                PickerItem {
+                    label: "429 retry".to_string(),
+                    detail: format!("{} retries, 3s apart", self.agent.rate_limit_retries()),
+                    value: "retry".to_string(),
                     disabled: false,
                 },
                 PickerItem {
@@ -1951,8 +2236,14 @@ impl App {
                 Overlay::Settings { sel, .. } => *sel,
                 _ => 0,
             };
-            return match sel {
-                0 => "Cache miss notices appear in the transcript when a turn re-bills prompt tokens the previous turn had already cached. Only significant misses are reported, and only when the provider reports cached tokens at all.".to_string(),
+            let value = self
+                .settings_items_for(page)
+                .get(sel)
+                .map(|item| item.value.clone())
+                .unwrap_or_default();
+            return match value.as_str() {
+                "notices" => "Cache miss notices appear in the transcript when a turn re-bills prompt tokens the previous turn had already cached. Only significant misses are reported, and only when the provider reports cached tokens at all.".to_string(),
+                "retry" => "How many times a turn retries after a 429/rate-limit response before giving up. Enter cycles 5, 15, 30, 50 and 100. The wait between attempts is fixed at 3 seconds; quota or credit exhaustion is never retried.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
             };
         }
@@ -2378,6 +2669,46 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
 /// Copy through the platform clipboard API instead of piping bytes into
 /// `clip.exe`, which decodes stdin with the ANSI code page and turns every
 /// non-ASCII character into mojibake on a Chinese Windows.
+/// Picker row that opens the add-model wizard. The value cannot collide with a
+/// real model reference because a reference always contains a `/`.
+const ADD_MODEL_ROW: &str = "+";
+
+/// Insert one character at the caret of a single-line field.
+fn insert_at(text: &mut String, cursor: &mut usize, c: char) {
+    let byte = text
+        .char_indices()
+        .nth(*cursor)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    text.insert(byte, c);
+    *cursor += 1;
+}
+
+/// Delete the character before the caret.
+fn delete_before(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let start = text
+        .char_indices()
+        .nth(*cursor - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    text.remove(start);
+    *cursor -= 1;
+}
+
+/// Retry counts offered by `/settings`. A config value that is not one of them
+/// moves up to the next preset, wrapping at the top.
+const RETRY_PRESETS: [u32; 5] = [5, 15, 30, 50, 100];
+
+fn next_retry_preset(current: u32) -> u32 {
+    RETRY_PRESETS
+        .into_iter()
+        .find(|preset| *preset > current)
+        .unwrap_or(RETRY_PRESETS[0])
+}
+
 fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|err| format!("clipboard unavailable: {err}"))?;
@@ -2652,10 +2983,10 @@ mod tests {
         runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
         assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
 
-        // The root page lists cache-miss notices first, then compaction.
+        // The root page lists notices, 429 retries, then compaction.
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 1,
+            sel: 2,
         };
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(matches!(
@@ -2769,6 +3100,34 @@ mod tests {
         assert!(app.settings_description().contains("off, low, medium"));
     }
 
+    /// The 429 retry row cycles the presets the user asked for and persists the
+    /// count; the wait between attempts stays a constant.
+    #[test]
+    fn settings_cycle_the_429_retry_count() {
+        let mut app = crate::ui_tests::demo_app();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: 1,
+        };
+        assert_eq!(app.settings_items()[1].value, "retry");
+
+        let start = app.agent.rate_limit_retries();
+        let mut seen = vec![start];
+        for _ in 0..RETRY_PRESETS.len() {
+            runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+            seen.push(app.agent.rate_limit_retries());
+        }
+        assert_eq!(
+            seen,
+            vec![start, 15, 30, 50, 100, 5],
+            "5, 15, 30, 50, 100 and back to 5"
+        );
+        assert!(app.settings_items()[1].detail.contains("3s apart"));
+        assert!(app.settings_description().contains("fixed at 3 seconds"));
+    }
+
     /// The root settings page toggles cache-miss notices and persists it.
     #[test]
     fn settings_toggle_cache_miss_notices() {
@@ -2790,6 +3149,161 @@ mod tests {
             }
         ));
         assert!(app.settings_description().contains("Cache miss notices"));
+    }
+
+    /// `/model` ends with an "Add model..." row that opens the full-screen
+    /// wizard; saving writes models.json and selects the new model.
+    #[test]
+    fn the_add_model_wizard_saves_a_listed_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::ui_tests::demo_app_in(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        app.open_model_picker(ModelTarget::Agent, false);
+        if let Overlay::Model { items, sel, .. } = &mut app.overlay {
+            assert_eq!(items.last().unwrap().value, ADD_MODEL_ROW);
+            *sel = items.len() - 1;
+        } else {
+            panic!("model picker did not open");
+        }
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert!(matches!(
+            &app.overlay,
+            Overlay::AddModel(AddModelState {
+                step: AddModelStep::Endpoint,
+                field: 0,
+                ..
+            })
+        ));
+
+        for c in "https://api.example.com/v1".chars() {
+            runtime
+                .block_on(app.add_model_key(KeyEvent::from(KeyCode::Char(c)), &tx))
+                .unwrap();
+        }
+        runtime
+            .block_on(app.add_model_key(KeyEvent::from(KeyCode::Tab), &tx))
+            .unwrap();
+        for c in "sk-test".chars() {
+            runtime
+                .block_on(app.add_model_key(KeyEvent::from(KeyCode::Char(c)), &tx))
+                .unwrap();
+        }
+
+        // The fetch itself is a network call; feed its answer in directly.
+        app.apply_catalog(
+            "https://api.example.com/v1",
+            Ok(vec![
+                CatalogModel {
+                    id: "m1".into(),
+                    name: Some("Model One".into()),
+                    context_window: 128_000,
+                    max_tokens: Some(8_192),
+                },
+                CatalogModel {
+                    id: "m2".into(),
+                    name: None,
+                    context_window: 0,
+                    max_tokens: None,
+                },
+            ]),
+        );
+        assert!(matches!(
+            &app.overlay,
+            Overlay::AddModel(AddModelState {
+                step: AddModelStep::Models,
+                ..
+            })
+        ));
+
+        runtime
+            .block_on(app.add_model_key(KeyEvent::from(KeyCode::Enter), &tx))
+            .unwrap();
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.agent_model, "example/m1");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("models.json")).unwrap())
+                .unwrap();
+        let provider = &saved["providers"]["example"];
+        assert_eq!(provider["baseUrl"], "https://api.example.com/v1");
+        assert_eq!(provider["apiKey"], "sk-test");
+        assert_eq!(provider["models"][0]["id"], "m1");
+        assert_eq!(provider["models"][0]["contextWindow"], 128_000);
+        assert_eq!(provider["models"][0]["maxTokens"], 8_192);
+        // The picker sees the new provider now that the config was reloaded.
+        assert!(app
+            .config
+            .model_catalog()
+            .iter()
+            .any(|spec| spec.reference() == "example/m1"));
+    }
+
+    /// Endpoints without a `/models` list still work: the typed text is used as
+    /// the model id, and Esc walks back step by step.
+    #[test]
+    fn the_add_model_wizard_accepts_a_typed_id_and_steps_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::ui_tests::demo_app_in(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        app.overlay = Overlay::AddModel(AddModelState::new(ModelTarget::Compact, false));
+        if let Overlay::AddModel(state) = &mut app.overlay {
+            state.url = "http://127.0.0.1:11434/v1".into();
+        }
+        app.apply_catalog("http://127.0.0.1:11434/v1", Ok(Vec::new()));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::AddModel(AddModelState {
+                step: AddModelStep::Models,
+                error: Some(_),
+                ..
+            })
+        ));
+
+        // Esc goes back to the endpoint instead of throwing the flow away.
+        runtime
+            .block_on(app.add_model_key(KeyEvent::from(KeyCode::Esc), &tx))
+            .unwrap();
+        assert!(matches!(
+            &app.overlay,
+            Overlay::AddModel(AddModelState {
+                step: AddModelStep::Endpoint,
+                ..
+            })
+        ));
+        app.apply_catalog("http://127.0.0.1:11434/v1", Ok(Vec::new()));
+
+        for c in "qwen2.5-coder:7b".chars() {
+            runtime
+                .block_on(app.add_model_key(KeyEvent::from(KeyCode::Char(c)), &tx))
+                .unwrap();
+        }
+        runtime
+            .block_on(app.add_model_key(KeyEvent::from(KeyCode::Enter), &tx))
+            .unwrap();
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.compact_model, "127-0-0-1-11434/qwen2.5-coder:7b");
+        assert!(app.compact_is_separate);
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("models.json")).unwrap())
+                .unwrap();
+        let models = saved["providers"]["127-0-0-1-11434"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "qwen2.5-coder:7b");
+        assert!(models[0].get("contextWindow").is_none(), "unknown context");
+
+        // Esc from the endpoint step closes the wizard.
+        app.overlay = Overlay::AddModel(AddModelState::new(ModelTarget::Agent, false));
+        runtime
+            .block_on(app.add_model_key(KeyEvent::from(KeyCode::Esc), &tx))
+            .unwrap();
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]

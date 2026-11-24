@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::error::{HarnessError, Result};
 
@@ -342,11 +342,9 @@ pub struct AgentConfig {
     pub chase_limit: u32,
     /// Output token cap when a model does not declare `maxTokens`.
     pub max_output_tokens: u32,
-    /// Maximum retries after a 429/rate-limit response; `null` retries until
-    /// cancelled. Suggested values: 3, 5, 10.
-    pub rate_limit_retries: Option<u32>,
-    /// Seconds between 429 retries. Suggested values: 1, 3, 5.
-    pub rate_limit_interval_secs: u64,
+    /// Maximum retries after a 429/rate-limit response. The retry interval is
+    /// fixed at 3 seconds; the settings panel offers 5, 15, 30, 50 and 100.
+    pub rate_limit_retries: u32,
     /// Give up on a provider request after this many milliseconds without a
     /// single byte. `0` disables the budget: slow APIs may take as long as they
     /// need, and the turn is still cancellable with Esc/Ctrl+C.
@@ -368,12 +366,94 @@ impl Default for AgentConfig {
             temperature: Some(0.2),
             chase_limit: 3,
             max_output_tokens: 8_192,
-            rate_limit_retries: None,
-            rate_limit_interval_secs: 5,
+            rate_limit_retries: 5,
             http_idle_timeout_ms: 0,
             show_cache_miss_notices: true,
         }
     }
+}
+
+/// One provider/model pair to append to `models.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewModel {
+    pub base_url: String,
+    pub api_key: String,
+    pub model_id: String,
+    /// `0` when unknown; the key is then left out.
+    pub context_window: u64,
+    pub max_tokens: Option<u32>,
+}
+
+/// Provider id derived from the endpoint host: `https://api.deepseek.com/v1`
+/// becomes `deepseek`. Sanitised to `[a-z0-9-]` because it becomes a JSON key
+/// and part of every model reference. An IP endpoint keeps the whole address
+/// (and port), because two local servers would otherwise share one id.
+pub fn provider_id_from_url(base_url: &str) -> String {
+    let authority = base_url
+        .trim()
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("");
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+        _ => (authority, None),
+    };
+    let host = host.to_ascii_lowercase();
+    let is_ip = host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    let label = if is_ip {
+        let address = host.replace('.', "-");
+        match port {
+            Some(port) => format!("{address}-{port}"),
+            None => address,
+        }
+    } else {
+        let host = host
+            .strip_prefix("api.")
+            .or_else(|| host.strip_prefix("www."))
+            .unwrap_or(&host);
+        host.split('.').next().unwrap_or("").to_string()
+    };
+    let id: String = label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let id = id.trim_matches('-').to_string();
+    if id.is_empty() {
+        "custom".to_string()
+    } else {
+        id
+    }
+}
+
+/// Get (or create) an object field under `key`.
+fn object_field<'a>(parent: &'a mut Value, key: &str) -> &'a mut serde_json::Map<String, Value> {
+    if !parent.is_object() {
+        *parent = json!({});
+    }
+    object_entry(
+        parent.as_object_mut().expect("object guaranteed above"),
+        key,
+    )
+}
+
+fn object_entry<'a>(
+    map: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> &'a mut serde_json::Map<String, Value> {
+    let slot = map.entry(key.to_string()).or_insert_with(|| json!({}));
+    if !slot.is_object() {
+        *slot = json!({});
+    }
+    slot.as_object_mut().expect("object guaranteed above")
 }
 
 /// Runtime-tunable compaction settings. The TUI edits these through
@@ -815,7 +895,7 @@ impl Config {
 
     fn normalize(&mut self) {
         self.edit.anchor_width = self.edit.anchor_width.clamp(2, 4);
-        self.agent.rate_limit_interval_secs = self.agent.rate_limit_interval_secs.clamp(1, 300);
+        self.agent.rate_limit_retries = self.agent.rate_limit_retries.max(1);
         self.agent.compact_threshold = self.agent.compact_threshold.clamp(0.1, 0.99);
         self.agent.keep_recent_turns = self.agent.keep_recent_turns.max(1);
         self.agent.send_recent_turns = self.agent.send_recent_turns.max(1);
@@ -879,6 +959,66 @@ impl Config {
         text.push('\n');
         std::fs::write(&path_on_disk, text)?;
         Ok(())
+    }
+
+    /// Append one provider/model pair to `models.json`, returning the
+    /// `provider/model` reference. Existing keys in the file are preserved
+    /// byte-for-byte in meaning: the file is edited as JSON, not regenerated
+    /// from this struct, so hand-written compat flags survive.
+    pub fn add_model(&self, new: &NewModel) -> Result<String> {
+        let base_url = new.base_url.trim().trim_end_matches('/').to_string();
+        if base_url.is_empty() {
+            return Err(HarnessError::Config("base URL is empty".to_string()));
+        }
+        let model_id = new.model_id.trim();
+        if model_id.is_empty() {
+            return Err(HarnessError::Config("model id is empty".to_string()));
+        }
+        let provider_id = provider_id_from_url(&base_url);
+        let path = self.source_dir().join("models.json");
+        let mut root: Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| parse_jsonc::<Value>(raw.strip_prefix('\u{feff}').unwrap_or(&raw)).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        let providers = object_field(&mut root, "providers");
+        let provider = object_entry(providers, &provider_id);
+        provider.insert("baseUrl".to_string(), json!(base_url));
+        provider
+            .entry("api".to_string())
+            .or_insert_with(|| json!("openai-completions"));
+        let api_key = new.api_key.trim();
+        if !api_key.is_empty() {
+            provider.insert("apiKey".to_string(), json!(api_key));
+        }
+        if new.context_window > 0 {
+            provider
+                .entry("contextWindow".to_string())
+                .or_insert_with(|| json!(new.context_window));
+        }
+        let models = provider
+            .entry("models".to_string())
+            .or_insert_with(|| json!([]));
+        if !models.is_array() {
+            *models = json!([]);
+        }
+        let models = models.as_array_mut().expect("array inserted above");
+        models.retain(|model| model.get("id").and_then(Value::as_str) != Some(model_id));
+        let mut entry = json!({ "id": model_id });
+        if new.context_window > 0 {
+            entry["contextWindow"] = json!(new.context_window);
+        }
+        if let Some(max_tokens) = new.max_tokens.filter(|value| *value > 0) {
+            entry["maxTokens"] = json!(max_tokens);
+        }
+        models.push(entry);
+
+        let dir = self.source_dir();
+        std::fs::create_dir_all(&dir)?;
+        let mut text = serde_json::to_string_pretty(&root)?;
+        text.push('\n');
+        std::fs::write(&path, text)?;
+        Ok(format!("{provider_id}/{model_id}"))
     }
 
     fn merge_models(&mut self, file: ModelsFile) {
@@ -1426,19 +1566,110 @@ mod tests {
 
     #[test]
     fn rate_limit_settings_parse_and_normalize() {
-        let cfg: Config =
-            serde_json::from_str(r#"{"agent":{"rateLimitRetries":10,"rateLimitIntervalSecs":3}}"#)
-                .unwrap();
-        assert_eq!(cfg.agent.rate_limit_retries, Some(10));
-        assert_eq!(cfg.agent.rate_limit_interval_secs, 3);
+        let cfg: Config = serde_json::from_str(r#"{"agent":{"rateLimitRetries":30}}"#).unwrap();
+        assert_eq!(cfg.agent.rate_limit_retries, 30);
+        assert_eq!(Config::default().agent.rate_limit_retries, 5);
 
-        let mut cfg: Config = serde_json::from_str(
-            r#"{"agent":{"rateLimitRetries":null,"rateLimitIntervalSecs":0}}"#,
+        let mut cfg: Config = serde_json::from_str(r#"{"agent":{"rateLimitRetries":0}}"#).unwrap();
+        cfg.normalize();
+        assert_eq!(cfg.agent.rate_limit_retries, 1, "one retry is the floor");
+    }
+
+    /// The add-model flow edits `models.json` in place: unknown keys survive,
+    /// the provider is created from the URL host, and re-adding the same model
+    /// replaces its entry instead of duplicating it.
+    #[test]
+    fn adding_a_model_appends_to_models_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("models.json"),
+            r#"{
+              // hand-written notes must survive
+              "providers": {
+                "openrouter": {
+                  "baseUrl": "https://openrouter.ai/api/v1",
+                  "compat": { "supportsReasoningEffort": true },
+                  "models": [{ "id": "openai/gpt-5" }]
+                }
+              }
+            }"#,
         )
         .unwrap();
-        cfg.normalize();
-        assert_eq!(cfg.agent.rate_limit_retries, None);
-        assert_eq!(cfg.agent.rate_limit_interval_secs, 1);
+        let cfg = Config {
+            source: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
+
+        let reference = cfg
+            .add_model(&NewModel {
+                base_url: "https://api.deepseek.com/v1/".into(),
+                api_key: "sk-test".into(),
+                model_id: "deepseek-chat".into(),
+                context_window: 128_000,
+                max_tokens: Some(8_192),
+            })
+            .unwrap();
+        assert_eq!(reference, "deepseek/deepseek-chat");
+
+        let saved: Value =
+            parse_jsonc(&std::fs::read_to_string(dir.path().join("models.json")).unwrap()).unwrap();
+        let provider = &saved["providers"]["deepseek"];
+        assert_eq!(provider["baseUrl"], "https://api.deepseek.com/v1");
+        assert_eq!(provider["api"], "openai-completions");
+        assert_eq!(provider["apiKey"], "sk-test");
+        assert_eq!(provider["models"][0]["id"], "deepseek-chat");
+        assert_eq!(provider["models"][0]["contextWindow"], 128_000);
+        assert_eq!(provider["models"][0]["maxTokens"], 8_192);
+        // Untouched provider and its compat flags are still there.
+        assert_eq!(
+            saved["providers"]["openrouter"]["compat"]["supportsReasoningEffort"],
+            true
+        );
+        assert_eq!(
+            saved["providers"]["openrouter"]["models"][0]["id"],
+            "openai/gpt-5"
+        );
+
+        // Adding the same id again replaces it, and an unknown context window
+        // writes no key at all.
+        cfg.add_model(&NewModel {
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: String::new(),
+            model_id: "deepseek-chat".into(),
+            context_window: 0,
+            max_tokens: None,
+        })
+        .unwrap();
+        let saved: Value =
+            parse_jsonc(&std::fs::read_to_string(dir.path().join("models.json")).unwrap()).unwrap();
+        let models = saved["providers"]["deepseek"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1, "no duplicate entry");
+        assert!(models[0].get("contextWindow").is_none());
+        assert_eq!(
+            saved["providers"]["deepseek"]["apiKey"], "sk-test",
+            "an empty key does not erase the stored one"
+        );
+    }
+
+    #[test]
+    fn provider_ids_come_from_the_endpoint_host() {
+        assert_eq!(
+            provider_id_from_url("https://api.deepseek.com/v1"),
+            "deepseek"
+        );
+        assert_eq!(
+            provider_id_from_url("https://openrouter.ai/api/v1"),
+            "openrouter"
+        );
+        assert_eq!(
+            provider_id_from_url("http://127.0.0.1:11434/v1"),
+            "127-0-0-1-11434"
+        );
+        assert_eq!(
+            provider_id_from_url("http://localhost:8080/v1"),
+            "localhost"
+        );
+        assert_eq!(provider_id_from_url(""), "custom");
     }
 
     #[test]

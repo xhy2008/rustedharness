@@ -4537,6 +4537,7 @@ dependencies = [
  "rustedharness-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

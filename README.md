@@ -101,6 +101,16 @@ contain slashes (for example OpenRouter ids) can be used as-is when unique, or
 prefixed with their provider. The example below is illustrative; this harness
 does not ship any of these providers or models by default.
 
+The TUI can do this for you: `/model` ends with **Add model...**, a
+full-screen form for a base URL and API key. Enter fetches `GET {base}/models`,
+lists what the endpoint serves (with context window and output cap when the
+provider reports them), and writes the provider and the chosen model into
+`models.json` — creating the provider entry from the URL host, e.g.
+`https://api.deepseek.com/v1` becomes `deepseek`. Endpoints without a model
+list fall back to typing the id. The new model is selected immediately: the
+agent reloads `models.json` and rebuilds its provider router, so no restart is
+needed. The key is stored in plain text in `models.json`.
+
 ```json
 {
   "providers": {
@@ -216,8 +226,7 @@ and model selection loads unchanged.
     "temperature": 0.2,
     "chaseLimit": 3,
     "maxOutputTokens": 8192,
-    "rateLimitRetries": null,
-    "rateLimitIntervalSecs": 5,
+    "rateLimitRetries": 5,
     "httpIdleTimeoutMs": 0,
     "showCacheMissNotices": true
   },
@@ -309,10 +318,10 @@ appended to the tool result.
   miss nor publish a cache lifetime, so no lifetime is assumed or configured.
   `agent.showCacheMissNotices` (default `true`) turns the notices off.
 - **429 retries**: rate-limited responses (HTTP 429 / `resource_exhausted`)
-  retry every `agent.rateLimitIntervalSecs` seconds (recommended 1, 3 or 5)
-  for at most `agent.rateLimitRetries` attempts (recommended 3, 5 or 10).
-  Set `rateLimitRetries` to `null` to retry until the turn is cancelled.
-  Quota/credit exhaustion is terminal and never retried.
+  retry for up to `agent.rateLimitRetries` attempts, three seconds apart. The
+  settings panel offers 5, 15, 30, 50 and 100; the gap is fixed, so a
+  rate-limited provider is never hammered faster than one request per three
+  seconds. Quota/credit exhaustion is terminal and never retried.
 - **Compaction**: when the provider-reported context size reaches 80% of the
   active model's `contextWindow`, the transcript is replaced by a five-section
   summary (goal, done, constraints, pending, pitfalls). The most recent turns
