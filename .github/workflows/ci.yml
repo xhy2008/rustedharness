@@ -7,6 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Nothing in CI reuses a compiler session, and incremental compilation is the
+  # slowest way to build a tree once (85 s against 35 s here), so the artifacts
+  # would only make the dependency cache bigger.
+  CARGO_INCREMENTAL: 0
+  # Debug info is most of a build's size and none of its value in CI.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   check:
