@@ -26,6 +26,7 @@ use rustedharness_core::discovery::CatalogModel;
 use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
 use rustedharness_core::provider::{ChatMessage, Role};
+use rustedharness_core::shell::{GIT_BASH, POWERSHELL};
 use rustedharness_core::tools::todo::TodoItem;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -1751,6 +1752,16 @@ impl App {
                                     Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                                 }
                             }
+                            "terminal" => {
+                                let next = next_terminal_prefer(&self.agent.config().shell.prefer);
+                                match self.agent.set_shell_prefer(next) {
+                                    Ok(()) => self.notice(format!(
+                                        "agent terminal: {}",
+                                        terminal_label(next)
+                                    )),
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                                }
+                            }
                             "notices" => {
                                 let on = !self.agent.show_cache_miss_notices();
                                 match self.agent.set_show_cache_miss_notices(on) {
@@ -2292,8 +2303,8 @@ impl App {
 
     fn settings_items_for(&self, page: SettingsPage) -> Vec<PickerItem> {
         match page {
-            SettingsPage::Root => vec![
-                PickerItem {
+            SettingsPage::Root => {
+                let notices = PickerItem {
                     label: "cache miss notices".to_string(),
                     detail: if self.agent.show_cache_miss_notices() {
                         "on - warn when a turn re-bills cached prompt tokens".to_string()
@@ -2302,8 +2313,8 @@ impl App {
                     },
                     value: "notices".to_string(),
                     disabled: false,
-                },
-                PickerItem {
+                };
+                let retry = PickerItem {
                     label: "429 retry".to_string(),
                     detail: format!(
                         "{} retries, {}s apart",
@@ -2312,8 +2323,8 @@ impl App {
                     ),
                     value: "retry".to_string(),
                     disabled: false,
-                },
-                PickerItem {
+                };
+                let search = PickerItem {
                     label: "web search".to_string(),
                     detail: format!(
                         "{} ({})",
@@ -2326,8 +2337,8 @@ impl App {
                     ),
                     value: "search".to_string(),
                     disabled: false,
-                },
-                PickerItem {
+                };
+                let compaction = PickerItem {
                     label: "compaction".to_string(),
                     detail: format!(
                         "model {} | {} thinking | {:.0}% threshold | keep {}",
@@ -2343,8 +2354,21 @@ impl App {
                     ),
                     value: "compaction".to_string(),
                     disabled: false,
-                },
-            ],
+                };
+                let mut items = vec![notices, retry];
+                // Windows installed with Git for Windows is the only place with
+                // a choice of shell, so the row is absent everywhere else.
+                if rustedharness_core::shell::git_bash_available() {
+                    items.push(PickerItem {
+                        label: "terminal".to_string(),
+                        detail: terminal_label(&self.agent.config().shell.prefer).to_string(),
+                        value: "terminal".to_string(),
+                        disabled: false,
+                    });
+                }
+                items.extend([search, compaction]);
+                items
+            }
             SettingsPage::WebSearch => {
                 let search = &self.search;
                 let mut items: Vec<PickerItem> = SearchBackend::ALL
@@ -2491,6 +2515,7 @@ impl App {
                     retry_presets_text(),
                     RATE_LIMIT_RETRY_INTERVAL.as_secs()
                 ),
+                "terminal" => "Which shell the agent's shell tool spawns. Git Bash is the bash that ships with Git for Windows, so commands, quoting and paths read like a unix shell; PowerShell is the native Windows shell. Switching applies at once and stops the background processes the previous shell started.".to_string(),
                 "search" => "Which backend the web_search tool uses. Enter opens the web search page: brave, tavily, SearXNG, bing or duckduckgo. The page asks for an api key (or a SearXNG instance url) for the backend that needs one.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
             };
@@ -2950,6 +2975,24 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
 /// real model reference because a reference always contains a `/`.
 const ADD_MODEL_ROW: &str = "+";
 
+/// The shell the agent will spawn, as the settings row reads it.
+fn terminal_label(prefer: &str) -> &'static str {
+    if prefer.eq_ignore_ascii_case(GIT_BASH) {
+        "git bash"
+    } else {
+        "powershell"
+    }
+}
+
+/// The other shell, as it is stored in `shell.prefer`.
+fn next_terminal_prefer(prefer: &str) -> &'static str {
+    if prefer.eq_ignore_ascii_case(GIT_BASH) {
+        POWERSHELL
+    } else {
+        GIT_BASH
+    }
+}
+
 /// First line of a multi-line input, for one-line picker rows.
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().trim().to_string()
@@ -3309,10 +3352,11 @@ mod tests {
         runtime.block_on(app.handle_key(ctrl('t'), &tx)).unwrap();
         assert!(matches!(app.overlay, Overlay::None), "ctrl+t collapses");
 
-        // The root page lists notices, 429 retries, web search, then compaction.
+        // The root page lists notices, 429 retries, web search, then compaction
+        // (plus a terminal row on Windows), so rows are found by name.
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 3,
+            sel: crate::ui_tests::settings_row(&app, "compaction"),
         };
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(matches!(
@@ -3433,11 +3477,11 @@ mod tests {
         let mut app = crate::ui_tests::demo_app();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let retry = crate::ui_tests::settings_row(&app, "retry");
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 1,
+            sel: retry,
         };
-        assert_eq!(app.settings_items()[1].value, "retry");
 
         let start = app.agent.rate_limit_retries();
         let mut seen = vec![start];
@@ -3450,8 +3494,64 @@ mod tests {
             vec![start, 15, 30, 50, 100, 5],
             "5, 15, 30, 50, 100 and back to 5"
         );
-        assert!(app.settings_items()[1].detail.contains("3s apart"));
+        assert!(app.settings_items()[retry].detail.contains("3s apart"));
         assert!(app.settings_description().contains("fixed at 3 seconds"));
+    }
+
+    /// The terminal row exists exactly where the agent has a choice of shell,
+    /// and it cycles between the two values `ShellSpec::detect` understands.
+    #[test]
+    fn the_terminal_row_cycles_between_the_two_shells() {
+        assert_eq!(next_terminal_prefer(POWERSHELL), GIT_BASH);
+        assert_eq!(next_terminal_prefer(GIT_BASH), POWERSHELL);
+        assert_eq!(next_terminal_prefer("default"), GIT_BASH);
+        assert_eq!(terminal_label(GIT_BASH), "git bash");
+        assert_eq!(terminal_label(POWERSHELL), "powershell");
+        assert_eq!(terminal_label("default"), "powershell");
+
+        let app = crate::ui_tests::demo_app();
+        let row = app
+            .settings_items()
+            .into_iter()
+            .find(|item| item.value == "terminal");
+        assert_eq!(
+            row.is_some(),
+            rustedharness_core::shell::git_bash_available(),
+            "the row is shown only where a second shell exists"
+        );
+        if let Some(row) = row {
+            assert_eq!(row.label, "terminal");
+            assert_eq!(row.detail, "powershell", "the default preference");
+        }
+    }
+
+    /// Choosing the other shell writes `shell.prefer` and rebuilds the agent's
+    /// shell tool. Only Windows has the row, so this runs for real there.
+    #[test]
+    fn the_terminal_row_switches_the_agent_shell() {
+        if !rustedharness_core::shell::git_bash_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::ui_tests::demo_app_in(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: crate::ui_tests::settings_row(&app, "terminal"),
+        };
+
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.agent.config().shell.prefer, GIT_BASH);
+        let row = crate::ui_tests::settings_row(&app, "terminal");
+        assert_eq!(app.settings_items()[row].detail, "git bash");
+
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.agent.config().shell.prefer, POWERSHELL);
+        assert_eq!(
+            app.settings_items()[crate::ui_tests::settings_row(&app, "terminal")].detail,
+            "powershell"
+        );
     }
 
     /// The web-search page selects a backend and offers a credential box only
@@ -3463,11 +3563,11 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
+        let search = crate::ui_tests::settings_row(&app, "search");
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
-            sel: 2,
+            sel: search,
         };
-        assert_eq!(app.settings_items()[2].value, "search");
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
         assert!(matches!(
             app.overlay,

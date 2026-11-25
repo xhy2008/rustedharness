@@ -1,5 +1,26 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：`/settings` 的 Windows 终端选择（2026-11-25）
+
+1. **需求**：Windows 上且装了 git 时，可以让 AI 的 shell 工具跑 PowerShell 还是 Git Bash。
+2. **位置**：`/settings` 根页新增 `terminal` 行（`notices`、`429 retry` 之后，`web search`
+   之前），Enter 在两个值之间切换，写回 `config.json` 的 `shell.prefer`
+   （`"powershell"` / `"git-bash"`）。**这一行只在 Windows 且检测到 Git for Windows 时
+   存在**（`shell::git_bash_available()`），其它平台根页仍是原来四项。
+3. **立即生效**（`Agent::set_shell_prefer`）：写配置 → `reload_config()` → 重新
+   `ShellSpec::detect` 并为 `ToolContext` 换一个 `ProcRegistry` → `rebuild_tools()`，
+   于是工具名从 `bash` 变成 `powershell`（或反过来）、工具描述随之改变，下一次请求就带
+   新目录。旧 shell 起的后台进程会被 `cleanup_all()` 收掉——它们本来就活不过那次切换。
+   回合运行中拒绝切换（`E_BUSY`）。
+4. **检测 git**：不再用 `PATH` 上第一个 `bash.exe`（那多半是 WSL 的 `bash.exe`，它跑在另一个
+   文件系统命名空间里，交给它的 workspace 路径根本不存在）。现在由 `git.exe` 推导：
+   `<Git>/cmd/git.exe` → `<Git>/bin/bash.exe`、`<Git>/usr/bin/bash.exe`（便携版布局），
+   再退回两个标准安装路径。
+5. **测试**：`next_terminal_prefer` / `terminal_label` 的往返；根页是否出现该行与
+   `git_bash_available()` 一致；`set_shell_prefer` 写 `config.json` 并重建工具（Linux 上
+   断言仍只有 `bash`）。另外把三处"按序号取设置行"的测试改成按 `value` 查找
+   （`ui_tests::settings_row`），否则 Windows 上多出的 `terminal` 行会让它们错位。
+
 ## 已完成：构建缓存瘦身（2026-11-25）
 
 1. **先量后改**：一个用了几个月的 `target/` 是 28 GB —— `incremental` 14 GB、`deps`

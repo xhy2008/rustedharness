@@ -193,6 +193,16 @@ pub(crate) fn demo_app_in(scratch: &std::path::Path) -> App {
     app
 }
 
+/// Index of a settings row by its value, so a test never depends on how many
+/// rows the build in front of it happens to show (the `terminal` row exists only
+/// on Windows with Git for Windows).
+pub(crate) fn settings_row(app: &App, value: &str) -> usize {
+    app.settings_items()
+        .iter()
+        .position(|item| item.value == value)
+        .unwrap_or_else(|| panic!("no `{value}` row"))
+}
+
 fn dump(app: &mut App, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");

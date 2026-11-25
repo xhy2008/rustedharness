@@ -579,7 +579,9 @@ impl Default for EditConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ShellConfig {
-    /// "default" | "git-bash" (Windows only).
+    /// Which shell the agent runs commands in: `"git-bash"` for the bash that
+    /// ships with Git for Windows, `"powershell"` (or anything else) for the
+    /// platform's own shell. Ignored where bash is the only choice.
     pub prefer: String,
     pub timeout_ms: u64,
     pub activity_timeout_ms: u64,

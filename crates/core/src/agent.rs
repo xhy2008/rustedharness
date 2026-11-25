@@ -572,6 +572,38 @@ impl Agent {
         Ok(())
     }
 
+    /// Choose the shell the agent runs commands in: `shell::GIT_BASH` for the
+    /// bash shipped with Git for Windows, `shell::POWERSHELL` for the native
+    /// one. Written to `config.json` and applied to the running session.
+    ///
+    /// Only Windows has this choice; elsewhere `ShellSpec::detect` returns bash
+    /// whatever the preference says, so the call is harmless but pointless.
+    pub fn set_shell_prefer(&self, prefer: &str) -> Result<()> {
+        if self.busy() {
+            return Err(HarnessError::tool(
+                "E_BUSY",
+                "cannot switch shells while a turn is running",
+            ));
+        }
+        self.config()
+            .save_setting(&["shell", "prefer"], json!(prefer))?;
+        self.reload_config()?;
+        let config = self.config();
+        let cwd = self.ctx.read().unwrap().cwd.clone();
+        let proc = Arc::new(ProcRegistry::new(
+            crate::shell::ShellSpec::detect(&config.shell.prefer),
+            config.shell.clone(),
+            cwd,
+            Some(self.events.clone()),
+        ));
+        let previous = std::mem::replace(&mut self.ctx.write().unwrap().proc, proc);
+        // Background processes belong to the shell that started them, and the
+        // tool name (`bash` / `powershell`) comes from the new spec.
+        previous.cleanup_all();
+        self.rebuild_tools();
+        Ok(())
+    }
+
     pub fn cancel(&self) {
         self.cancel_token.lock().unwrap().cancel();
         // Interrupt cascade: all live process groups die with the turn.
@@ -1715,6 +1747,46 @@ mod tests {
         agent.busy.store(false, Ordering::SeqCst);
         agent.shutdown().await;
         assert!(err.contains("cancel it before rolling back"), "{err}");
+    }
+
+    /// The shell choice is a `config.json` setting that reaches the running
+    /// session. Off Windows it has no effect, which is what makes it safe to
+    /// test everywhere.
+    #[tokio::test]
+    async fn switching_the_shell_writes_config_and_rebuilds_the_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        // `save_setting` writes into `source_dir`, so the test keeps its
+        // `config.json` in the temporary directory instead of the real one.
+        let config = Config {
+            source: Some(dir.path().to_path_buf()),
+            ..test_config(dir.path())
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(Fake {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::with_backend(config, dir.path().to_path_buf(), tx, backend)
+            .await
+            .unwrap();
+        agent.set_shell_prefer(crate::shell::GIT_BASH).unwrap();
+        assert_eq!(agent.config().shell.prefer, crate::shell::GIT_BASH);
+        let stored = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(stored.contains("\"git-bash\""), "{stored}");
+        if !cfg!(windows) {
+            assert_eq!(
+                agent
+                    .tools
+                    .read()
+                    .unwrap()
+                    .definitions()
+                    .iter()
+                    .filter(|tool| tool.name == "bash")
+                    .count(),
+                1,
+                "bash stays the only shell off Windows"
+            );
+        }
+        agent.shutdown().await;
     }
 
     #[test]

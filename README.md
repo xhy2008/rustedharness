@@ -241,7 +241,7 @@ and model selection loads unchanged.
     "diagnosticsTimeoutMs": 2000
   },
   "shell": {
-    "prefer": "default",
+    "prefer": "powershell",
     "timeoutMs": 30000,
     "activityTimeoutMs": 300000,
     "maxOutputBytes": 1048576,
@@ -363,7 +363,7 @@ appended to the tool result.
 | `edit` | Hashline anchored edits, optionally several per call. |
 | `glob` | Workspace file discovery (respects `.gitignore`). |
 | `grep` | Regex content search with glob filters, backed by `grep-searcher`. |
-| `bash` / `powershell` | Run commands in a pty; background mode returns a pid. |
+| `bash` / `powershell` | Run commands in a pty; background mode returns a pid. Which one is chosen in `/settings` → **terminal** (Windows only). |
 | `await` | Wait for a background process and return output/exit status. |
 | `todo` | Replace, merge, or inspect the task list. |
 | `web_search` | Web search through the backend chosen in `/settings`. |
@@ -390,6 +390,15 @@ Keys live in `config.json` under `[search]` (`braveApiKey`, `tavilyApiKey`,
 `bingApiKey`, `searxngUrl`). A file that says nothing falls back to
 `BRAVE_API_KEY`, `TAVILY_API_KEY` and `SEARXNG_URL`, so an environment-only
 setup keeps working. `bing` is the default because it needs no account.
+
+On Windows installed with Git for Windows, `/settings` → **terminal** chooses
+which shell `bash`/`powershell` spawns: the bash that ships with Git (unix
+quoting and paths, no PowerShell syntax) or the native PowerShell (the default).
+The row only exists where the choice does, and it writes `shell.prefer` as
+`"git-bash"` or `"powershell"`. Switching applies immediately and stops the
+background processes the previous shell started, since they die with it. The
+bash is taken from the `git.exe` that is found, never from the first `bash.exe`
+on PATH, so a WSL install cannot be mistaken for Git Bash.
 
 ### Anchored editing (Hashline)
 

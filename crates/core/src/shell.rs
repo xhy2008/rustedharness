@@ -3,6 +3,13 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+/// `shell.prefer` value that selects the bash shipped with Git for Windows.
+pub const GIT_BASH: &str = "git-bash";
+/// `shell.prefer` value for the native PowerShell. Any other value means the
+/// same thing, but this is the one the settings panel writes, so the file says
+/// what the user chose.
+pub const POWERSHELL: &str = "powershell";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellFamily {
     Bash,
@@ -47,7 +54,7 @@ impl ShellSpec {
 
     fn detect_uncached(prefer: &str) -> Self {
         if cfg!(windows) {
-            if prefer.eq_ignore_ascii_case("git-bash") {
+            if prefer.eq_ignore_ascii_case(GIT_BASH) {
                 if let Some(bash) = find_git_bash() {
                     let version = version_of(&bash, &["--version"]);
                     return Self {
@@ -284,18 +291,43 @@ fn find_powershell() -> (PathBuf, String) {
     (PathBuf::from("powershell.exe"), "unknown".into())
 }
 
+/// Whether the agent can be pointed at Git Bash here: only Windows has a choice
+/// of shell, and it needs Git for Windows installed.
+pub fn git_bash_available() -> bool {
+    cfg!(windows) && find_git_bash().is_some()
+}
+
+/// The bash that ships with Git for Windows.
+///
+/// It is derived from `git.exe` rather than searched for as `bash.exe`: WSL
+/// installs its own `bash.exe` on PATH, and commands started there see a
+/// different filesystem, so the workspace paths handed to it would not resolve.
 fn find_git_bash() -> Option<PathBuf> {
-    let candidates = [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ];
-    for candidate in candidates {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Some(path);
+    if let Some(git) = which("git.exe") {
+        if let Some(bash) = bash_beside(&git).into_iter().find(|bash| bash.exists()) {
+            return Some(bash);
         }
     }
-    which("bash.exe")
+    [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|bash| bash.exists())
+}
+
+/// The bashes a Git for Windows installation keeps beside the `git.exe` that was
+/// found: `bin/` holds the launcher for the shell Git puts on PATH, and
+/// `usr/bin/` holds the real shell inside the MinGW tree of a portable install.
+fn bash_beside(git: &Path) -> Vec<PathBuf> {
+    let Some(root) = git.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    vec![
+        root.join("bin").join("bash.exe"),
+        root.join("usr").join("bin").join("bash.exe"),
+    ]
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -312,6 +344,26 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Git for Windows keeps `git.exe` in `cmd/` and the bash it ships in
+    /// `bin/`, so the shell is derived from the git that was found rather than
+    /// from the first `bash.exe` on PATH (which may be WSL's).
+    #[test]
+    #[cfg(windows)]
+    fn git_bash_is_the_bash_shipped_next_to_git() {
+        assert_eq!(
+            bash_beside(Path::new(r"C:\Program Files\Git\cmd\git.exe")),
+            [
+                PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+                PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_choice_of_shell_exists_only_on_windows() {
+        assert_eq!(git_bash_available(), cfg!(windows));
+    }
 
     fn spec(family: ShellFamily) -> ShellSpec {
         ShellSpec {
