@@ -84,9 +84,12 @@ impl Compactor {
 
     /// Compaction is driven only by the most recent provider-reported context
     /// size. Before the first report there is no number to act on, so the
-    /// harness keeps going until the API tells it otherwise.
+    /// harness keeps going until the API tells it otherwise; likewise a model
+    /// with no known context window has no trigger point to compare against.
     pub fn needs_compaction(&self) -> bool {
-        self.counter.context_tokens() >= self.trigger_tokens()
+        let reported = self.counter.context_tokens();
+        let trigger = self.trigger_tokens();
+        reported > 0 && trigger > 0 && reported >= trigger
     }
 
     /// Build a plan that always keeps the system prompt and the last N user
@@ -542,6 +545,20 @@ mod tests {
         assert!(!both.contains("hidden chain"));
         assert!(!both.contains("tool output"));
         assert!(both.contains("(output omitted)"));
+    }
+
+    #[test]
+    fn an_unknown_context_window_never_triggers() {
+        let mut c = compactor();
+        c.context_limit = 0;
+        c.counter.record(&crate::provider::Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 10,
+            total_tokens: 10_010,
+            cached_tokens: 0,
+            cost_usd: None,
+        });
+        assert!(!c.needs_compaction(), "no known window, no trigger point");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use crate::config::{Config, SessionConfig};
 use crate::error::{HarnessError, Result};
-use crate::provider::{ChatMessage, FunctionCall, ToolCall, Usage};
+use crate::provider::{ChatMessage, FunctionCall, Role, ToolCall, Usage};
 use crate::tools::todo::TodoItem;
 
 /// File format version we write. pi migrates v1/v2 up to this on load.
@@ -308,13 +308,59 @@ impl SessionWriter {
         entry["data"] = data.clone();
         entry["timestamp"] = Value::String(now_iso());
         lines[index] = serde_json::to_string(&entry)?;
+        let mut text = lines.join("\n");
+        text.push('\n');
+        self.replace_file(&text)?;
+        Ok(true)
+    }
+
+    /// Cut the file back to just after its `turn`-th user message (0-based) and
+    /// keep appending from there. Everything written after that message is
+    /// dropped from disk; unlike pi's branch tree there is no way back to it.
+    pub fn rollback_to_user(&mut self, turn: usize) -> Result<()> {
+        let missing = || {
+            HarnessError::tool(
+                "E_NO_SUCH_TURN",
+                "this session has no user turn to roll back to",
+            )
+        };
+        let raw = std::fs::read_to_string(&self.path).map_err(|_| missing())?;
+        let lines: Vec<&str> = raw.lines().collect();
+        let mut turns = 0;
+        let end = lines.iter().position(|line| {
+            if !is_user_message(line) {
+                return false;
+            }
+            let chosen = turns == turn;
+            turns += 1;
+            chosen
+        });
+        let Some(end) = end else {
+            return Err(missing());
+        };
+        let mut kept = lines[..=end].join("\n");
+        kept.push('\n');
+        self.replace_file(&kept)?;
+        let (last_id, message_ids) = scan_chain(&kept);
+        self.last_id = last_id;
+        self.message_ids = message_ids;
+        self.pending.clear();
+        // The usage of the discarded turn must not ride on the next assistant
+        // message.
+        self.last_usage = PiUsage::default();
+        Ok(())
+    }
+
+    /// Replace the whole file with `text`. The swap is atomic so a crash cannot
+    /// leave half a session behind; the append handle follows it.
+    fn replace_file(&mut self, text: &str) -> Result<()> {
         let temp = self.path.with_extension("jsonl.tmp");
-        std::fs::write(&temp, lines.join("\n") + "\n")?;
+        std::fs::write(&temp, text)?;
         // The append handle points at the file this rename replaces.
         drop(self.file.take());
         std::fs::rename(&temp, &self.path)?;
         self.file = Some(OpenOptions::new().append(true).open(&self.path)?);
-        Ok(true)
+        Ok(())
     }
 
     /// Record provider-reported usage for the current model.
@@ -387,13 +433,18 @@ impl SessionWriter {
 
     fn open(&mut self) -> Result<()> {
         std::fs::create_dir_all(self.path.parent().unwrap_or(&self.dir))?;
+        // Only a brand new file gets a header: a resumed session already has
+        // one, and a rollback rewrote the existing file in place.
+        let fresh = std::fs::metadata(&self.path).map_or(true, |meta| meta.len() == 0);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
         self.file = Some(file);
-        let header = self.header.clone();
-        self.write_line(&header)?;
+        if fresh {
+            let header = self.header.clone();
+            self.write_line(&header)?;
+        }
         for entry in std::mem::take(&mut self.pending) {
             self.write(&entry)?;
         }
@@ -916,7 +967,7 @@ impl From<PiUsage> for Usage {
 // loading
 // ---------------------------------------------------------------------------
 
-fn load_file(path: &Path) -> Result<LoadedSession> {
+pub(crate) fn load_file(path: &Path) -> Result<LoadedSession> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut header: Option<Header> = None;
@@ -1151,6 +1202,29 @@ compacted into the following summary:\n\n<summary>\n";
 const BRANCH_PREFIX: &str = "The following is a summary of a branch that this \
 conversation came back from:\n\n<summary>\n";
 pub(crate) const SUMMARY_SUFFIX: &str = "\n</summary>";
+
+/// Whether a JSONL line is a user message (`pi` stores user content as a plain
+/// string under `message`).
+fn is_user_message(line: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|value| {
+        value.get("type").and_then(Value::as_str) == Some("message")
+            && value
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("user")
+    })
+}
+
+/// Whether a message is the synthetic user message that carries a compaction
+/// summary: it reaches the model as a user turn, but nobody typed it.
+pub(crate) fn is_compaction_summary(message: &ChatMessage) -> bool {
+    message.role == Role::User
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.starts_with(COMPACTION_PREFIX))
+}
 
 /// A user line that is a frontend command (`/model`, `/settings`,
 /// `/compact ...`) rather than a prompt. Both tools handle commands outside the
@@ -1455,6 +1529,96 @@ mod tests {
             serde_json::to_string(&live).unwrap(),
             "replay must not add or reshape fields in the model prefix"
         );
+    }
+
+    /// Resuming used to append a second `session` header into the middle of the
+    /// file, because the writer wrote one whenever it opened a handle.
+    #[test]
+    fn resuming_appends_without_writing_a_second_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "openai/gpt-5", "openai/mini").unwrap();
+        writer.user("hello").unwrap();
+        let path = writer.path().to_path_buf();
+        let id = writer.id().to_string();
+        drop(writer);
+
+        let mut again = SessionWriter::resume(&path, &id, "openai/gpt-5").unwrap();
+        again.user("second").unwrap();
+        drop(again);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.matches("\"type\":\"session\"").count(), 1);
+        assert!(!load_file(&path).unwrap().truncated_tail);
+    }
+
+    #[test]
+    fn rollback_keeps_only_the_chosen_user_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "openai/gpt-5", "openai/mini").unwrap();
+        writer.user("one").unwrap();
+        writer
+            .assistant(&ChatMessage::assistant("first reply"))
+            .unwrap();
+        writer.user("two").unwrap();
+        writer
+            .assistant(&ChatMessage::assistant("second reply"))
+            .unwrap();
+        writer.user("three").unwrap();
+        let path = writer.path().to_path_buf();
+
+        writer.rollback_to_user(1).unwrap();
+        // The writer keeps appending to the shortened chain.
+        writer.user("after").unwrap();
+        drop(writer);
+
+        let loaded = load_file(&path).unwrap();
+        let texts: Vec<&str> = loaded
+            .messages
+            .iter()
+            .map(|message| message.content.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(texts, ["one", "first reply", "two", "after"]);
+
+        // Every entry still points at the one before it.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let entries: Vec<Value> = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|value: &Value| value.get("type").and_then(Value::as_str) != Some("session"))
+            .collect();
+        let ids: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        for (position, entry) in entries.iter().enumerate() {
+            let expected = position
+                .checked_sub(1)
+                .map(|previous| ids[previous])
+                .map(Value::from)
+                .unwrap_or(Value::Null);
+            assert_eq!(entry["parentId"], expected, "broken chain at {position}");
+        }
+    }
+
+    #[test]
+    fn rollback_to_a_missing_turn_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "openai/gpt-5", "openai/mini").unwrap();
+        // Nothing written yet: no file, no turn.
+        assert!(writer.rollback_to_user(0).is_err());
+
+        writer.user("only").unwrap();
+        writer.assistant(&ChatMessage::assistant("reply")).unwrap();
+        let path = writer.path().to_path_buf();
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(writer.rollback_to_user(1).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

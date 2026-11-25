@@ -25,7 +25,7 @@ use rustedharness_core::discovery::CatalogModel;
 
 use crate::app::{
     human_count, model_filtered, ordered, selection_row_span, session_filtered, shorten_path,
-    AddModelState, AddModelStep, App, Overlay, PickerItem,
+    AddModelState, AddModelStep, App, Overlay, PickerItem, TurnRow,
 };
 use crate::entries::{Entry, EntryKind};
 use crate::theme::*;
@@ -1114,6 +1114,53 @@ fn draw_overlay(app: &App, frame: &mut Frame, body: Rect) {
                 )),
                 Line::from(Span::styled(hint, style(FAINT))),
             ];
+            draw_info_block(frame, body, lines);
+        }
+        Overlay::Rollback { rows, sel } => {
+            let items: Vec<PickerItem> = rows.iter().map(TurnRow::picker_row).collect();
+            draw_picker(
+                frame,
+                body,
+                "roll back",
+                &items,
+                *sel,
+                "",
+                Some(
+                    "The conversation is cut after the chosen input: every message after it is \
+                     deleted from the session file, so it cannot be recovered.",
+                ),
+            );
+        }
+        Overlay::RollbackConfirm { rows, sel } => {
+            let Some(row) = rows.get(*sel) else { return };
+            let width = body.width.saturating_sub(6) as usize;
+            let mut lines = vec![
+                panel_title(&format!("roll back to #{}", row.turn + 1)),
+                Line::from(""),
+            ];
+            let quoted = wrap_plain(&row.text, width);
+            let truncated = quoted.len() > 6;
+            for line in quoted.into_iter().take(6) {
+                lines.push(Line::from(Span::styled(line, style(FAINT))));
+            }
+            if truncated {
+                lines.push(Line::from(Span::styled("...", style(FAINT))));
+            }
+            lines.push(Line::from(""));
+            for line in wrap_plain(
+                &format!(
+                    "{} messages after this input will be deleted from the session, and cannot be recovered.",
+                    row.after
+                ),
+                width,
+            ) {
+                lines.push(Line::from(Span::styled(line, style(YELLOW))));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "enter roll back   esc back",
+                style(FAINT),
+            )));
             draw_info_block(frame, body, lines);
         }
         Overlay::Hotkeys => {

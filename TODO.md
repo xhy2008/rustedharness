@@ -1,5 +1,30 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：上下文回滚 `/rollback`（2026-11-25）
+
+1. **语义**：`/rollback` 列出当前会话的所有用户输入（倒序，最新在上），选中一条后
+   会话就截断在那一条（含这条本身），其后所有消息**从会话文件里删除**。这一点和 pi 的
+   `/tree` 不同：不保留分支，回滚后无法再回到被丢弃的轮次。
+2. **二次确认**：第一下 Enter 只是进入确认页（显示被选中的完整输入被截断到 6 行、
+   会删掉多少条消息、不可恢复），Enter 才真正执行，Esc 回到列表并保留原来的选中行。
+   最新的一条输入后面没有消息，因此置灰不可选。
+3. **实现**：
+   - `SessionWriter::rollback_to_user(turn)` 把 JSONL 重写到第 `turn` 条 user 消息
+     （含）为止（临时文件 + rename 原子替换），再从剩下的内容重新推导 `last_id` /
+     `message_ids` / `last_usage`，之后追加的条目仍然挂在保留下来的那条消息上。
+   - `Agent::rollback_to_turn(turn)` 重读文件，用文件内容替换内存里的 messages /
+     usage / todos（文件是唯一事实来源），重置 `CacheWatch`（回滚是主动作废缓存前缀，
+     不该再报 cache miss），最后重建 system prompt。回合运行中拒绝回滚（`E_BUSY`）。
+   - `Agent::user_turns()` 给出 `UserTurn { index, after, text }`；压缩摘要虽然是 user
+     角色的消息，但不是用户输入，`session::is_compaction_summary` 把它排除在外。
+   - TUI：`Overlay::Rollback` / `Overlay::RollbackConfirm`，执行后 `reload_transcript()`
+     从 agent 快照重建整个 transcript。
+4. **顺带修掉两个 bug**：
+   - `SessionWriter::open()` 在 resume 后会往文件中间再写一行 `session` 头，现在只有
+     空文件才写头。
+   - `Compactor::needs_compaction()` 在 `context_window` 未知（0）时恒为真，导致每回合
+     都压缩；现在上报值为 0 或触发阈值为 0 时都不压缩。
+
 ## 已完成：压缩模型与 /settings compaction 子菜单（2026-11-22）
 
 1. **移除 `anotherModelForCompact`**。`compactModel` 为空（默认）即使用主模型；

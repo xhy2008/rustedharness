@@ -336,6 +336,10 @@ appended to the tool result.
   `usage`, the harness warns once and reports no invented numbers.
 - **Todos**: `todo` maintains a plan. If work remains and the model stops, the
   harness injects a bounded chase message (at most `chaseLimit` times).
+- **Rollback**: `/rollback` lists the user inputs of the current session; the
+  chosen one becomes the end of the conversation and every message after it is
+  deleted from the session file. Nothing is cut until the choice is confirmed a
+  second time, and unlike pi's `/tree` there is no branch to return to.
 - **Sessions**: append-only JSONL under `~/.rustedharness/sessions` in pi's
   v3 format, with torn-tail recovery, pruning, and unique-prefix lookup. Saved
   sessions can be resumed from the CLI, TUI, or web UI; compaction records are

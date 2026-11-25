@@ -53,6 +53,16 @@ impl UsageTracker {
         }
     }
 
+    /// Replace the meters with what a rewritten session file now says. Unlike
+    /// `restore`, a missing total clears the cost instead of keeping the old
+    /// one: the turns that spent it are gone.
+    pub fn reset_to(&self, usage: Option<Usage>, cost_usd: Option<f64>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.last = usage;
+        inner.cost_usd = cost_usd.unwrap_or(0.0);
+        inner.cost_seen = cost_usd.is_some();
+    }
+
     /// Accumulated provider-reported cost, or None if no report ever carried
     /// cost data.
     pub fn total_cost_usd(&self) -> Option<f64> {

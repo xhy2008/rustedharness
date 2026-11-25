@@ -215,6 +215,16 @@ pi's exact summary wording so a resumed transcript matches the compacted view.
 `LoadedSession::path` carries the resolved file, which is what `Agent::resume`
 appends to.
 
+`/rollback` cuts a session back to one of its user inputs. `SessionWriter` does
+it by rewriting the file in place (temp file + rename, so a crash cannot leave
+half a session behind) up to and including the chosen `message` entry with
+`role: "user"`, then re-deriving `last_id` and `message_ids` from what is left,
+so the next entry chains onto the retained turn. The agent then reloads the file
+and replaces its messages, usage and todos from it: the file is the transcript of
+record, which keeps memory and disk in step. Unlike pi's `/tree` there is no
+branch — the discarded turns are gone, and the flow asks for a second
+confirmation before deleting anything.
+
 ### Code intelligence
 
 `lsp.rs` speaks JSON-RPC over stdio to one server per language, with document

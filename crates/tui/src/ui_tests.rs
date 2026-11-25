@@ -1165,3 +1165,172 @@ fn resuming_restores_the_token_and_context_meters() {
     assert_eq!(app.cache_hit_pct, Some(91), "cache ratio");
     assert_eq!(app.cost_usd, Some(0.42), "cost is the session total");
 }
+
+/// `/rollback` asks for a second confirmation and then cuts both the transcript
+/// and the session file back to the chosen user input.
+#[test]
+fn rollback_needs_a_confirmation_and_drops_the_later_turns() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let scratch = std::env::temp_dir().join("rustedharness-ui-tests/rollback");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let mut app = demo_app_in(&scratch);
+    let agent = app.agent.clone();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    for text in ["alpha", "beta", "gamma"] {
+        runtime.block_on(agent.send(text)).expect("turn");
+    }
+    app.reload_transcript();
+    assert_eq!(user_bodies(&app), ["alpha", "beta", "gamma"]);
+
+    app.input = "/rollback".chars().collect();
+    app.cursor = app.input.len();
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Enter), &tx))
+        .expect("enter");
+    let Overlay::Rollback { rows, sel } = &app.overlay else {
+        panic!("expected the rollback list");
+    };
+    assert_eq!(*sel, 0, "the newest input is offered first");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].label, "#3 gamma");
+    assert_eq!(rows[0].after, 0, "the newest input ends the conversation");
+    assert_eq!(rows[2].after, 2);
+
+    // Picking a row only opens the confirmation.
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Down), &tx))
+        .expect("down");
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Enter), &tx))
+        .expect("enter");
+    assert!(matches!(app.overlay, Overlay::RollbackConfirm { .. }));
+    assert_eq!(
+        user_bodies(&app),
+        ["alpha", "beta", "gamma"],
+        "the confirmation alone changes nothing"
+    );
+
+    // Esc steps back to the list with the same row selected.
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Esc), &tx))
+        .expect("esc");
+    let Overlay::Rollback { sel, .. } = &app.overlay else {
+        panic!("expected the list again");
+    };
+    assert_eq!(*sel, 1, "escaping the confirmation keeps the choice");
+
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Enter), &tx))
+        .expect("enter");
+    runtime
+        .block_on(app.handle_key(key(KeyCode::Enter), &tx))
+        .expect("enter");
+    assert!(!app.overlay_active(), "the flow closes once it runs");
+    assert_eq!(user_bodies(&app), ["alpha", "beta"], "gamma is gone");
+
+    let file = session_file(&scratch);
+    let raw = std::fs::read_to_string(&file).expect("session file");
+    assert_eq!(raw.matches("\"role\":\"user\"").count(), 2, "{raw}");
+    assert!(!raw.contains("gamma"), "{raw}");
+}
+
+fn user_bodies(app: &App) -> Vec<String> {
+    app.entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::User)
+        .map(|entry| entry.body.clone())
+        .collect()
+}
+
+fn session_file(dir: &std::path::Path) -> std::path::PathBuf {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&dir.join("sessions"), &mut files);
+    files.pop().expect("a session file")
+}
+
+/// The rollback flow must be readable before it deletes anything: the list says
+/// how much each input would cut, and the confirmation repeats it in full.
+#[test]
+fn rollback_overlay_shows_what_the_cut_would_delete() {
+    use crate::app::TurnRow;
+
+    let rows = vec![
+        TurnRow {
+            label: "#2 second".into(),
+            text: "second".into(),
+            after: 0,
+            turn: 1,
+        },
+        TurnRow {
+            label: "#1 first".into(),
+            text: "first".into(),
+            after: 4,
+            turn: 0,
+        },
+    ];
+    let mut app = demo_app();
+    app.overlay = Overlay::Rollback {
+        rows: rows.clone(),
+        sel: 1,
+    };
+    let json = dump(&mut app, 80, 30);
+    let screen = screen_text(&json);
+    assert!(screen.contains("#1 first"), "{screen}");
+    assert!(screen.contains("4 after"), "{screen}");
+    assert!(screen.contains("cannot be recovered"), "{screen}");
+
+    app.overlay = Overlay::RollbackConfirm { rows, sel: 1 };
+    let json = dump(&mut app, 80, 30);
+    let screen = screen_text(&json);
+    assert!(screen.contains("roll back to #1"), "{screen}");
+    assert!(
+        screen.contains("4 messages after this input will be deleted"),
+        "{screen}"
+    );
+    assert!(screen.contains("enter roll back"), "{screen}");
+
+    // A long input at a small terminal must still leave the hint and the
+    // warning on screen.
+    let long = "x".repeat(30) + "\n" + &"y\n".repeat(20);
+    app.overlay = Overlay::RollbackConfirm {
+        rows: vec![TurnRow {
+            label: "#1 first".into(),
+            text: long,
+            after: 7,
+            turn: 0,
+        }],
+        sel: 0,
+    };
+    let json = dump(&mut app, 60, 20);
+    let screen = screen_text(&json);
+    assert!(screen.contains("7 messages after this input"), "{screen}");
+    assert!(screen.contains("enter roll back"), "{screen}");
+}
+
+fn screen_text(json: &str) -> String {
+    let height = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| value["height"].as_u64())
+        .unwrap_or(30) as usize;
+    (0..height)
+        .map(|row| row_text(json, row))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

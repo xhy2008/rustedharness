@@ -71,6 +71,36 @@ pub struct PickerItem {
     pub disabled: bool,
 }
 
+/// One user input offered by `/rollback`.
+#[derive(Clone)]
+pub struct TurnRow {
+    /// `#{n}` plus the first line of the input, as the row reads.
+    pub label: String,
+    /// The full input, shown before the rollback is confirmed.
+    pub text: String,
+    /// Messages after this input: exactly what a rollback deletes.
+    pub after: usize,
+    /// Position among the user inputs, handed back to the agent.
+    pub turn: usize,
+}
+
+impl TurnRow {
+    pub fn picker_row(&self) -> PickerItem {
+        PickerItem {
+            label: self.label.clone(),
+            detail: if self.after == 0 {
+                "nothing after it".to_string()
+            } else {
+                format!("{} after", self.after)
+            },
+            value: self.turn.to_string(),
+            // The newest input has nothing after it, so rolling back to it
+            // would not change anything.
+            disabled: self.after == 0,
+        }
+    }
+}
+
 pub enum Overlay {
     None,
     Slash {
@@ -118,6 +148,16 @@ pub enum Overlay {
     Lsp,
     /// Full-screen "add model" flow opened from the model picker.
     AddModel(AddModelState),
+    /// Pick the user input the conversation is rolled back to.
+    Rollback {
+        rows: Vec<TurnRow>,
+        sel: usize,
+    },
+    /// Second step of `/rollback`: nothing is cut until this is confirmed.
+    RollbackConfirm {
+        rows: Vec<TurnRow>,
+        sel: usize,
+    },
     /// Typing the credential of the selected search backend.
     WebSearchKey {
         backend: SearchBackend,
@@ -324,6 +364,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/cwd <dir>", "move the workspace root"),
     ("/new", "start a fresh session"),
     ("/resume", "pick a saved session"),
+    ("/rollback", "cut the conversation back to an earlier input"),
     ("/session", "show session id, models and context usage"),
     (
         "/settings",
@@ -479,17 +520,31 @@ impl App {
         self.context_limit = snapshot.context_limit;
         // A resumed session shows the numbers the provider last reported, so
         // the footer keeps saying what this session has spent instead of
-        // restarting from zero.
-        if let Some(usage) = snapshot.usage {
-            self.input_tokens = usage.prompt_tokens;
-            self.output_tokens = usage.completion_tokens;
-            self.cache_hit_pct = usage.cache_hit_pct();
-            self.cost_usd = snapshot.cost_usd;
-        }
+        // restarting from zero. A rolled-back session is shorter, so the meters
+        // are replaced rather than only set when a report is present.
+        let usage = snapshot.usage.as_ref();
+        self.input_tokens = usage.map_or(0, |usage| usage.prompt_tokens);
+        self.output_tokens = usage.map_or(0, |usage| usage.completion_tokens);
+        self.cache_hit_pct = usage.and_then(|usage| usage.cache_hit_pct());
+        self.cost_usd = snapshot.cost_usd;
         self.todo = snapshot.todos;
         for message in snapshot.messages {
             self.push_message(message);
         }
+    }
+
+    /// Rebuild the transcript from the agent after its history changed
+    /// underneath it (`/rollback`).
+    pub fn reload_transcript(&mut self) {
+        self.entries.clear();
+        self.tool_slots.clear();
+        self.streaming = None;
+        self.reasoning_at = None;
+        self.selection = None;
+        self.scroll = 0;
+        self.follow = true;
+        self.populate(self.agent.snapshot());
+        self.needs_repaint = true;
     }
 
     pub fn push_message(&mut self, message: ChatMessage) {
@@ -1073,6 +1128,7 @@ impl App {
             Overlay::Model { items, filter, .. } => model_filtered(items, filter).len(),
             Overlay::Session { items, filter, .. } => session_filtered(items, filter).len(),
             Overlay::FileBrowser { entries, .. } => entries.len(),
+            Overlay::Rollback { rows, .. } => rows.len(),
             Overlay::Settings { .. } => self.settings_items().len(),
             _ => 0,
         };
@@ -1084,6 +1140,7 @@ impl App {
             | Overlay::Model { sel, .. }
             | Overlay::Session { sel, .. }
             | Overlay::FileBrowser { sel, .. }
+            | Overlay::Rollback { sel, .. }
             | Overlay::Settings { sel, .. } => sel,
             _ => return,
         };
@@ -1309,22 +1366,7 @@ impl App {
             return self.web_search_key(key);
         }
         match key.code {
-            KeyCode::Esc => {
-                // From a file back to the list it was opened from; the next
-                // Esc leaves the list.
-                if let Overlay::FileView { path, .. } = &self.overlay {
-                    let path = path.clone();
-                    self.back_to_browser(&path);
-                    return Ok(());
-                }
-                let was_slash = matches!(self.overlay, Overlay::Slash { .. });
-                self.overlay = Overlay::None;
-                if was_slash {
-                    self.slash_dismissed = true;
-                } else {
-                    self.refresh_slash();
-                }
-            }
+            KeyCode::Esc => self.overlay_escape(),
             KeyCode::Up => self.move_sel(false),
             KeyCode::Down => self.move_sel(true),
             KeyCode::PageUp => {
@@ -1393,6 +1435,25 @@ impl App {
         }
     }
 
+    /// One step back from whatever is on screen: a confirmation returns to the
+    /// list it confirmed, a file to the browser it came from, and anything else
+    /// closes.
+    fn overlay_escape(&mut self) {
+        match std::mem::replace(&mut self.overlay, Overlay::None) {
+            Overlay::FileView { path, .. } => {
+                self.back_to_browser(&path);
+                return;
+            }
+            Overlay::RollbackConfirm { rows, sel } => {
+                self.overlay = Overlay::Rollback { rows, sel };
+                return;
+            }
+            Overlay::Slash { .. } => self.slash_dismissed = true,
+            _ => {}
+        }
+        self.refresh_slash();
+    }
+
     pub fn overlay_active(&self) -> bool {
         !matches!(self.overlay, Overlay::None)
     }
@@ -1421,6 +1482,8 @@ impl App {
             Overlay::Lsp => Some(10),
             Overlay::AddModel(_) => Some(11),
             Overlay::WebSearchKey { .. } => Some(12),
+            Overlay::Rollback { .. } => Some(13),
+            Overlay::RollbackConfirm { .. } => Some(14),
         }
     }
 
@@ -1632,6 +1695,30 @@ impl App {
             Overlay::FileView { path, .. } => {
                 self.open_file(&path, op_tx);
             }
+            Overlay::Rollback { rows, sel } => {
+                if rows.get(sel).is_some_and(|row| row.after > 0) {
+                    self.overlay = Overlay::RollbackConfirm { rows, sel };
+                } else {
+                    self.notice("this input already ends the conversation");
+                    self.overlay = Overlay::Rollback { rows, sel };
+                }
+            }
+            Overlay::RollbackConfirm { rows, sel } => {
+                let Some(row) = rows.get(sel) else {
+                    return Ok(());
+                };
+                let (turn, after) = (row.turn, row.after);
+                match self.agent.rollback_to_turn(turn) {
+                    Ok(()) => {
+                        self.reload_transcript();
+                        self.notice(format!(
+                            "rolled back to #{}: {after} messages dropped",
+                            turn + 1
+                        ));
+                    }
+                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                }
+            }
             Overlay::Settings { page, sel } => {
                 // `overlay_confirm` cleared the overlay before dispatching.
                 // Keep the panel open for toggles and numeric adjustments, so
@@ -1802,6 +1889,7 @@ impl App {
                 self.pending = Some(PendingSession { resume: None, cwd });
             }
             "/resume" => self.open_session_picker(),
+            "/rollback" => self.open_rollback(),
             "/session" => {
                 let detail = format!(
                     "session {}\n  cwd {}\n  model {} | compact {}\n  ctx {}/{} | in {} | out {}",
@@ -2533,6 +2621,31 @@ impl App {
         self.open_file_browser_at(&dir, name.as_deref());
     }
 
+    /// List the user inputs, newest first: the last one is the usual target.
+    fn open_rollback(&mut self) {
+        if self.busy {
+            self.notice("cancel the running turn before rolling back");
+            return;
+        }
+        let rows: Vec<TurnRow> = self
+            .agent
+            .user_turns()
+            .into_iter()
+            .rev()
+            .map(|turn| TurnRow {
+                label: format!("#{} {}", turn.index + 1, first_line(&turn.text)),
+                text: turn.text,
+                after: turn.after,
+                turn: turn.index,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.notice("nothing to roll back to: no user input in this session");
+            return;
+        }
+        self.overlay = Overlay::Rollback { rows, sel: 0 };
+    }
+
     pub(crate) fn open_file_browser(&mut self, rel: &str) {
         self.open_file_browser_at(rel, None);
     }
@@ -2836,6 +2949,11 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
 /// Picker row that opens the add-model wizard. The value cannot collide with a
 /// real model reference because a reference always contains a `/`.
 const ADD_MODEL_ROW: &str = "+";
+
+/// First line of a multi-line input, for one-line picker rows.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().trim().to_string()
+}
 
 /// Row of the credential editor on the web-search page: always the last one,
 /// below the five backends.

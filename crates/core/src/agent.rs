@@ -60,6 +60,17 @@ pub struct Agent {
     rate_limit_retries: AtomicU32,
 }
 
+/// One user input in the transcript, as the rollback picker sees it.
+#[derive(Debug, Clone)]
+pub struct UserTurn {
+    /// Position among the user inputs, oldest first: what `rollback_to_turn`
+    /// takes.
+    pub index: usize,
+    /// Messages that follow it, i.e. what a rollback deletes.
+    pub after: usize,
+    pub text: String,
+}
+
 struct ResumeData {
     meta: SessionMeta,
     path: PathBuf,
@@ -415,6 +426,54 @@ impl Agent {
 
     pub fn messages(&self) -> Vec<ChatMessage> {
         self.messages.read().unwrap().clone()
+    }
+
+    /// Every user input in the transcript, oldest first.
+    pub fn user_turns(&self) -> Vec<UserTurn> {
+        let messages = self.messages.read().unwrap();
+        let mut turns: Vec<UserTurn> = Vec::new();
+        for (position, message) in messages.iter().enumerate() {
+            if message.role != Role::User || crate::session::is_compaction_summary(message) {
+                continue;
+            }
+            turns.push(UserTurn {
+                index: turns.len(),
+                after: messages.len() - position - 1,
+                text: message.content.clone().unwrap_or_default(),
+            });
+        }
+        turns
+    }
+
+    /// Cut the conversation back to just after its `turn`-th user input and
+    /// forget everything that followed it, in memory and on disk.
+    ///
+    /// The input itself is kept: the history is rolled back *to* it, not to
+    /// before it. Nothing after it survives, which is what separates this from
+    /// pi's `/tree` - there is no branch to return to.
+    pub fn rollback_to_turn(&self, turn: usize) -> Result<()> {
+        if self.busy.load(Ordering::SeqCst) {
+            return Err(HarnessError::tool(
+                "E_BUSY",
+                "a turn is running; cancel it before rolling back",
+            ));
+        }
+        let path = {
+            let mut session = self.session.lock().unwrap();
+            session.rollback_to_user(turn)?;
+            session.path().to_path_buf()
+        };
+        // The file is the transcript of record: reading it back keeps memory and
+        // disk in step even if they had drifted apart.
+        let loaded = crate::session::load_file(&path)?;
+        *self.messages.write().unwrap() = loaded.messages;
+        self.usage.reset_to(loaded.usage, loaded.cost_usd);
+        self.todos.replace(loaded.todos);
+        // A rollback invalidates the cached prompt prefix on purpose, so the
+        // next request must not report the re-billed tokens as a miss.
+        *self.cache_watch.lock().unwrap() = CacheWatch::new();
+        self.refresh_system();
+        Ok(())
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -1597,6 +1656,65 @@ mod tests {
         assert_eq!(usage_events, vec![(100, 10, 110), (120, 2, 122)]);
         assert_eq!(agent.snapshot().context_tokens, 122);
         agent.shutdown().await;
+    }
+
+    /// `/rollback` keeps the chosen user input and drops every message after
+    /// it, in memory and in the session file.
+    #[tokio::test]
+    async fn rollback_keeps_the_history_up_to_the_chosen_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(Recording {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let agent = Agent::with_backend(config, dir.path().to_path_buf(), tx, backend)
+            .await
+            .unwrap();
+        agent.send("first").await.unwrap();
+        agent.send("second").await.unwrap();
+
+        let turns = agent.user_turns();
+        let texts: Vec<&str> = turns.iter().map(|turn| turn.text.as_str()).collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(turns[0].index, 0);
+        assert_eq!(turns[0].after, 5, "the whole first turn follows its input");
+        assert_eq!(turns[1].after, 1, "only the reply follows the second input");
+
+        agent.rollback_to_turn(0).unwrap();
+        let kept: Vec<String> = agent
+            .messages()
+            .into_iter()
+            .filter(|message| message.role == Role::User)
+            .filter_map(|message| message.content)
+            .collect();
+        assert_eq!(kept, ["first"]);
+        let turns = agent.user_turns();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].after, 0);
+        agent.shutdown().await;
+    }
+
+    /// A running turn owns the transcript; a rollback in the middle of one would
+    /// cut messages the turn is still appending to.
+    #[tokio::test]
+    async fn rollback_is_refused_while_a_turn_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config(dir.path());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(Fake {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let agent = Agent::with_backend(config, dir.path().to_path_buf(), tx, backend)
+            .await
+            .unwrap();
+        agent.send("hello").await.unwrap();
+        agent.busy.store(true, Ordering::SeqCst);
+        let err = agent.rollback_to_turn(0).unwrap_err().to_string();
+        agent.busy.store(false, Ordering::SeqCst);
+        agent.shutdown().await;
+        assert!(err.contains("cancel it before rolling back"), "{err}");
     }
 
     #[test]
