@@ -580,6 +580,33 @@ not require webview libraries; building `--features desktop` additionally needs
 the platform webview stack
 (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS).
 
+### Build cache
+
+A clean `cargo test --workspace` leaves 2.9 GB in `target/`. Three settings keep
+it there instead of letting it grow into the tens of gigabytes:
+
+- `[profile.dev]` disables incremental compilation. Its per-crate session cache
+  is the largest single consumer (14 GB in one measured `target/`) and only pays
+  for itself inside a long edit/compile loop: a one-file edit of the core crate
+  takes 10 s with a warm session against 35 s without, while a from-scratch
+  build is 85 s against 35 s. Use `CARGO_INCREMENTAL=1 cargo test -p <crate>`
+  for such a loop.
+- `debug = "line-tables-only"` keeps `file:line` in backtraces without full
+  DWARF, which is what makes debug symbols the larger half of a build.
+- CI sets `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`: no CI run reuses
+  a compiler session, and debug info is most of a build's size.
+
+Each distinct feature set, `RUSTFLAGS` value or dependency version gives a crate
+a new artifact hash, and cargo never deletes the previous copy - a dependency
+bump re-hashes every crate above it. So experiment flags belong in their own
+`CARGO_TARGET_DIR`, and a `target/` that has seen months of dependency changes
+is worth one pass of `script/prune-target.py` (report only; add `--apply` to
+delete superseded artifacts that are also untouched for `--days` 7).
+
+The build cache must not live on a tmpfs, and a `target/` directory should never
+be copied with `cp -r`: both fill the RAM-backed temp directory that a `target/`
+of this size overflows.
+
 ## Deliberate choices
 
 These are documented substitutions or additions that keep the build portable

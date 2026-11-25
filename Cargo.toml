@@ -101,11 +101,18 @@ rustedharness-core = { path = "crates/core" }
 rustedharness-tui = { path = "crates/tui" }
 rustedharness-web = { path = "crates/web" }
 
-# Debug builds keep incremental compilation, but full DWARF is what makes the
-# PDB files 200 MB each. Line tables keep file:line in backtraces at a fraction
-# of the size.
+# Full DWARF is what makes PDB files 200 MB each; line tables keep file:line in
+# backtraces at a fraction of the size.
+#
+# Incremental compilation is off on purpose. Building this tree from scratch
+# takes 35 s without it and 85 s with it; a one-file edit is the other way round
+# (35 s without, 10 s with a warm session), so it only pays off after several
+# edits in a row - while reserving a per-crate session cache that every build
+# family copies (14 GB in one measured `target/`). Opt back in for a long
+# editing session with `CARGO_INCREMENTAL=1 cargo test -p <crate>`.
 [profile.dev]
 debug = "line-tables-only"
+incremental = false
 
 [profile.release]
 lto = "thin"

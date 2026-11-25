@@ -1,5 +1,29 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：构建缓存瘦身（2026-11-25）
+
+1. **先量后改**：一个用了几个月的 `target/` 是 28 GB —— `incremental` 14 GB、`deps`
+   11.9 GB（其中约 9.9 GB 是同一 crate 的旧 hash 副本）、`build` 1.1 GB。清理后做一次
+   全量 `cargo test --workspace`，稳态只有 5.6 GB，说明 **80% 是垃圾**。
+2. **根因**：cargo 的产物名是 `<crate>-<metadata-hash>`，hash 取决于特征集 /
+   `--all-targets` / `RUSTFLAGS` / **依赖版本**（依赖变了，上面所有 crate 都要重新 hash），
+   而 cargo 从不回收旧 hash；加了 `incremental` 后，每一份 hash 还会附带 100~300 MB
+   的增量会话缓存，两者相乘就是那 14 GB。
+3. **改动（从"事后清"改成"编译期就不生成"）**：
+   - `[profile.dev] incremental = false`。实测：从零构建 35 s（无增量）对 85 s（有增量）；
+     改一个文件 35 s 对 10 s。判断是"每次改动都跑全量 clippy/test"的场景下增量是净亏，
+     且它正是缓存膨胀的最大来源；需要长编辑循环时用
+     `CARGO_INCREMENTAL=1 cargo test -p <crate>` 临时开回来。
+   - CI 加 `CARGO_INCREMENTAL=0`、`CARGO_PROFILE_DEV_DEBUG=0`：CI 不重用 session，
+     debug info 在 CI 里只有体积没有价值，rust-cache 的 10 GB 预算因此够用。
+   - 清理后稳态：干净 `cargo test --workspace` = **2.9 GB**。
+4. **脚本**：`script/prune-target.py` —— 按"每个 crate 只留最新 hash"清理已被取代的产物
+   （默认只报告，`--apply` 才删；`--days` 控制"多久没动过"的阈值，默认 7 天，避免误删
+   昨天 `cargo check` 仍在用的那套 artifact）。这是给已经膨胀的 `target/` 用的一次性
+   手段，不是常规流程。
+5. **教训**：不要把 `CARGO_TARGET_DIR` 指到 `/tmp`（这台机器 `/tmp` 是 5.6 GB 的 tmpfs），
+   也不要 `cp -r` 带 `target` 的目录 —— 之前一次 GPUI 评估就是这样把 `/tmp` 写满的。
+
 ## 已完成：上下文回滚 `/rollback`（2026-11-25）
 
 1. **语义**：`/rollback` 列出当前会话的所有用户输入（倒序，最新在上），选中一条后
