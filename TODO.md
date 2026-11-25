@@ -1,5 +1,32 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：长输出落盘 / AGENTS.md / 图片读取（2026-11-25）
+
+1. **长工具输出不再进上下文**：超过 128 KiB（`spill::MAX_INLINE_BYTES`）的工具结果写进
+   `<temp>/rustedharness-logs/<毫秒>-<工具>-<call id>.log`，对话里只留一句带路径的提示，
+   模型用 `grep` / `read` 去查。**不截断**——编译器和测试把错误打在最后，砍掉尾巴等于把
+   失败原因砍掉。日志超过一天会在写新日志时顺手删掉。写入失败时退回"前 4 KB + 错误原因"，
+   不让模型以为工具没有输出。
+2. **临时目录权限**：`WorkspacePathResolver` 新增 `extra_roots`，agent 构造时把
+   `std::env::temp_dir()` 授给 agent（canonicalize 后比较，macOS 的 `/tmp` 是符号链接）。
+   这是工作区之外**唯一**能碰的地方，README 的安全说明已注明。
+3. **AGENTS.md 只认两个位置**：`<workspace>/AGENTS.md` 和 `~/.rustedharness/AGENTS.md`，
+   **工作区版本直接覆盖**配置版本（不合并、不向上找父目录），空文件当作没有。内容拼在
+   system prompt 末尾并写明来源文件；`refresh_system()` 在启动、`reload_config()`、换 cwd
+   时重读。
+4. **`read` 支持图片**：`imaging.rs` 用 `image` crate 解码（png/jpeg/gif/webp/bmp/ico/tiff/
+   tga/dds/hdr/exr/pnm/qoi/farbfeld；AVIF、HEIC 需要原生编解码器，不在内），
+   文件本身不超过 `image.maxBytes`（默认 4 MiB）且格式通用时原样透传（GIF 动画保留），
+   否则按实际编码字节数逐轮缩小（JPEG 仍编 JPEG q85 并把 alpha 铺白，其它编码成 PNG）。
+   图片以 **user 消息**在整批工具结果之后注入（provider 只接受 user 角色的图片，插在两条
+   tool 结果之间会破坏 call/result 配对），文本以 `[image]` 开头，`/rollback` 不会把它当成
+   用户输入。
+5. **设置项**：`/settings` 根页新增 `image size` 行，预设 1/2/4/8 MiB，写入
+   `config.json` 的 `image.maxBytes`，即时生效（工具每次调用读当前 config）。
+6. **更正**：设计里从来没有 `move` / `delete` 工具，我上一轮把它们列成"缺口"是错的；
+   `bash` 的 `mv` / `rm` 就够，不需要加。
+
+
 ## 已完成：`/settings` 的 Windows 终端选择（2026-11-25）
 
 1. **需求**：Windows 上且装了 git 时，可以让 AI 的 shell 工具跑 PowerShell 还是 Git Bash。

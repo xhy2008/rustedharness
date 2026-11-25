@@ -54,7 +54,7 @@ impl Tool for WebSearchTool {
                 })
                 .to_string(),
                 is_error: true,
-                metadata: None,
+                ..Default::default()
             });
         }
         let num = args.num_results.unwrap_or(5).clamp(1, 10);

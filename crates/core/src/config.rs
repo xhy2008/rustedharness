@@ -44,6 +44,8 @@ pub struct Config {
     #[serde(default)]
     pub shell: ShellConfig,
     #[serde(default)]
+    pub image: ImageConfig,
+    #[serde(default)]
     pub lsp: LspConfig,
     #[serde(default)]
     pub web: WebConfig,
@@ -642,6 +644,23 @@ pub struct LspDownload {
     /// Additional allowed hostnames (official domains).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub domains: Vec<String>,
+}
+
+/// How `read` hands images to the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ImageConfig {
+    /// Largest encoded size an attached image may have. A bigger file is
+    /// downscaled to fit before it is uploaded instead of being refused.
+    pub max_bytes: usize,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: 4 * 1024 * 1024,
+        }
+    }
 }
 
 impl Default for LspConfig {
@@ -1339,10 +1358,36 @@ impl Config {
         self.source.clone().unwrap_or_else(Self::config_dir)
     }
 
+    /// Project instructions for the system prompt: the workspace `AGENTS.md`
+    /// wins outright over `~/.rustedharness/AGENTS.md`, which is the fallback
+    /// for instructions that apply to every workspace.
+    pub fn instructions(&self, workspace: &Path) -> Option<(String, String)> {
+        instructions_from(workspace, &Self::config_dir())
+    }
+
     /// Default transcript directory when `[session].dir` is unset.
     pub fn sessions_dir() -> PathBuf {
         Self::data_dir().join("sessions")
     }
+}
+
+/// The two places project instructions may live, in priority order: a
+/// workspace `AGENTS.md`, then the one in the config directory. Nothing else is
+/// consulted - no walking up parent directories, no other file names - so it is
+/// always obvious which file the model is following.
+pub(crate) fn instructions_from(workspace: &Path, config_dir: &Path) -> Option<(String, String)> {
+    for (label, path) in [
+        ("AGENTS.md", workspace.join("AGENTS.md")),
+        ("~/.rustedharness/AGENTS.md", config_dir.join("AGENTS.md")),
+    ] {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !text.trim().is_empty() {
+            return Some((label.to_string(), text));
+        }
+    }
+    None
 }
 
 /// Parse JSON with comments and trailing commas, as accepted by Pi config files.

@@ -10,11 +10,14 @@ pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", "build"];
 /// * R1 relative paths are anchored at the session cwd
 /// * R2 shell invocations never inherit a persistent cwd (handled by proc)
 /// * R3 outputs are displayed relative to the workspace root
-/// * R4 any resolved path escaping the workspace root is rejected
+/// * R4 any resolved path escaping the workspace root is rejected, unless it
+///   falls under an explicitly granted extra root (the temp directory, where
+///   the harness spills long tool output)
 #[derive(Debug, Clone)]
 pub struct WorkspacePathResolver {
     cwd: PathBuf,
     root: PathBuf,
+    extra_roots: Vec<PathBuf>,
 }
 
 impl WorkspacePathResolver {
@@ -29,7 +32,20 @@ impl WorkspacePathResolver {
         Ok(Self {
             root: cwd.clone(),
             cwd,
+            extra_roots: Vec::new(),
         })
+    }
+
+    /// Allow paths under `dir` in addition to the workspace root. The temp
+    /// directory is granted this way so the agent can read the logs that
+    /// [`crate::spill`] writes, which by definition sit outside the workspace.
+    pub fn with_extra_root(mut self, dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        // Compare canonical paths: on macOS `/tmp` is a symlink into
+        // `/private/tmp`, and a lexical prefix test would then never match.
+        let dir = dunce::canonicalize(&dir).unwrap_or(dir);
+        self.extra_roots.push(dir);
+        self
     }
 
     pub fn cwd(&self) -> &Path {
@@ -68,7 +84,12 @@ impl WorkspacePathResolver {
             let candidate = rest.iter().fold(base, |p, c| p.join(c));
             candidate
         };
-        if !resolved.starts_with(&self.root) {
+        let allowed = resolved.starts_with(&self.root)
+            || self
+                .extra_roots
+                .iter()
+                .any(|extra| resolved.starts_with(extra));
+        if !allowed {
             return Err(HarnessError::PathEscape {
                 path: input.to_string(),
                 root: self.display_rel(&self.root),
@@ -173,6 +194,36 @@ mod tests {
         assert_eq!(err.code(), "E_PATH_ESCAPE");
         let err = r.resolve("sub/../../outside.txt").unwrap_err();
         assert_eq!(err.code(), "E_PATH_ESCAPE");
+    }
+
+    #[test]
+    fn r4_granted_extra_root_is_allowed() {
+        let (dir, r) = workspace();
+        let extra = tempfile::tempdir().unwrap();
+        let r = r.with_extra_root(extra.path());
+        fs::write(extra.path().join("log.txt"), "spilled").unwrap();
+        let path = extra.path().join("log.txt");
+        assert_eq!(
+            r.resolve(path.to_str().unwrap()).unwrap(),
+            dunce::canonicalize(extra.path()).unwrap().join("log.txt")
+        );
+        assert!(r
+            .resolve(dir.path().join("a.txt").to_str().unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn r4_extra_root_does_not_open_its_neighbours() {
+        let (_d, r) = workspace();
+        let extra = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        fs::write(sibling.path().join("secret.txt"), "nope").unwrap();
+        let r = r.with_extra_root(extra.path());
+        let path = sibling.path().join("secret.txt");
+        assert_eq!(
+            r.resolve(path.to_str().unwrap()).unwrap_err().code(),
+            "E_PATH_ESCAPE"
+        );
     }
 
     #[test]

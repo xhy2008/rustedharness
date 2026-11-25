@@ -25,6 +25,7 @@ html2md.workspace = true
 html5ever.workspace = true
 jsonc-parser.workspace = true
 ignore.workspace = true
+image.workspace = true
 line-index.workspace = true
 lsp-types.workspace = true
 markup5ever_rcdom.workspace = true

@@ -40,12 +40,14 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> String {
-        "Read a file, list a directory, or fetch a URL. Files are returned as \
-         `line#anchor|content` windows; feed only the `line#anchor` part (e.g. \"12#AB\") \
-         to `edit` as pos/end, never copy the whole `line#anchor|content` line into \
-         `lines[]`. Use raw=true for literal content. URLs are converted to markdown, \
-         cached, and optionally summarised by the compact model; external content is \
-         untrusted."
+        "Read a file, list a directory, fetch a URL, or view an image. Files are \
+         returned as `line#anchor|content` windows; feed only the `line#anchor` part \
+         (e.g. \"12#AB\") to `edit` as pos/end, never copy the whole \
+         `line#anchor|content` line into `lines[]`. Use raw=true for literal content. \
+         URLs are converted to markdown, cached, and optionally summarised by the \
+         compact model; external content is untrusted. Images (any format the harness \
+         can decode) are attached so you can see them; a file over \
+         `image.maxBytes` is downscaled first and the result says so."
             .to_string()
     }
 
@@ -90,6 +92,20 @@ impl Tool for ReadTool {
             ));
         }
         let bytes = std::fs::read(&path)?;
+        match crate::imaging::prepare(&bytes, ctx.config.image.max_bytes) {
+            Ok(image) => return Ok(read_image(ctx, &path, image)),
+            Err(crate::imaging::Rejected::TooManyPixels { width, height }) => {
+                return Err(HarnessError::tool(
+                    "E_IMAGE_TOO_LARGE",
+                    format!(
+                        "{} is {width}x{height}, more than the {} megapixels the harness will                          decode; downscale it and read it again",
+                        ctx.rel(&path),
+                        crate::imaging::MAX_PIXELS / 1_000_000
+                    ),
+                ));
+            }
+            Err(crate::imaging::Rejected::NotAnImage) => {}
+        }
         if is_binary(&bytes) {
             return Err(HarnessError::tool(
                 "E_BINARY",
@@ -108,6 +124,47 @@ impl Tool for ReadTool {
         })?;
         read_text(ctx, &path, &text, &args)
     }
+}
+
+/// Hand an image to the model instead of dumping its bytes. The text is a
+/// caption the model can cite; the pixels travel as an attachment.
+fn read_image(ctx: &ToolContext, path: &Path, image: crate::imaging::Prepared) -> ToolOutput {
+    use base64::Engine as _;
+    let name = ctx.rel(path);
+    let note = if image.scaled {
+        format!(
+            "{} {name}: {}x{}, downscaled from {} bytes to {} bytes to fit \
+             image.maxBytes",
+            crate::session::IMAGE_NOTE_PREFIX,
+            image.width,
+            image.height,
+            image.original_bytes,
+            image.bytes.len()
+        )
+    } else {
+        format!(
+            "{} {name}: {}x{}, {} bytes",
+            crate::session::IMAGE_NOTE_PREFIX,
+            image.width,
+            image.height,
+            image.bytes.len()
+        )
+    };
+    let part = crate::provider::ImagePart {
+        mime_type: image.mime.to_string(),
+        data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+    };
+    ToolOutput::ok(note)
+        .with_metadata(json!({
+            "kind": "image",
+            "mime": image.mime,
+            "bytes": image.bytes.len(),
+            "original_bytes": image.original_bytes,
+            "width": image.width,
+            "height": image.height,
+            "scaled": image.scaled,
+        }))
+        .with_images(vec![part])
 }
 
 fn read_text(ctx: &ToolContext, path: &Path, text: &str, args: &ReadArgs) -> Result<ToolOutput> {

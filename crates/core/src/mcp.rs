@@ -452,6 +452,7 @@ impl Tool for McpTool {
         Ok(ToolOutput {
             content: result.content,
             is_error: result.is_error,
+            images: Vec::new(),
             metadata: Some(json!({
                 "mcp": {
                     "server": self.server.name,

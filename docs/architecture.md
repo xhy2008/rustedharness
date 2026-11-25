@@ -117,7 +117,50 @@ opt into through a supported switch.
   inside the workspace but not outside it;
 - absolute paths inside the workspace are accepted.
 
+The system temp directory is granted as an extra root
+(`WorkspacePathResolver::with_extra_root`) because `spill.rs` writes long tool
+output there; nothing else outside the workspace is reachable.
+
 This is the only tool-level policy: all tools are auto-allowed otherwise.
+
+### Spilled tool output
+
+A tool result above `spill::MAX_INLINE_BYTES` (128 KiB) never enters the
+conversation. The full text is written to
+`<temp>/rustedharness-logs/<millis>-<tool>-<call id>.log` and the tool message is
+replaced by a notice naming that file, which the model then `grep`s and `read`s.
+This is deliberately a log file and not a truncated string: build systems print
+the error at the end, and a head-truncated log keeps everything except the part
+that failed. Logs older than a day are pruned when a new one is written. A
+failed write falls back to the head of the output plus the error, so the model
+is never left believing a tool returned nothing.
+
+### Images
+
+`imaging.rs` decides what `read` does with an image. It sniffs the format with
+the `image` crate (png, jpeg, gif, webp, bmp, ico, tiff, tga, dds, hdr, exr,
+pnm, qoi, farbfeld - everything the crate decodes in pure Rust), passes the file
+through untouched when it is already under `image.maxBytes` and in a format
+providers accept, and otherwise downscales it: each round re-derives the scale
+from the real encoded size, JPEG stays JPEG (quality 85, alpha flattened onto
+white), everything else becomes PNG. The tool result carries the caption and
+the bytes stay in `ToolOutput::images`, so they never touch the event stream.
+The agent loop attaches them as a user message *after* the batch of tool
+results, because providers only accept images from the user role and a user
+message between two tool results would break call/result pairing. The message
+text starts with `session::IMAGE_NOTE_PREFIX`; `is_user_message` and
+`is_image_note` both use it to keep the attachment out of `/rollback`'s list of
+user turns.
+
+### Project instructions
+
+`config::instructions_from` reads exactly two files: `<workspace>/AGENTS.md`,
+and `~/.rustedharness/AGENTS.md` as the fallback. The workspace file wins
+outright - no merging, no walking up parent directories - and an empty file
+counts as absent. The text is appended to the system prompt under a heading
+that names the file, so the model knows which rules it is following; the prompt
+is rebuilt by `refresh_system`, which runs on start, config reload and cwd
+change.
 
 ### Hashline editing
 

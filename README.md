@@ -240,6 +240,9 @@ and model selection loads unchanged.
     "enableReplaceText": true,
     "diagnosticsTimeoutMs": 2000
   },
+  "image": {
+    "maxBytes": 4194304
+  },
   "shell": {
     "prefer": "powershell",
     "timeoutMs": 30000,
@@ -336,6 +339,28 @@ appended to the tool result.
   `usage`, the harness warns once and reports no invented numbers.
 - **Todos**: `todo` maintains a plan. If work remains and the model stops, the
   harness injects a bounded chase message (at most `chaseLimit` times).
+- **Project instructions**: the system prompt ends with the contents of
+  `AGENTS.md` from the workspace root, or - when the workspace has none - from
+  `~/.rustedharness/AGENTS.md`. The workspace file wins outright rather than
+  being merged, and no parent directory is searched, so it is always clear
+  which file the model is following. The file is re-read whenever the config is
+  reloaded (`/settings` changes, `/model`, cwd switch).
+- **Long output**: a tool result longer than 128 KiB is not put in the
+  conversation at all. The full text is written to
+  `<temp>/rustedharness-logs/<time>-<tool>-<call>.log`, the model gets that
+  path in the tool result, and it reaches the content with `grep` and `read`
+  like any other file. The log holds exactly what the tool returned, so the far
+  end of a long result - where a build prints the failure - is never cut off.
+  Logs older than a day are deleted as new ones are written. The resolver
+  grants the agent the temp directory for exactly this, and that grant is the
+  only place outside the workspace it can touch.
+- **Images**: `read` attaches any image it can decode (png, jpeg, gif, webp,
+  bmp, ico, tiff, tga, dds, hdr, exr, pnm, qoi, farbfeld) instead of dumping
+  bytes, and the harness forwards it as a user message with the image, since
+  providers only accept images from that role. A file larger than
+  `image.maxBytes` (default 4 MiB, `/settings` -> **image size**) is downscaled
+  - JPEG to JPEG, everything else to PNG - until it fits, and the tool result
+  says it did. Animated GIFs that already fit are passed through untouched.
 - **Rollback**: `/rollback` lists the user inputs of the current session; the
   chosen one becomes the end of the conversation and every message after it is
   deleted from the session file. Nothing is cut until the choice is confirmed a
@@ -358,7 +383,7 @@ appended to the tool result.
 
 | Tool | Description |
 | --- | --- |
-| `read` | Read text or binary ranges from files, or fetch an `http(s)` URL as markdown. |
+| `read` | Read text ranges from files, list a directory, attach an image, or fetch an `http(s)` URL as markdown. |
 | `write` | Create/overwrite a file, or append when it already exists. |
 | `edit` | Hashline anchored edits, optionally several per call. |
 | `glob` | Workspace file discovery (respects `.gitignore`). |
@@ -560,7 +585,9 @@ to the same workspace anchoring and timeouts as built-in tools.
 ## Security notes
 
 - The workspace boundary is enforced on every filesystem tool, including
-  symlink resolution; `..` traversal is rejected.
+  symlink resolution; `..` traversal is rejected. The one exception is the
+  system temp directory, which holds the spilled tool-output logs the model is
+  told to read and is granted explicitly for that reason.
 - The web server binds to loopback by default. If exposed, use a token and a
   TLS-terminating proxy.
 - LSP downloads require explicit consent and are restricted to HTTPS on

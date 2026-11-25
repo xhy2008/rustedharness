@@ -1752,6 +1752,14 @@ impl App {
                                     Err(err) => self.push(EntryKind::Error, "", err.to_string()),
                                 }
                             }
+                            "image" => {
+                                let next = next_image_size(self.agent.config().image.max_bytes);
+                                match self.agent.set_image_max_bytes(next) {
+                                    Ok(()) => self
+                                        .notice(format!("image size: {}", image_size_label(next))),
+                                    Err(err) => self.push(EntryKind::Error, "", err.to_string()),
+                                }
+                            }
                             "terminal" => {
                                 let next = next_terminal_prefer(&self.agent.config().shell.prefer);
                                 match self.agent.set_shell_prefer(next) {
@@ -2355,6 +2363,15 @@ impl App {
                     value: "compaction".to_string(),
                     disabled: false,
                 };
+                let image = PickerItem {
+                    label: "image size".to_string(),
+                    detail: format!(
+                        "{} max - bigger images are shrunk before upload",
+                        image_size_label(self.agent.config().image.max_bytes)
+                    ),
+                    value: "image".to_string(),
+                    disabled: false,
+                };
                 let mut items = vec![notices, retry];
                 // Windows installed with Git for Windows is the only place with
                 // a choice of shell, so the row is absent everywhere else.
@@ -2366,7 +2383,7 @@ impl App {
                         disabled: false,
                     });
                 }
-                items.extend([search, compaction]);
+                items.extend([search, compaction, image]);
                 items
             }
             SettingsPage::WebSearch => {
@@ -2515,6 +2532,7 @@ impl App {
                     retry_presets_text(),
                     RATE_LIMIT_RETRY_INTERVAL.as_secs()
                 ),
+                "image" => "The largest image `read` will attach. A file above this size is downscaled before it is uploaded, so a screenshot never gets refused for being too big; nothing is cropped. Images larger than the model accepts should be avoided, but the harness keeps the file under the limit either way.".to_string(),
                 "terminal" => "Which shell the agent's shell tool spawns. Git Bash is the bash that ships with Git for Windows, so commands, quoting and paths read like a unix shell; PowerShell is the native Windows shell. Switching applies at once and stops the background processes the previous shell started.".to_string(),
                 "search" => "Which backend the web_search tool uses. Enter opens the web search page: brave, tavily, SearXNG, bing or duckduckgo. The page asks for an api key (or a SearXNG instance url) for the backend that needs one.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
@@ -2976,6 +2994,23 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
 const ADD_MODEL_ROW: &str = "+";
 
 /// The shell the agent will spawn, as the settings row reads it.
+/// Sizes the settings panel cycles through, from a cheap screenshot to a
+/// full-resolution one. Providers cap images around 5 MB, so the top preset
+/// stays under that.
+const IMAGE_SIZE_PRESETS: [usize; 4] = [1 << 20, 2 << 20, 4 << 20, 8 << 20];
+
+fn image_size_label(bytes: usize) -> String {
+    format!("{} MiB", bytes / (1 << 20))
+}
+
+fn next_image_size(max_bytes: usize) -> usize {
+    let position = IMAGE_SIZE_PRESETS
+        .iter()
+        .position(|preset| *preset >= max_bytes)
+        .unwrap_or(0);
+    IMAGE_SIZE_PRESETS[(position + 1) % IMAGE_SIZE_PRESETS.len()]
+}
+
 fn terminal_label(prefer: &str) -> &'static str {
     if prefer.eq_ignore_ascii_case(GIT_BASH) {
         "git bash"
@@ -3552,6 +3587,36 @@ mod tests {
             app.settings_items()[crate::ui_tests::settings_row(&app, "terminal")].detail,
             "powershell"
         );
+    }
+
+    /// The image row is always present and walks the preset ladder, writing the
+    /// chosen ceiling to `config.json` so the next `read` uses it.
+    #[test]
+    fn the_image_size_row_cycles_through_the_presets() {
+        assert_eq!(image_size_label(4 << 20), "4 MiB");
+        assert_eq!(next_image_size(4 << 20), 8 << 20);
+        assert_eq!(next_image_size(8 << 20), 1 << 20);
+        assert_eq!(next_image_size(1 << 20), 2 << 20);
+        // A value from the config file that is not a preset rounds up first.
+        assert_eq!(next_image_size(3 << 20), 8 << 20);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = crate::ui_tests::demo_app_in(dir.path());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let row = crate::ui_tests::settings_row(&app, "image");
+        assert!(app.settings_items()[row].detail.contains("4 MiB"));
+        app.overlay = Overlay::Settings {
+            page: SettingsPage::Root,
+            sel: row,
+        };
+
+        runtime.block_on(app.overlay_confirm(&tx)).unwrap();
+        assert_eq!(app.agent.config().image.max_bytes, 8 << 20);
+        let row = crate::ui_tests::settings_row(&app, "image");
+        assert!(app.settings_items()[row].detail.contains("8 MiB"));
+        let stored = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(stored.contains("8388608"), "{stored}");
     }
 
     /// The web-search page selects a backend and offers a credential box only

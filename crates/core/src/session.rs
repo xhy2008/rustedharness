@@ -193,6 +193,37 @@ impl SessionWriter {
         })
     }
 
+    /// A user message that carries images as well as text. `read` produces
+    /// these when the model looks at a picture; they are stored like any other
+    /// user message so a resumed session sees the same pixels.
+    pub fn user_with_images(
+        &mut self,
+        text: &str,
+        images: &[crate::provider::ImagePart],
+    ) -> Result<()> {
+        let mut blocks: Vec<Block> = Vec::new();
+        if !text.trim().is_empty() {
+            blocks.push(Block::Text {
+                text: text.to_string(),
+            });
+        }
+        for image in images {
+            blocks.push(Block::Image {
+                data: image.data.clone(),
+                mime_type: image.mime_type.clone(),
+            });
+        }
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        self.append(EntryKind::Message {
+            message: AgentMessage::User {
+                content: Content::Blocks(blocks),
+                timestamp: now_millis(),
+            },
+        })
+    }
+
     pub fn assistant(&mut self, message: &ChatMessage) -> Result<()> {
         let mut content: Vec<Block> = Vec::new();
         if let Some(reasoning) = message.reasoning_content.as_deref() {
@@ -1207,13 +1238,56 @@ pub(crate) const SUMMARY_SUFFIX: &str = "\n</summary>";
 /// string under `message`).
 fn is_user_message(line: &str) -> bool {
     serde_json::from_str::<Value>(line).is_ok_and(|value| {
-        value.get("type").and_then(Value::as_str) == Some("message")
-            && value
-                .get("message")
-                .and_then(|message| message.get("role"))
-                .and_then(Value::as_str)
-                == Some("user")
+        if value.get("type").and_then(Value::as_str) != Some("message") {
+            return false;
+        }
+        let Some(message) = value.get("message") else {
+            return false;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            return false;
+        }
+        // The image note is a user message only because providers accept images
+        // that way; it is not a turn the user wrote.
+        !carries_image_note(message)
     })
+}
+
+/// An image note is a block list with image blocks whose text starts with
+/// [`IMAGE_NOTE_PREFIX`].
+fn carries_image_note(message: &Value) -> bool {
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    let has_image = blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("image"));
+    if !has_image {
+        return false;
+    }
+    let text = blocks
+        .iter()
+        .find(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .and_then(|block| block.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    text.starts_with(IMAGE_NOTE_PREFIX)
+}
+
+/// Prefix of the user message that carries images a tool produced. Nobody typed
+/// it, so it is not a user turn: `/rollback` must not offer it as a point to
+/// return to.
+pub const IMAGE_NOTE_PREFIX: &str = "[image]";
+
+/// Whether this message is the harness attaching an image, rather than
+/// something the user said.
+pub(crate) fn is_image_note(message: &ChatMessage) -> bool {
+    message.role == Role::User
+        && !message.images.is_empty()
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.starts_with(IMAGE_NOTE_PREFIX))
 }
 
 /// Whether a message is the synthetic user message that carries a compaction
@@ -1551,6 +1625,46 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_eq!(raw.matches("\"type\":\"session\"").count(), 1);
         assert!(!load_file(&path).unwrap().truncated_tail);
+    }
+
+    #[test]
+    /// An attached image is stored as a user message because that is the only
+    /// role providers accept images from, but it is not a point to roll back
+    /// to: only lines the user wrote count as turns.
+    fn an_image_note_is_not_a_user_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let mut writer =
+            SessionWriter::create(&cfg, dir.path(), "openai/gpt-5", "openai/mini").unwrap();
+        writer.user("look at this").unwrap();
+        writer
+            .user_with_images(
+                &format!("{} shot.png: 8x6, 68 bytes", IMAGE_NOTE_PREFIX),
+                &[crate::provider::ImagePart {
+                    mime_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                }],
+            )
+            .unwrap();
+        writer.user("next").unwrap();
+        let path = writer.path().to_path_buf();
+        drop(writer);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let turns: Vec<&str> = raw.lines().filter(|line| is_user_message(line)).collect();
+        assert_eq!(turns.len(), 2, "{raw}");
+        assert!(turns[0].contains("look at this"), "{}", turns[0]);
+        assert!(turns[1].contains("next"), "{}", turns[1]);
+
+        // The image survives a reload, so a resumed turn still sees it.
+        let loaded = load_file(&path).unwrap();
+        let with_image = loaded
+            .messages
+            .iter()
+            .find(|message| !message.images.is_empty())
+            .expect("image on reload");
+        assert_eq!(with_image.images[0].mime_type, "image/png");
+        assert!(is_image_note(with_image));
     }
 
     #[test]

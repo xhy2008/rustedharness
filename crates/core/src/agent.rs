@@ -264,7 +264,10 @@ impl Agent {
         compact_model: &str,
         session_id: String,
     ) -> Result<ToolContext> {
-        let resolver = Arc::new(WorkspacePathResolver::new(cwd)?);
+        // Spilled tool output lives in the temp directory, outside the
+        // workspace, so the agent is granted read access to it explicitly.
+        let resolver =
+            Arc::new(WorkspacePathResolver::new(cwd)?.with_extra_root(std::env::temp_dir()));
         let spec = ShellSpec::detect(&config.shell.prefer);
         let proc = Arc::new(ProcRegistry::new(
             spec,
@@ -433,7 +436,10 @@ impl Agent {
         let messages = self.messages.read().unwrap();
         let mut turns: Vec<UserTurn> = Vec::new();
         for (position, message) in messages.iter().enumerate() {
-            if message.role != Role::User || crate::session::is_compaction_summary(message) {
+            if message.role != Role::User
+                || crate::session::is_compaction_summary(message)
+                || crate::session::is_image_note(message)
+            {
                 continue;
             }
             turns.push(UserTurn {
@@ -604,6 +610,14 @@ impl Agent {
         Ok(())
     }
 
+    /// Largest image `read` will attach. A bigger file is downscaled to fit
+    /// before it is uploaded, so this is a spend/quality knob, not a filter.
+    pub fn set_image_max_bytes(&self, bytes: usize) -> Result<()> {
+        self.config()
+            .save_setting(&["image", "maxBytes"], json!(bytes))?;
+        self.reload_config()
+    }
+
     pub fn cancel(&self) {
         self.cancel_token.lock().unwrap().cancel();
         // Interrupt cascade: all live process groups die with the turn.
@@ -665,7 +679,14 @@ impl Agent {
 
     fn refresh_system(&self) {
         let model = self.agent_model.read().unwrap().clone();
-        let prompt = system_prompt(model_display(&model));
+        let root = self.ctx.read().unwrap().resolver.root().to_path_buf();
+        let instructions = self.config().instructions(&root);
+        let prompt = system_prompt(
+            model_display(&model),
+            instructions
+                .as_ref()
+                .map(|(label, text)| (label.as_str(), text.as_str())),
+        );
         let mut messages = self.messages.write().unwrap();
         if messages
             .first()
@@ -898,6 +919,12 @@ impl Agent {
             let mut ctx = self.ctx.read().unwrap().clone();
             ctx.cancel = token.clone();
             let registry = self.tools.read().unwrap().clone();
+            // Images a tool produced are collected and attached once the whole
+            // batch of tool results is in place: a user message between two
+            // tool results would break the call/result pairing providers
+            // enforce.
+            let mut images: Vec<crate::provider::ImagePart> = Vec::new();
+            let mut image_notes: Vec<String> = Vec::new();
             for call in &calls {
                 if token.is_cancelled() {
                     break;
@@ -926,7 +953,7 @@ impl Agent {
                         )
                         .to_model_json(),
                         is_error: true,
-                        metadata: None,
+                        ..Default::default()
                     },
                     Err(err) => ToolOutput {
                         content: HarnessError::tool(
@@ -935,10 +962,11 @@ impl Agent {
                         )
                         .to_model_json(),
                         is_error: true,
-                        metadata: None,
+                        ..Default::default()
                     },
                 };
-                let content = truncate_tool_output(&output.content);
+                let content =
+                    crate::spill::inline_or_spill(&call.function.name, &call.id, &output.content);
                 let _ = self.events.send(HarnessEvent::ToolResult {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -956,9 +984,25 @@ impl Agent {
                     let items = self.todos.snapshot();
                     let _ = self.session.lock().unwrap().todos(&items);
                 }
+                if !output.images.is_empty() {
+                    image_notes.push(content.clone());
+                    images.extend(output.images);
+                }
                 let mut tool_message = ChatMessage::tool(call.id.clone(), content);
                 tool_message.name = Some(call.function.name.clone());
                 self.messages.write().unwrap().push(tool_message);
+            }
+            if !images.is_empty() {
+                let note = image_notes.join("\n");
+                self.messages
+                    .write()
+                    .unwrap()
+                    .push(ChatMessage::user_with_images(note.clone(), images.clone()));
+                let _ = self
+                    .session
+                    .lock()
+                    .unwrap()
+                    .user_with_images(&note, &images);
             }
             if token.is_cancelled() {
                 let _ = self.events.send(HarnessEvent::TurnComplete {
@@ -1226,20 +1270,10 @@ impl Agent {
 /// than one request every three seconds.
 pub const RATE_LIMIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
-fn truncate_tool_output(content: &str) -> String {
-    const MAX_CHARS: usize = 256_000;
-    if content.chars().count() <= MAX_CHARS {
-        return content.to_string();
-    }
-    let mut out: String = content.chars().take(MAX_CHARS).collect();
-    out.push_str("\n... [tool output truncated by harness]");
-    out
-}
-
 /// System prompt shared by every frontend. Tool-specific details live in the
 /// tool descriptions; this only carries cross-tool policy.
-pub fn system_prompt(model: &str) -> String {
-    format!(
+pub fn system_prompt(model: &str, instructions: Option<(&str, &str)>) -> String {
+    let mut prompt = format!(
         "You are RustedHarness, an autonomous AI coding agent. You work inside a \
          single workspace and use tools to inspect and modify it. Model: {model}.\n\n\
          Operating rules:\n\
@@ -1255,8 +1289,18 @@ pub fn system_prompt(model: &str) -> String {
          the whole batch (E_STALE_ANCHOR) and returns the current anchor table; write \
          nothing in that case and re-read.\n\
          4. Verify changes (build/tests) before claiming success. Report failures \
-         honestly and keep responses concise."
-    )
+         honestly and keep responses concise.\n\
+         5. Long output: a tool result too large to inline is replaced by the path \
+         of a log file under the temp directory. grep that file for the lines you \
+         need and read a range of it; the file holds the whole output."
+    );
+    if let Some((label, text)) = instructions {
+        prompt.push_str(&format!(
+            "\n\nProject instructions ({label}), which take precedence over the \
+             operating rules above:\n{text}"
+        ));
+    }
+    prompt
 }
 
 #[cfg(test)]
@@ -1789,9 +1833,212 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// The workspace file wins outright: when both exist the config-level one
+    /// is not merged in, so following the prompt does not mean reconciling two
+    /// sets of rules.
+    #[test]
+    fn workspace_instructions_override_the_config_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        std::fs::write(config_dir.path().join("AGENTS.md"), "global rules").unwrap();
+        assert_eq!(
+            crate::config::instructions_from(workspace.path(), config_dir.path()),
+            Some((
+                "~/.rustedharness/AGENTS.md".to_string(),
+                "global rules".to_string()
+            ))
+        );
+        std::fs::write(workspace.path().join("AGENTS.md"), "workspace rules").unwrap();
+        assert_eq!(
+            crate::config::instructions_from(workspace.path(), config_dir.path()),
+            Some(("AGENTS.md".to_string(), "workspace rules".to_string()))
+        );
+        // An empty file means "nothing to say", not "override with nothing".
+        std::fs::write(workspace.path().join("AGENTS.md"), "  \n").unwrap();
+        assert_eq!(
+            crate::config::instructions_from(workspace.path(), config_dir.path())
+                .map(|(label, _)| label),
+            Some("~/.rustedharness/AGENTS.md".to_string())
+        );
+    }
+
+    #[test]
+    fn the_prompt_carries_the_project_instructions() {
+        let prompt = system_prompt("m", Some(("AGENTS.md", "never break the build")));
+        assert!(prompt.contains("never break the build"), "{prompt}");
+        assert!(prompt.contains("AGENTS.md"), "{prompt}");
+        assert!(!system_prompt("m", None).contains("Project instructions"));
+    }
+
+    /// A backend that asks for exactly one tool call and then stops, keeping
+    /// every request so a test can look at what the next turn would send.
+    struct ToolFake {
+        calls: std::sync::atomic::AtomicUsize,
+        tool: &'static str,
+        arguments: Value,
+        requests: std::sync::Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl Backend for ToolFake {
+        async fn stream_chat(
+            &self,
+            request: ChatRequest,
+            _sink: Option<UnboundedSender<StreamEvent>>,
+            _cancel: CancellationToken,
+        ) -> Result<Completion> {
+            self.requests.lock().unwrap().push(request.clone());
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(Completion {
+                    tool_calls: vec![ToolCall {
+                        id: "t1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: self.tool.to_string(),
+                            arguments: self.arguments.to_string(),
+                        },
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    ..Default::default()
+                });
+            }
+            Ok(Completion {
+                content: "done".into(),
+                finish_reason: Some("stop".into()),
+                ..Default::default()
+            })
+        }
+    }
+
+    async fn run_one_tool(
+        dir: &Path,
+        config: Config,
+        tool: &'static str,
+        arguments: Value,
+    ) -> (Arc<Agent>, Arc<ToolFake>) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let backend = Arc::new(ToolFake {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            tool,
+            arguments,
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let agent = Agent::with_backend(config, dir.to_path_buf(), tx, backend.clone())
+            .await
+            .unwrap();
+        agent.send("go").await.unwrap();
+        (agent, backend)
+    }
+
+    /// Output past the inline limit is not cut in half and it is not sent
+    /// either: the model gets the path of a log file holding all of it, and the
+    /// resolver lets it read that file even though it lives outside the
+    /// workspace.
+    #[tokio::test]
+    async fn long_tool_output_is_spilled_to_a_readable_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "the line that matters\n".repeat(20_000);
+        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+        let (agent, backend) = run_one_tool(
+            dir.path(),
+            test_config(dir.path()),
+            "read",
+            json!({ "path": "big.txt", "raw": true, "max_bytes": 600_000 }),
+        )
+        .await;
+        // The second request carries the tool result the model would see.
+        let content = {
+            let requests = backend.requests.lock().unwrap();
+            requests[1]
+                .messages
+                .iter()
+                .find(|message| message.role == Role::Tool)
+                .expect("tool result in the follow-up request")
+                .content
+                .clone()
+                .unwrap_or_default()
+        };
+        assert!(content.contains("rustedharness-logs"), "{content}");
+        assert!(
+            content.len() < crate::spill::MAX_INLINE_BYTES,
+            "the notice itself must stay small"
+        );
+        let path = content
+            .split_whitespace()
+            .map(|word| word.trim_end_matches(']'))
+            .find(|word| word.contains("rustedharness-logs") && word.ends_with(".log"))
+            .expect("log path in the notice");
+        let logged = std::fs::read_to_string(path).unwrap();
+        assert!(
+            logged.len() >= body.len(),
+            "{} < {} bytes in {path}",
+            logged.len(),
+            body.len()
+        );
+        assert!(logged.ends_with("the line that matters\n"));
+        // And the agent can actually read it back through the resolver.
+        assert!(agent.ctx.read().unwrap().resolver.resolve(path).is_ok());
+        agent.shutdown().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `read` on an image attaches it as a user message once the tool results
+    /// are in, so the next request carries the pixels and the session can be
+    /// resumed with them.
+    #[tokio::test]
+    async fn reading_an_image_attaches_it_to_the_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            6,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(dir.path().join("shot.png"), &png).unwrap();
+        let (agent, backend) = run_one_tool(
+            dir.path(),
+            test_config(dir.path()),
+            "read",
+            json!({ "path": "shot.png" }),
+        )
+        .await;
+
+        let messages = agent.messages.read().unwrap().clone();
+        let attached = messages
+            .iter()
+            .find(|message| !message.images.is_empty())
+            .expect("attached image");
+        assert_eq!(attached.role, Role::User);
+        assert_eq!(attached.images[0].mime_type, "image/png");
+        assert!(attached
+            .content
+            .as_deref()
+            .unwrap()
+            .starts_with(crate::session::IMAGE_NOTE_PREFIX));
+        // The pixels reach the provider as an image part on a user message.
+        {
+            let requests = backend.requests.lock().unwrap();
+            let wire = requests[1]
+                .messages
+                .iter()
+                .find(|message| !message.images.is_empty())
+                .expect("image in the follow-up request");
+            assert_eq!(wire.role, Role::User);
+        }
+        // The attachment is not a turn the user typed, so `/rollback` does not
+        // offer it as a point to return to.
+        let turns = agent.user_turns();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].text, "go");
+        agent.shutdown().await;
+    }
+
     #[test]
     fn prompt_contains_anchor_rules() {
-        let prompt = system_prompt("test-model");
+        let prompt = system_prompt("test-model", None);
         assert!(!prompt.contains("<env>"));
         assert!(prompt.contains("line#anchor|content"));
         assert!(prompt.contains("E_STALE_ANCHOR"));

@@ -35,19 +35,27 @@ pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
     pub metadata: Option<Value>,
+    /// Images the tool wants the model to see. They travel as a user message
+    /// after the batch of tool results: providers only accept images from the
+    /// user role, and a tool message inside a batch cannot be followed by one.
+    pub images: Vec<crate::provider::ImagePart>,
 }
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            is_error: false,
-            metadata: None,
+            ..Default::default()
         }
     }
 
     pub fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_images(mut self, images: Vec<crate::provider::ImagePart>) -> Self {
+        self.images = images;
         self
     }
 }
@@ -209,7 +217,7 @@ impl ToolRegistry {
                 content: HarnessError::tool("E_TOOL_DENIED", format!("tool `{name}` is denied"))
                     .to_model_json(),
                 is_error: true,
-                metadata: None,
+                ..Default::default()
             };
         }
         let Some(tool) = self.get(name) else {
@@ -223,7 +231,7 @@ impl ToolRegistry {
                 )
                 .to_model_json(),
                 is_error: true,
-                metadata: None,
+                ..Default::default()
             };
         };
         match tool.run(ctx, args).await {
@@ -232,6 +240,7 @@ impl ToolRegistry {
                 content: err.to_model_json(),
                 is_error: true,
                 metadata: Some(serde_json::json!({ "code": err.code() })),
+                images: Vec::new(),
             },
         }
     }
