@@ -1,5 +1,41 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：web UI / GUI 与 TUI 功能对齐（2026-11-26）
+
+之前所有迭代都落在 TUI 上，web UI 停在"能聊天 + 四个命令"的程度：设置只有 4 个输入框，
+没有模型选择器、没有添加模型、没有回滚、没有 /lsp install、不显示费用与缓存命中率。
+GUI 就是同一个 web 页面，所以两者一起落后。
+
+1. **一条命令面而不是两套实现**：TUI 直接调 `Agent` 的 setter；浏览器只有 socket，于是
+   `HarnessCommand` 增加 `DescribeSettings` / `SetSetting` / `DescribeModels` /
+   `SetCompactModel` / `DiscoverModels` / `AddModel` / `DescribeTurns` / `Rollback` /
+   `DescribeLsp` / `InstallLsp`。每个命令都是幂等的，回答都带**整份当前状态**
+   （`settings` / `models` / `model_catalog` / `turns` / `lsp_servers` 事件），
+   因此不需要请求 id，也不需要增量协议。
+2. **设置由服务端描述**（`crates/web/src/settings.rs`）：`Item { key, group, label, display,
+   hint, control, options, action, disabled, secret, checked }`，control 只有
+   `toggle` / `choice` / `text` / `action` 四种。TUI 的 15 个可调项（Windows 16 个，多一个
+   terminal）全部覆盖：缓存未命中提示、429 重试、图片最长边、压缩模型/思考等级/阈值/
+   保留轮次/裁剪旧上下文/完整发送轮次/裁剪内容、搜索后端与凭据、agent 模型、压缩模型、cwd。
+   前端只渲染服务端给的数据——新增一个设置是这里加一个 match 分支，HTML 不用动，
+   也不会出现"TUI 改了、web 忘了改"。
+   - 越界的配置值（手改 config.json 的值不在预设里）会作为额外选项追加，并保持选中；
+     不会静默吸附到最近的预设。
+   - 主模型压缩时 `strip/send/content` 由服务端标 disabled（主模型必须发完整前缀才能命中缓存），
+     思考等级只在压缩模型声明 reasoning 时可用——判断逻辑和 TUI 一致。
+3. **补齐的命令**：/help /hotkeys /model /cwd /new /resume /rollback /session /settings /files
+   /view /lsp /lsp install|update /procs /copy /cancel。未知的 `/xxx` 按 TUI 语义报错，
+   不会当正文发给模型。
+4. **补齐的界面**：模型选择器（过滤 + None 复用主模型 + 两步添加模型向导）、回滚（两步确认，
+   最后一条输入不可选）、设置面板四个分组、活动面板按 `describe_lsp` 显示版本/安装提示并直接
+   提供下载/更新按钮、压缩条目折叠展示摘要、状态栏显示费用与缓存命中率。
+5. **忙时排队**：回合运行中输入的消息进入队列（提示"已排队（n）"），`turn_complete` 后自动
+   发出下一条，和 TUI 的 queue 行为一致。
+6. **GUI 的 localStorage**：webview 的 localStorage 按 origin 存，原来每次启动都是随机端口，
+   于是主题/宽度/令牌每次都会丢。改为优先绑定 **7317**，被占用时才退回随机端口。
+7. 测试：web 4 → 10（设置描述、越界选项、禁用规则、`apply` 全键写入后重新读文件校验、
+   未知键/错误类型、序列化形态）。
+
 ## 已完成：GUI 图标（2026-11-26）
 
 CI 的 GUI 任务一直红在 `tauri::generate_context!()` 找不到 `crates/gui/icons/icon.png`。

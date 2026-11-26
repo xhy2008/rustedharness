@@ -8,12 +8,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{HarnessError, Result};
 
 /// One model a provider advertises.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CatalogModel {
     /// Id to send in requests.
     pub id: String,

@@ -4708,6 +4708,7 @@ name = "rustedharness-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "futures-util",
  "rustedharness-core",
@@ -4715,6 +4716,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "webbrowser",
 ]

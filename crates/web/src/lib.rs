@@ -25,8 +25,10 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
+mod settings;
+
 use rustedharness_core::agent::Agent;
-use rustedharness_core::config::Config;
+use rustedharness_core::config::{Config, NewModel};
 use rustedharness_core::error::HarnessError;
 use rustedharness_core::paths::{WorkspacePathResolver, SKIP_DIRS};
 use rustedharness_core::protocol::HarnessCommand;
@@ -509,6 +511,45 @@ fn client_notice(level: &str, message: impl std::fmt::Display) -> String {
     json!({ "type": "notice", "level": level, "message": message.to_string() }).to_string()
 }
 
+/// Out-of-band answers to the settings commands. They are not `HarnessEvent`s
+/// because nothing outside this server produces them.
+fn push(out: &mpsc::UnboundedSender<String>, value: Value) {
+    let _ = out.send(value.to_string());
+}
+
+fn settings_event(agent: &Agent) -> Value {
+    json!({ "type": "settings", "items": settings::describe_agent(agent) })
+}
+
+fn models_event(agent: &Agent) -> Value {
+    json!({ "type": "models", "models": settings::models(agent) })
+}
+
+fn turns_event(agent: &Agent) -> Value {
+    json!({ "type": "turns", "turns": settings::turns(agent)["turns"].clone() })
+}
+
+fn lsp_event(agent: &Agent) -> Value {
+    let servers: Vec<Value> = agent
+        .lsp_statuses()
+        .into_iter()
+        .map(|status| {
+            json!({
+                "language": status.language,
+                "server": status.server,
+                "version": status.version,
+                "state": status.state,
+                "detail": status.detail,
+                "pid": status.pid,
+                "restarts": status.restarts,
+                "install_hint": status.install_hint,
+                "runtime_deps": status.runtime_deps,
+            })
+        })
+        .collect();
+    json!({ "type": "lsp_servers", "servers": servers })
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<String>) {
     let (tx, mut events) = mpsc::unbounded_channel();
     let config = state.config.clone();
@@ -595,6 +636,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                     match cmd_agent.set_agent_model(&model) {
                         Ok(()) => {
                             let _ = cmd_out.send(client_notice("info", format!("model: {model}")));
+                            push(&cmd_out, models_event(&cmd_agent));
+                            push(&cmd_out, settings_event(&cmd_agent));
                         }
                         Err(err) => {
                             let _ = cmd_out.send(client_error(err));
@@ -611,6 +654,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                                 "info",
                                 format!("workspace: {}", cmd_agent.cwd().display()),
                             ));
+                            push(&cmd_out, settings_event(&cmd_agent));
                         }
                         Err(err) => {
                             let _ = cmd_out.send(client_error(err));
@@ -619,6 +663,119 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                 }
                 HarnessCommand::DownloadConsent { id, allow } => {
                     cmd_agent.grant_download_by_id(&id, allow);
+                }
+                HarnessCommand::DescribeSettings => push(&cmd_out, settings_event(&cmd_agent)),
+                HarnessCommand::SetSetting { key, value } => {
+                    match settings::apply(&cmd_agent, &key, &value) {
+                        Ok(notice) => {
+                            let _ = cmd_out.send(client_notice("info", notice));
+                            push(&cmd_out, settings_event(&cmd_agent));
+                            // The model rows and the web-search credential row are
+                            // derived from the config, so a reload can move both.
+                            push(&cmd_out, models_event(&cmd_agent));
+                        }
+                        Err(err) => {
+                            let _ = cmd_out.send(client_error(err));
+                        }
+                    }
+                }
+                HarnessCommand::DescribeModels => push(&cmd_out, models_event(&cmd_agent)),
+                HarnessCommand::SetCompactModel { model } => {
+                    match cmd_agent.set_compact_model(&model) {
+                        Ok(()) => {
+                            let _ = cmd_out.send(client_notice(
+                                "info",
+                                if model.trim().is_empty() {
+                                    "压缩复用主模型".to_string()
+                                } else {
+                                    format!("compact model: {model}")
+                                },
+                            ));
+                            push(&cmd_out, models_event(&cmd_agent));
+                            push(&cmd_out, settings_event(&cmd_agent));
+                        }
+                        Err(err) => {
+                            let _ = cmd_out.send(client_error(err));
+                        }
+                    }
+                }
+                HarnessCommand::DiscoverModels { base_url, api_key } => {
+                    let out = cmd_out.clone();
+                    tokio::spawn(async move {
+                        let value = match rustedharness_core::discovery::fetch_catalog(
+                            base_url.trim(),
+                            api_key.trim(),
+                        )
+                        .await
+                        {
+                            Ok(items) => json!({ "type": "model_catalog", "items": items }),
+                            Err(err) => json!({
+                                "type": "model_catalog",
+                                "items": [],
+                                "error": err.to_string(),
+                            }),
+                        };
+                        push(&out, value);
+                    });
+                }
+                HarnessCommand::AddModel {
+                    base_url,
+                    api_key,
+                    model_id,
+                    context_window,
+                } => {
+                    let new = NewModel {
+                        base_url,
+                        api_key,
+                        model_id,
+                        context_window,
+                        max_tokens: None,
+                    };
+                    match cmd_agent.add_model(&new) {
+                        Ok(reference) => {
+                            let _ = cmd_out
+                                .send(client_notice("info", format!("已添加模型 {reference}")));
+                            push(&cmd_out, models_event(&cmd_agent));
+                            push(&cmd_out, settings_event(&cmd_agent));
+                        }
+                        Err(err) => {
+                            let _ = cmd_out.send(client_error(err));
+                        }
+                    }
+                }
+                HarnessCommand::DescribeTurns => push(&cmd_out, turns_event(&cmd_agent)),
+                HarnessCommand::DescribeLsp => push(&cmd_out, lsp_event(&cmd_agent)),
+                HarnessCommand::Rollback { turn } => match cmd_agent.rollback_to_turn(turn) {
+                    Ok(()) => {
+                        // The transcript changed underneath the feed, so the
+                        // browser gets a fresh snapshot instead of an edit list.
+                        let _ = cmd_out.send(
+                            json!({ "type": "snapshot", "snapshot": cmd_agent.snapshot() })
+                                .to_string(),
+                        );
+                        push(&cmd_out, turns_event(&cmd_agent));
+                        let _ = cmd_out.send(client_notice("info", "已回滚到选中的输入"));
+                    }
+                    Err(err) => {
+                        let _ = cmd_out.send(client_error(err));
+                    }
+                },
+                HarnessCommand::InstallLsp { server, update } => {
+                    let agent = cmd_agent.clone();
+                    let out = cmd_out.clone();
+                    tokio::spawn(async move {
+                        match agent.install_lsp(&server, update).await {
+                            Ok(path) => {
+                                let _ = out.send(client_notice(
+                                    "info",
+                                    format!("{server} 已安装到 {}", path.display()),
+                                ));
+                            }
+                            Err(err) => {
+                                let _ = out.send(client_error(err));
+                            }
+                        }
+                    });
                 }
                 HarnessCommand::Shutdown => break,
             }

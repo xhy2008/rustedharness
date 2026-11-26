@@ -520,6 +520,16 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    /// Every level, weakest first: the order a picker shows them in.
+    pub const ALL: [Self; 6] = [
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "off",

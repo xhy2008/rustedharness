@@ -569,7 +569,16 @@ WebSocket handshake.
 | `GET /ws` | Bidirectional event/command stream |
 
 Each WebSocket connection gets its own `Agent`; closing the tab cancels the
-turn and shuts the agent down. The UI is a three-column workspace: a lazy
+turn and shuts the agent down. Anything the TUI can change, the browser changes
+over the same socket: `describe_settings` returns the whole editable surface
+(session, general, compaction, web search) as data with the current value, the
+allowed options and a control kind, and `set_setting` writes one key through the
+same `Agent` setter the TUI uses, so the two frontends cannot drift. The model
+picker and its add-model wizard (`describe_models`, `discover_models`,
+`add_model`, `set_compact_model`), rollback (`describe_turns`, `rollback`, which
+answers with a fresh snapshot), and language-server installs (`describe_lsp`,
+`install_lsp`) are socket commands too, because only the connection owns the
+agent. The UI is a three-column workspace: a lazy
 session/file tree, the chat stream with a todo dock and composer, and a
 read-only inspector for code, Markdown/JSON preview, and LSP/process activity.
 It streams text and reasoning, renders tool cards and consent prompts, offers
@@ -589,8 +598,11 @@ The tree and file endpoints resolve paths through `WorkspacePathResolver`;
 they reject traversal and symlinks, skip hidden and build directories, cap
 listings at 500 entries, and return binary/oversized files without rendering.
 
-The Tauri GUI starts the same server on an ephemeral loopback port and points a
-native window at it, so the desktop and browser experiences stay identical. It
+The Tauri GUI starts the same server on loopback and points a native window at
+it, so the desktop and browser experiences stay identical - every feature above
+is the same code. It prefers a fixed port (7317) because `localStorage` is keyed
+by origin: an ephemeral port would forget the theme, the panel widths and the
+token on every launch. A second instance falls back to an ephemeral port. It
 ships one image - a rusted saddle, the project's namesake - as the window and
 bundle icon (`crates/gui/icons/`), and the browser build serves the same
 artwork as its favicon.

@@ -15,8 +15,24 @@ mod desktop {
 
     use rustedharness_core::config::Config;
 
-    /// Start the HTTP server on 127.0.0.1:0 in a dedicated thread and return
-    /// the UI URL. The thread keeps the runtime alive for the app lifetime.
+    /// The webview's `localStorage` is keyed by origin, so an ephemeral port
+    /// would forget the theme, the layout and the token on every launch. The
+    /// window therefore prefers a fixed port and only falls back to an
+    /// ephemeral one when another instance already holds it.
+    const PREFERRED_PORT: u16 = 7317;
+
+    async fn bind(
+        config: Config,
+        cwd: std::path::PathBuf,
+        port: u16,
+    ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), String> {
+        rustedharness_web::spawn(config, cwd, "127.0.0.1".to_string(), port, None)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    /// Start the HTTP server in a dedicated thread and return the UI URL. The
+    /// thread keeps the runtime alive for the app lifetime.
     fn start_embedded_server() -> Result<String, String> {
         let config = Config::load().map_err(|err| err.to_string())?;
         let cwd = std::env::current_dir().map_err(|err| err.to_string())?;
@@ -30,8 +46,11 @@ mod desktop {
                 }
             };
             runtime.block_on(async move {
-                match rustedharness_web::spawn(config, cwd, "127.0.0.1".to_string(), 0, None).await
-                {
+                let started = match bind(config.clone(), cwd.clone(), PREFERRED_PORT).await {
+                    Ok(bound) => Ok(bound),
+                    Err(_) => bind(config, cwd, 0).await,
+                };
+                match started {
                     Ok((addr, server)) => {
                         let _ = tx.send(Ok(format!("http://{addr}/")));
                         // Keep the server alive until the process exits. Tauri

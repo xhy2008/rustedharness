@@ -567,6 +567,60 @@ try {
   .consent-box { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--sub); font-family: var(--mono); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
   .consent-label { display: block; margin-bottom: 2px; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
 
+  /* ---------- compaction entry ---------- */
+  .compaction { border: 1px dashed var(--line); border-radius: 10px; background: var(--panel-2); }
+  .compaction-head { display: flex; align-items: center; gap: 7px; padding: 7px 10px; color: var(--faint); font-size: 11px; cursor: pointer; list-style: none; }
+  .compaction-head::-webkit-details-marker { display: none; }
+  .compaction-head .icon { width: 13px; height: 13px; color: var(--warn); }
+  .compaction[open] .compaction-head { border-bottom: 1px dashed var(--line); }
+  .compaction-body { margin: 0; padding: 9px 11px; max-height: 320px; overflow: auto; color: var(--sub); font-family: var(--mono); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* ---------- settings / pickers ---------- */
+  .modal-card.wide { width: min(700px, 100%); }
+  .modal-card.narrow { width: min(460px, 100%); }
+  .set-tabs { display: flex; gap: 2px; margin: 0 0 12px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+  .set-tabs::-webkit-scrollbar { display: none; }
+  .set-tab { padding: 7px 11px; border-bottom: 2px solid transparent; color: var(--faint); font-size: 12px; white-space: nowrap; }
+  .set-tab.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+  .set-list { display: flex; flex-direction: column; gap: 9px; }
+  .set-row { display: flex; flex-direction: column; gap: 7px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+  .set-row.disabled { opacity: .55; }
+  .set-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .set-label { font-size: 12.5px; font-weight: 600; }
+  .set-value { margin-left: auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sub); font-family: var(--mono); font-size: 11px; }
+  .set-hint { color: var(--faint); font-size: 10.5px; line-height: 1.6; }
+  .set-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .opt { padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--sub); font-size: 11px; white-space: nowrap; }
+  .opt:hover:not(:disabled) { border-color: var(--brand); color: var(--text); }
+  .opt.sel { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+  .switch { width: 38px; height: 22px; flex: none; position: relative; margin-left: auto; border: 1px solid var(--line); border-radius: 999px; background: var(--track); }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text); transition: transform .15s; }
+  .switch.on { border-color: var(--brand); background: var(--brand); }
+  .switch.on::after { transform: translateX(16px); background: #fff; }
+  .switch:disabled { opacity: .5; }
+  .set-action { display: flex; align-items: center; gap: 8px; }
+  .set-action .btn { height: 28px; padding: 0 11px; font-size: 11px; }
+  .set-input { display: flex; gap: 6px; }
+  .set-input input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 11.5px; }
+  .set-input input:focus { border-color: var(--brand); }
+  .pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 44dvh; overflow: auto; }
+  .pick { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); text-align: left; }
+  .pick:hover { border-color: var(--brand); }
+  .pick.sel { border-color: var(--brand); background: var(--brand-soft); }
+  .pick-name { font-family: var(--mono); font-size: 11.5px; }
+  .pick-meta { color: var(--faint); font-size: 10px; }
+  .pick-empty { padding: 14px 4px; color: var(--faint); font-size: 11.5px; text-align: center; }
+  .step-list { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; color: var(--faint); font-size: 10.5px; }
+  .step-dot { width: 17px; height: 17px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; font-size: 9.5px; }
+  .step-dot.active { border-color: var(--brand); color: var(--brand); font-weight: 700; }
+  .turn-item { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); text-align: left; }
+  .turn-item:hover { border-color: var(--brand); }
+  .turn-item.sel { border-color: var(--brand); background: var(--brand-soft); }
+  .turn-text { font-size: 11.5px; line-height: 1.55; overflow-wrap: anywhere; }
+  .turn-meta { color: var(--faint); font-size: 10px; }
+  .install-btn { height: 24px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--sub); font-size: 10.5px; }
+  .install-btn:hover { border-color: var(--brand); color: var(--brand); }
+
   /* ---------- overlays ---------- */
   .scrim { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .45); backdrop-filter: blur(1px); }
   .resizer { width: 6px; flex: none; position: relative; z-index: 5; cursor: col-resize; background: transparent; touch-action: none; }
@@ -879,6 +933,8 @@ try {
             <span class="ctxbar" aria-hidden="true"><i id="ctxFill"></i></span>
             <span class="stat stat-inout">in <b id="statIn">0</b></span>
             <span class="stat stat-inout">out <b id="statOut">0</b></span>
+            <span class="stat stat-cache" id="statCache" hidden title="上一回合的 prompt 缓存命中率（来自 API usage）"></span>
+            <span class="stat stat-cost" id="statCost" hidden title="累计费用（来自 API usage）">—</span>
             <span class="stat stat-session" id="statSession">会话 —</span>
           </div>
         </section>
@@ -947,46 +1003,122 @@ try {
 <div class="scrim" id="scrim" hidden></div>
 
 <div id="settingsModal" class="modal" hidden>
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+  <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal-head">
       <svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>
       <div>
-        <h2 id="settingsTitle">会话设置</h2>
-        <p>设置会立即作用于当前会话；令牌只保存在本机浏览器。</p>
+        <h2 id="settingsTitle">设置</h2>
+        <p>设置立即作用于当前会话并写入 config.json；令牌只保存在本机浏览器。</p>
       </div>
       <button class="icon-btn modal-close" type="button" data-close="#settingsModal" title="关闭" aria-label="关闭">
         <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
       </button>
     </div>
-    <form id="settingsForm">
-      <div class="form-grid">
-        <div class="field">
-          <label for="setModel">Agent 模型 <span class="hint">当前会话</span></label>
-          <input id="setModel" type="text" autocomplete="off" spellcheck="false" placeholder="例如 gpt-4.1">
-          <div class="field-hint">通过 set_agent_model 立即切换；下一次请求开始生效。</div>
-        </div>
-        <div class="field">
-          <label for="setCompact">压缩模型 <span class="hint">只读</span></label>
-          <input id="setCompact" type="text" readonly tabindex="-1">
-          <div class="field-hint">来自配置 models.compact；达到上下文阈值时由后端自动压缩。</div>
-        </div>
-        <div class="field">
-          <label for="setCwd">工作目录 <span class="hint">路径锚点</span></label>
-          <input id="setCwd" type="text" autocomplete="off" spellcheck="false" placeholder="/path/to/workspace">
-          <div class="field-hint">切换后，所有相对路径、文件树与只读查看器都锚定到该目录。</div>
-        </div>
-        <div class="field">
-          <label for="setToken">访问令牌 <span class="hint">Bearer token</span></label>
-          <input id="setToken" type="password" autocomplete="off" placeholder="服务未启用鉴权时可留空">
-          <div class="field-hint">保存在 localStorage，通过 Authorization 与 WebSocket 查询参数发送。</div>
-        </div>
-        <div class="form-error" id="settingsError" hidden></div>
+    <div class="set-tabs" role="tablist" aria-label="设置分组" id="setTabs">
+      <button class="set-tab active" type="button" data-set-tab="session" role="tab">会话</button>
+      <button class="set-tab" type="button" data-set-tab="general" role="tab">通用</button>
+      <button class="set-tab" type="button" data-set-tab="compaction" role="tab">压缩</button>
+      <button class="set-tab" type="button" data-set-tab="search" role="tab">网络搜索</button>
+    </div>
+    <div class="set-list" id="setList"></div>
+    <div class="field" id="tokenField" style="margin-top:12px">
+      <label for="setToken">访问令牌 <span class="hint">Bearer token，仅保存在本机</span></label>
+      <input id="setToken" type="password" autocomplete="off" placeholder="服务未启用鉴权时可留空">
+      <div class="field-hint">通过 Authorization 头与 WebSocket 查询参数发送；修改后需要重新连接。</div>
+    </div>
+    <div class="form-error" id="settingsError" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close="#settingsModal">关闭</button>
+      <button class="btn primary" type="button" id="settingsSave">保存令牌并重连</button>
+    </div>
+  </div>
+</div>
+
+<div id="modelModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modelTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg>
+      <div>
+        <h2 id="modelTitle">选择模型</h2>
+        <p id="modelLead">来自 models.json 与内置清单。</p>
       </div>
-      <div class="modal-actions">
-        <button class="btn" type="button" data-close="#settingsModal">取消</button>
-        <button class="btn primary" type="submit" id="settingsSave">应用设置</button>
+      <button class="icon-btn modal-close" type="button" data-close="#modelModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="field">
+      <input id="modelFilter" type="text" autocomplete="off" spellcheck="false" placeholder="过滤模型…">
+    </div>
+    <div class="pick-list" id="modelList" style="margin-top:10px"></div>
+    <div class="form-error" id="modelError" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="addModelBtn">＋ 添加模型</button>
+      <button class="btn" type="button" data-close="#modelModal">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="addModelModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="addModelTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-wrench"></use></svg>
+      <div>
+        <h2 id="addModelTitle">添加模型</h2>
+        <p>向任意 OpenAI 兼容端点查询 /models，选中后写入 models.json。</p>
       </div>
-    </form>
+      <button class="icon-btn modal-close" type="button" data-close="#addModelModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="step-list" id="addModelSteps">
+      <span class="step-dot active" id="stepDot1">1</span><span>端点</span>
+      <span class="step-dot" id="stepDot2">2</span><span>选择模型</span>
+    </div>
+    <div class="form-grid" id="addModelEndpoint">
+      <div class="field">
+        <label for="addBaseUrl">Base URL</label>
+        <input id="addBaseUrl" type="text" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com/v1">
+        <div class="field-hint">不带 /models 后缀；provider id 由主机名推导。</div>
+      </div>
+      <div class="field">
+        <label for="addApiKey">API Key</label>
+        <input id="addApiKey" type="password" autocomplete="off" placeholder="留空表示该端点无需鉴权">
+        <div class="field-hint">会以明文写入 models.json 对应 provider 的 apiKey。</div>
+      </div>
+    </div>
+    <div id="addModelPick" hidden>
+      <div class="field">
+        <input id="addModelFilter" type="text" autocomplete="off" spellcheck="false" placeholder="过滤或直接输入模型 id…">
+      </div>
+      <div class="pick-list" id="addModelList" style="margin-top:10px"></div>
+    </div>
+    <div class="form-error" id="addModelError" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="addModelBack" hidden>上一步</button>
+      <button class="btn primary" type="button" id="addModelNext">拉取模型</button>
+      <button class="btn" type="button" data-close="#addModelModal">取消</button>
+    </div>
+  </div>
+</div>
+
+<div id="rollbackModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rollbackTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg>
+      <div>
+        <h2 id="rollbackTitle">回滚对话</h2>
+        <p id="rollbackLead">选择要保留的最后一条输入；其后的所有消息会被删除，无法撤销。</p>
+      </div>
+      <button class="icon-btn modal-close" type="button" data-close="#rollbackModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="pick-list" id="rollbackList"></div>
+    <div class="form-error" id="rollbackError" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close="#rollbackModal">取消</button>
+      <button class="btn danger" type="button" id="rollbackConfirmBtn" disabled>确认回滚</button>
+    </div>
   </div>
 </div>
 
@@ -1046,6 +1178,7 @@ try {
     compactModel: '',
     config: null,
     busy: false,
+    queue: [],
     consentId: null,
     manualClose: false,
     todos: [],
@@ -1055,6 +1188,14 @@ try {
     contextLimit: 0,
     inputTokens: 0,
     outputTokens: 0,
+    costUsd: null,
+    cacheHitPct: null,
+    lastAssistant: '',
+    settings: { items: [], tab: 'session', pending: false },
+    models: { catalog: [], agent: '', compact: '', separate: false, target: 'agent', filter: '' },
+    addModel: { step: 'endpoint', items: [], baseURL: '', apiKey: '', filter: '' },
+    turns: [],
+    rollbackTurn: null,
     assistantEl: null,
     assistantRaf: 0,
     reasoningEl: null,
@@ -1233,6 +1374,35 @@ try {
     modal.hidden = true;
   }
 
+  /* Settings are described by the server, so the browser never grows a second
+     list of knobs that can drift from the TUI's. */
+  function requestSettings() {
+    if (!isConnected()) return;
+    state.settings.pending = true;
+    sendCommand({ type: 'describe_settings' });
+  }
+
+  function openSettings(tab) {
+    state.settings.tab = tab || 'session';
+    $('setToken').value = state.token || '';
+    setSettingsError('');
+    syncSettingsTabs();
+    renderSettings();
+    openModal('settingsModal');
+    requestSettings();
+    setTimeout(() => {
+      const input = $('setList').querySelector('.set-input input');
+      if (input) input.focus();
+    }, 40);
+  }
+
+  function syncSettingsTabs() {
+    document.querySelectorAll('.set-tab').forEach((button) => {
+      button.classList.toggle('active', button.dataset.setTab === state.settings.tab);
+    });
+    $('tokenField').hidden = state.settings.tab !== 'session';
+  }
+
   function setSettingsError(message) {
     const node = $('settingsError');
     if (!node) return;
@@ -1240,90 +1410,350 @@ try {
     node.hidden = !message;
   }
 
-  function openSettings(focus) {
-    const cfg = state.config || {};
-    $('setModel').value = state.agentModel || cfg.agent_model || '';
-    $('setCompact').value = state.compactModel || cfg.compact_model || '';
-    $('setCwd').value = state.cwd || cfg.cwd || '';
-    $('setToken').value = state.token || '';
-    setSettingsError('');
-    openModal('settingsModal');
-    setTimeout(() => {
-      let target = $('setModel');
-      if (focus === 'token') target = $('setToken');
-      else if (focus === 'cwd') target = $('setCwd');
-      else if (focus === 'compact') target = $('setCompact');
-      try {
-        target.focus();
-        if (target.select) target.select();
-      } catch (_) {}
-    }, 40);
+  function settingsForTab() {
+    const items = Array.isArray(state.settings.items) ? state.settings.items : [];
+    return items.filter((item) => item.group === state.settings.tab);
   }
 
-  function saveSettings(event) {
-    if (event) event.preventDefault();
-    const model = $('setModel').value.trim();
-    const cwd = $('setCwd').value.trim();
+  function renderSettings() {
+    const root = $('setList');
+    if (!root) return;
+    root.replaceChildren();
+    if (!isConnected()) {
+      root.append(el('div', 'pick-empty', '尚未连接，无法读取设置。连接后可在此修改会话、压缩与搜索选项。'));
+      return;
+    }
+    const items = settingsForTab();
+    if (!items.length) {
+      root.append(el('div', 'pick-empty', state.settings.pending ? '正在读取设置…' : '该分组没有可调整的选项。'));
+      return;
+    }
+    for (const item of items) root.append(settingsRow(item));
+  }
+
+  function settingsRow(item) {
+    const row = el('div', 'set-row' + (item.disabled ? ' disabled' : ''));
+    const top = el('div', 'set-top');
+    top.append(el('span', 'set-label', item.label));
+    if (item.control !== 'toggle') top.append(el('span', 'set-value', item.display == null ? '' : String(item.display)));
+    row.append(top);
+
+    if (item.control === 'toggle') {
+      const toggle = el('button', 'switch' + (item.checked ? ' on' : ''));
+      toggle.type = 'button';
+      toggle.disabled = !!item.disabled;
+      toggle.setAttribute('role', 'switch');
+      toggle.setAttribute('aria-checked', String(!!item.checked));
+      toggle.title = item.checked ? '点击关闭' : '点击开启';
+      toggle.addEventListener('click', () => setSetting(item.key, !item.checked));
+      top.append(toggle);
+    } else if (item.control === 'choice') {
+      const opts = el('div', 'set-opts');
+      for (const option of (item.options || [])) {
+        const button = el('button', 'opt' + (option.selected ? ' sel' : ''), option.label);
+        button.type = 'button';
+        button.disabled = !!item.disabled;
+        button.addEventListener('click', () => setSetting(item.key, option.value));
+        opts.append(button);
+      }
+      row.append(opts);
+    } else if (item.control === 'text') {
+      const wrap = el('div', 'set-input');
+      const input = el('input');
+      input.type = item.secret ? 'password' : 'text';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.placeholder = item.display || '';
+      input.disabled = !!item.disabled;
+      const save = el('button', 'btn', '保存');
+      save.type = 'button';
+      save.disabled = !!item.disabled;
+      const commit = () => {
+        setSetting(item.key, input.value);
+        input.value = '';
+      };
+      save.addEventListener('click', commit);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+        }
+      });
+      wrap.append(input, save);
+      row.append(wrap);
+    } else if (item.control === 'action') {
+      const wrap = el('div', 'set-action');
+      const open = el('button', 'btn', item.action === 'cwd' ? '修改目录' : '选择模型');
+      open.type = 'button';
+      open.disabled = !!item.disabled;
+      open.addEventListener('click', () => runSettingAction(item.action));
+      wrap.append(open);
+      row.append(wrap);
+    }
+
+    if (item.hint) row.append(el('div', 'set-hint', item.hint));
+    return row;
+  }
+
+  function runSettingAction(action) {
+    if (action === 'models_agent') openModelPicker('agent');
+    else if (action === 'models_compact') openModelPicker('compact');
+    else if (action === 'cwd') {
+      const next = window.prompt('新的工作目录', state.cwd || '');
+      if (next && next.trim()) {
+        sendCommand({ type: 'set_cwd', path: next.trim() });
+        setTimeout(requestSettings, 220);
+      }
+    }
+  }
+
+  function setSetting(key, value) {
+    if (!isConnected()) {
+      setSettingsError('尚未连接，无法修改设置。');
+      return;
+    }
+    sendCommand({ type: 'set_setting', key, value });
+  }
+
+  /// The token is the only setting that never leaves the browser: it is stored
+  /// in localStorage and applied by reconnecting.
+  function saveToken() {
     const token = $('setToken').value.trim();
-    const connected = isConnected();
-    if (connected && !model) {
-      setSettingsError('Agent 模型不能为空。');
-      $('setModel').focus();
+    if (token === state.token) {
+      toast('令牌未变化');
       return;
     }
-    if (connected && !cwd) {
-      setSettingsError('工作目录不能为空。');
-      $('setCwd').focus();
-      return;
-    }
-    if (!connected) {
-      if (token !== state.token) {
-        state.token = token;
-        storeSet('rh_token', token || null);
-        closeModal('settingsModal');
-        connect(state.sessionId || state.resumeId || null);
-        toast('令牌已保存，正在重新连接');
-      } else {
-        setSettingsError('连接尚未建立，无法切换模型或工作目录。');
-      }
-      return;
-    }
-    let modelChanged = false;
-    let cwdChanged = false;
-    let tokenChanged = false;
-
-    if (model !== state.agentModel) {
-      if (!sendCommand({ type: 'set_agent_model', model })) {
-        setSettingsError('发送模型切换命令失败。');
-        return;
-      }
-      state.agentModel = model;
-      modelChanged = true;
-      updateModelChips();
-      updateActivityIfVisible();
-    }
-
-    if (cwd !== state.cwd) {
-      if (!sendCommand({ type: 'set_cwd', path: cwd })) {
-        setSettingsError('发送工作目录切换命令失败。');
-        return;
-      }
-      cwdChanged = true;
-    }
-
-    if (token !== state.token) {
-      state.token = token;
-      storeSet('rh_token', token || null);
-      tokenChanged = true;
-    }
-
+    state.token = token;
+    storeSet('rh_token', token || null);
     closeModal('settingsModal');
+    connect(state.sessionId || state.resumeId || null);
+    toast('令牌已保存，正在重新连接');
+  }
 
-    if (modelChanged && cwdChanged) toast('模型已切换，正在切换工作目录…');
-    else if (modelChanged) toast('模型已切换为 ' + model);
-    else if (cwdChanged) toast('正在切换工作目录…');
-    else if (tokenChanged) toast('令牌已保存，将在下次连接时生效');
-    else toast('设置已保存');
+  /* ---------------- model picker / add model ---------------- */
+  function openModelPicker(target) {
+    state.models.target = target === 'compact' ? 'compact' : 'agent';
+    state.models.filter = '';
+    $('modelFilter').value = '';
+    $('modelError').hidden = true;
+    $('modelTitle').textContent = state.models.target === 'compact' ? '选择压缩模型' : '选择 Agent 模型';
+    $('modelLead').textContent = state.models.target === 'compact'
+      ? 'None 让摘要请求复用主模型的完整前缀，从而命中 prompt 缓存。'
+      : '每个模型写入 config.json 的 model 字段；下一次请求生效。';
+    $('modelList').replaceChildren(el('div', 'pick-empty', '正在读取模型清单…'));
+    openModal('modelModal');
+    sendCommand({ type: 'describe_models' });
+  }
+
+  function renderModels() {
+    const list = $('modelList');
+    if (!list) return;
+    const models = state.models;
+    const query = String(models.filter || '').trim().toLowerCase();
+    const rows = (Array.isArray(models.catalog) ? models.catalog : [])
+      .filter((model) => !query ||
+        String(model.reference).toLowerCase().includes(query) ||
+        String(model.name || '').toLowerCase().includes(query));
+    list.replaceChildren();
+    const current = models.target === 'compact'
+      ? (models.separate ? models.compact : '')
+      : models.agent;
+    if (models.target === 'compact') {
+      const none = el('button', 'pick' + (current ? '' : ' sel'));
+      none.type = 'button';
+      none.append(el('span', 'pick-name', 'None'),
+        el('span', 'pick-meta', '复用主模型 · 命中 prompt 缓存'));
+      none.addEventListener('click', () => chooseModel(''));
+      list.append(none);
+    }
+    if (!rows.length) {
+      list.append(el('div', 'pick-empty', query ? '没有匹配的模型。' : '配置里没有模型，先添加一个。'));
+      return;
+    }
+    for (const model of rows) {
+      const selected = String(model.reference) === String(current);
+      const button = el('button', 'pick' + (selected ? ' sel' : ''));
+      button.type = 'button';
+      button.append(el('span', 'pick-name', model.reference));
+      const meta = [];
+      if (model.provider) meta.push(model.provider);
+      if (model.context_window) meta.push(fmtTokens(model.context_window) + ' ctx');
+      if (model.reasoning) meta.push('reasoning');
+      button.append(el('span', 'pick-meta', meta.join(' · ')));
+      button.addEventListener('click', () => chooseModel(model.reference));
+      list.append(button);
+    }
+  }
+
+  function chooseModel(reference) {
+    const target = state.models.target;
+    if (target === 'compact') {
+      sendCommand({ type: 'set_compact_model', model: reference });
+      if (!reference) {
+        state.compactModel = '';
+        state.models.separate = false;
+      }
+    } else if (!reference) {
+      return;
+    } else {
+      sendCommand({ type: 'set_agent_model', model: reference });
+      state.agentModel = reference;
+    }
+    updateModelChips();
+    closeModal('modelModal');
+    toast((target === 'compact' ? '压缩模型：' : 'Agent 模型：') + (reference || 'None'));
+    requestSettings();
+  }
+
+  function openAddModel() {
+    state.addModel = { step: 'endpoint', items: [], baseURL: '', apiKey: '', filter: '' };
+    $('addBaseUrl').value = '';
+    $('addApiKey').value = '';
+    $('addModelFilter').value = '';
+    $('addModelError').hidden = true;
+    syncAddModelStep();
+    openModal('addModelModal');
+    setTimeout(() => $('addBaseUrl').focus(), 40);
+  }
+
+  function syncAddModelStep() {
+    const endpoint = state.addModel.step === 'endpoint';
+    $('addModelEndpoint').hidden = !endpoint;
+    $('addModelPick').hidden = endpoint;
+    $('addModelBack').hidden = endpoint;
+    $('addModelNext').textContent = endpoint ? '拉取模型' : '添加并选择';
+    $('stepDot1').classList.toggle('active', endpoint);
+    $('stepDot2').classList.toggle('active', !endpoint);
+    if (!endpoint) renderAddModelList();
+  }
+
+  function setAddModelError(message) {
+    const node = $('addModelError');
+    node.textContent = message || '';
+    node.hidden = !message;
+  }
+
+  function discoverModels() {
+    const baseURL = $('addBaseUrl').value.trim();
+    const apiKey = $('addApiKey').value.trim();
+    if (!baseURL) {
+      setAddModelError('请填写 Base URL。');
+      $('addBaseUrl').focus();
+      return;
+    }
+    state.addModel.baseURL = baseURL;
+    state.addModel.apiKey = apiKey;
+    setAddModelError('');
+    $('addModelNext').disabled = true;
+    $('addModelNext').textContent = '正在拉取…';
+    sendCommand({
+      type: 'discover_models',
+      base_url: baseURL,
+      api_key: apiKey
+    });
+  }
+
+  function renderAddModelList() {
+    const list = $('addModelList');
+    const filter = $('addModelFilter').value.trim().toLowerCase();
+    list.replaceChildren();
+    const items = state.addModel.items.filter((model) => !filter ||
+      String(model.id || '').toLowerCase().includes(filter) ||
+      String(model.name || '').toLowerCase().includes(filter));
+    if (!items.length) {
+      list.append(el('div', 'pick-empty', filter
+        ? '没有匹配的模型：清空过滤框可直接用输入值作为模型 id。'
+        : '该端点没有返回模型，清空过滤框后可直接用输入值作为模型 id。'));
+      return;
+    }
+    for (const model of items) {
+      const button = el('button', 'pick');
+      button.type = 'button';
+      button.append(el('span', 'pick-name', model.id));
+      const meta = [];
+      if (model.name && model.name !== model.id) meta.push(model.name);
+      if (model.context_window) meta.push(fmtTokens(model.context_window) + ' ctx');
+      if (model.max_tokens) meta.push(fmtTokens(model.max_tokens) + ' out');
+      button.append(el('span', 'pick-meta', meta.join(' · ') || '未报告上下文窗口'));
+      button.addEventListener('click', () => {
+        state.addModel.items.forEach((item) => { item.selected = item.id === model.id; });
+        renderAddModelList();
+      });
+      button.classList.toggle('sel', !!model.selected);
+      list.append(button);
+    }
+  }
+
+  function saveDiscoveredModel() {
+    const typed = $('addModelFilter').value.trim();
+    const chosen = state.addModel.items.find((model) => model.selected);
+    // A typed value is a hand-entered model id only when nothing is picked;
+    // otherwise it is the filter that narrowed the list.
+    const modelId = chosen ? chosen.id : typed;
+    if (!modelId) {
+      setAddModelError('请选择或输入一个模型 id。');
+      return;
+    }
+    const contextWindow = chosen && chosen.id === modelId ? Number(chosen.context_window) || 0 : 0;
+    sendCommand({
+      type: 'add_model',
+      base_url: state.addModel.baseURL,
+      api_key: state.addModel.apiKey,
+      model_id: modelId,
+      context_window: contextWindow
+    });
+    closeModal('addModelModal');
+    toast('模型已加入 models.json');
+  }
+
+  /* ---------------- rollback ---------------- */
+  function openRollback() {
+    state.rollbackTurn = null;
+    $('rollbackConfirmBtn').disabled = true;
+    $('rollbackError').hidden = true;
+    $('rollbackList').replaceChildren(el('div', 'pick-empty', '正在读取对话输入…'));
+    openModal('rollbackModal');
+    sendCommand({ type: 'describe_turns' });
+  }
+
+  function renderTurns() {
+    const list = $('rollbackList');
+    if (!list) return;
+    const turns = Array.isArray(state.turns) ? state.turns : [];
+    list.replaceChildren();
+    if (!turns.length) {
+      list.append(el('div', 'pick-empty', '这段对话还没有可回滚的输入。'));
+      $('rollbackConfirmBtn').disabled = true;
+      return;
+    }
+    const last = turns.length - 1;
+    turns.forEach((turn, position) => {
+      const button = el('button', 'turn-item' + (turn.index === state.rollbackTurn ? ' sel' : ''));
+      button.type = 'button';
+      const text = String(turn.text || '').replace(/\s+/g, ' ').trim();
+      button.append(el('span', 'turn-text',
+        '#' + (turn.index + 1) + ' ' + (text.length > 120 ? text.slice(0, 120) + '…' : (text || '（空输入）'))));
+      const detail = turn.after === 0
+        ? '最后一个输入 · 回滚后无变化'
+        : '将删除其后的 ' + turn.after + ' 条消息';
+      button.append(el('span', 'turn-meta', detail));
+      button.disabled = turn.index === last;
+      if (button.disabled) button.title = '这是最后一条输入，回滚不会改变任何内容';
+      button.addEventListener('click', () => {
+        state.rollbackTurn = turn.index;
+        $('rollbackConfirmBtn').disabled = false;
+        $('rollbackError').hidden = true;
+        renderTurns();
+      });
+      list.append(button);
+    });
+  }
+
+  function confirmRollback() {
+    if (state.rollbackTurn == null) return;
+    sendCommand({ type: 'rollback', turn: state.rollbackTurn });
+    closeModal('rollbackModal');
+    state.rollbackTurn = null;
   }
 
   function showConsent(event) {
@@ -1512,7 +1942,8 @@ try {
   /* ---------------- session chrome ---------------- */
   function updateModelChips() {
     const model = state.agentModel || (state.config && state.config.agent_model) || 'None';
-    const compact = state.compactModel || (state.config && state.config.compact_model) || 'None';
+    const compact = state.compactModel ||
+      (state.models.catalog.length ? 'None' : (state.config && state.config.compact_model) || 'None');
     $('modelChipValue').textContent = model;
     $('modelChip').title = '切换 agent 模型：' + model;
     $('compactChipValue').textContent = compact;
@@ -1542,6 +1973,12 @@ try {
     $('statIn').textContent = fmtTokens(state.inputTokens);
     $('statOut').textContent = fmtTokens(state.outputTokens);
     $('statSession').textContent = '会话 ' + (state.sessionId ? shortId(state.sessionId) : '—');
+    const cache = $('statCache');
+    cache.hidden = state.cacheHitPct == null;
+    if (!cache.hidden) cache.textContent = '缓存 ' + state.cacheHitPct + '%';
+    const cost = $('statCost');
+    cost.hidden = state.costUsd == null;
+    if (!cost.hidden) cost.textContent = '$' + (Number(state.costUsd) || 0).toFixed(4);
   }
 
   function updateInputHint() {
@@ -2233,6 +2670,7 @@ try {
       if (live) live.remove();
       if (!(current.body.textContent || '').trim()) current.card.remove();
     }
+    state.lastAssistant = content || state.lastAssistant;
     state.assistantEl = null;
     state.reasoningEl = null;
     if (state.assistantRaf) {
@@ -2516,8 +2954,28 @@ try {
         const line = el('div', 'lsp-line');
         line.append(el('span', 'lsp-lang', language),
           el('span', 'tstat ' + lspClass(status.state), lspLabel(status.state)));
+        if (status.server) {
+          const install = el('button', 'install-btn', status.state === 'running' ? '更新' : '下载');
+          install.type = 'button';
+          install.title = status.state === 'running'
+            ? '重新安装最新版本'
+            : '下载并启用 ' + status.server;
+          install.addEventListener('click', () => {
+            sendCommand({
+              type: 'install_lsp',
+              server: status.server,
+              update: status.state === 'running'
+            });
+            toast('正在处理 ' + status.server + '…');
+          });
+          line.append(install);
+        }
         item.append(line);
-        if (status.detail) item.append(el('div', 'lsp-detail', status.detail));
+        const detail = status.detail || (status.version ? '版本 ' + status.version : '');
+        if (detail) item.append(el('div', 'lsp-detail', detail));
+        if ((status.state === 'absent' || status.state === 'degraded') && status.install_hint) {
+          item.append(el('div', 'lsp-detail', status.install_hint));
+        }
         lspSection.append(item);
       }
     }
@@ -2549,6 +3007,12 @@ try {
 
   function updateActivityIfVisible() {
     if (state.inspectorTab === 'activity') renderActivity();
+  }
+
+  /// Live events only carry the language, so the panel asks for the full status
+  /// (ids, versions, install hints) each time it becomes visible.
+  function requestLspStatus() {
+    if (isConnected()) sendCommand({ type: 'describe_lsp' });
   }
 
   function renderTodos() {
@@ -2825,7 +3289,10 @@ try {
     $('paneCode').classList.toggle('active', tab === 'code');
     $('panePreview').classList.toggle('active', tab === 'preview');
     $('paneActivity').classList.toggle('active', tab === 'activity');
-    if (tab === 'activity') renderActivity();
+    if (tab === 'activity') {
+      renderActivity();
+      requestLspStatus();
+    }
     syncInspectorHeader();
   }
 
@@ -3079,7 +3546,7 @@ try {
       throw new Error('网络请求失败：' + (error && error.message ? error.message : error));
     }
     if (response.status === 401) {
-      if ($('settingsModal').hidden) openSettings('token');
+      if ($('settingsModal').hidden) openSettings('session');
       setSettingsError('需要访问令牌才能访问此服务。');
       throw new Error('未授权：请输入访问令牌');
     }
@@ -3132,6 +3599,12 @@ try {
     state.contextLimit = state.config && state.config.context_window ? Number(state.config.context_window) : 0;
     state.inputTokens = 0;
     state.outputTokens = 0;
+    state.costUsd = null;
+    state.cacheHitPct = null;
+    state.lastAssistant = '';
+    state.settings.pending = false;
+    state.queue = [];
+    state.models.catalog = [];
     state.todos = [];
     state.lsp.clear();
     state.processes.clear();
@@ -3298,6 +3771,12 @@ try {
     state.contextLimit = Number(snapshot.context_limit) || state.contextLimit;
     state.inputTokens = 0;
     state.outputTokens = 0;
+    state.costUsd = snapshot.cost_usd == null ? null : Number(snapshot.cost_usd);
+    const usage = snapshot.usage;
+    state.cacheHitPct = usage && usage.prompt_tokens > 0 && usage.cached_tokens > 0
+      ? Math.min(100, Math.round((usage.cached_tokens * 100) / usage.prompt_tokens))
+      : null;
+    state.lastAssistant = '';
     state.resumeId = snapshot.session_id;
     if (previous && previous !== state.sessionId) clearViewer();
     settleStreaming();
@@ -3330,7 +3809,10 @@ try {
     }
     if (message.role === 'assistant') {
       if (message.reasoning_content) addReasoningBlock(message.reasoning_content);
-      if (message.content) addAssistantCard(message.content, null);
+      if (message.content) {
+        addAssistantCard(message.content, null);
+        state.lastAssistant = message.content;
+      }
       for (const call of (message.tool_calls || [])) {
         const fn = call.function || {};
         addToolCard(fn.name || 'tool', fn.arguments, call.id, { open: false });
@@ -3389,9 +3871,16 @@ try {
         state.todos = Array.isArray(event.items) ? event.items : [];
         renderTodos();
         break;
+      case 'lsp_servers':
+        for (const server of (Array.isArray(event.servers) ? event.servers : [])) {
+          const known = state.lsp.get(server.language) || {};
+          state.lsp.set(server.language, Object.assign({}, known, server));
+        }
+        renderActivity();
+        break;
       case 'lsp_status': {
-        const previous = state.lsp.get(event.language);
-        state.lsp.set(event.language, { state: event.state, detail: event.detail });
+        const previous = state.lsp.get(event.language) || {};
+        state.lsp.set(event.language, Object.assign({}, previous, { state: event.state, detail: event.detail }));
         if ((!previous || previous.state !== event.state) &&
           (event.state === 'degraded' || event.state === 'absent')) {
           addNote('LSP ' + event.language + '：' + event.state +
@@ -3427,6 +3916,7 @@ try {
         break;
       case 'download_status':
         addNote('LSP 下载 ' + event.server_id + '：' + event.state +
+          (event.percent != null ? ' ' + event.percent + '%' : '') +
           (event.detail ? ' — ' + event.detail : ''));
         break;
       case 'token_usage':
@@ -3434,11 +3924,43 @@ try {
         state.outputTokens = Number(event.output_tokens) || 0;
         state.contextTokens = Number(event.context_tokens) || 0;
         if (event.context_limit) state.contextLimit = Number(event.context_limit) || state.contextLimit;
+        state.costUsd = event.cost_usd == null ? state.costUsd : Number(event.cost_usd);
+        state.cacheHitPct = event.cache_hit_pct == null ? state.cacheHitPct : Number(event.cache_hit_pct);
         updateStats();
         updateActivityIfVisible();
         break;
+      case 'settings':
+        state.settings.items = Array.isArray(event.items) ? event.items : [];
+        state.settings.pending = false;
+        $('setToken').value = state.token || '';
+        renderSettings();
+        break;
+      case 'models':
+        state.models.catalog = Array.isArray(event.models && event.models.catalog) ? event.models.catalog : [];
+        state.models.agent = (event.models && event.models.agent) || '';
+        state.models.compact = (event.models && event.models.compact) || '';
+        state.models.separate = !!(event.models && event.models.compact_is_separate);
+        if (state.models.agent) state.agentModel = state.models.agent;
+        state.compactModel = state.models.separate ? state.models.compact : '';
+        renderModels();
+        updateModelChips();
+        break;
+      case 'model_catalog':
+        if (state.addModel.step === 'endpoint') {
+          state.addModel.step = 'items';
+          state.addModel.items = (Array.isArray(event.items) ? event.items : []).map((model) => Object.assign({}, model, { selected: false }));
+          $('addModelNext').disabled = false;
+          $('addModelFilter').value = '';
+          syncAddModelStep();
+          if (event.error) setAddModelError('未能拉取模型列表：' + event.error + '（仍可直接输入模型 id）');
+        }
+        break;
+      case 'turns':
+        state.turns = Array.isArray(event.turns) ? event.turns : [];
+        renderTurns();
+        break;
       case 'compaction':
-        addNote('上下文已压缩，丢弃 ' + event.dropped_messages + ' 条消息', 'brand');
+        addCompactionCard(event);
         break;
       case 'chase':
         addNote('待办追问 ' + event.attempt + '：仍有 ' + event.pending.length + ' 项未完成', 'warn');
@@ -3449,6 +3971,9 @@ try {
       case 'error':
         settleStreaming();
         addError(event.message || '未知错误');
+        if (document.querySelector('.modal:not([hidden])')) {
+          toast(event.message || '操作失败', 'error');
+        }
         if (/already running/i.test(event.message || '')) setBusy(true);
         break;
       case 'turn_complete':
@@ -3457,11 +3982,32 @@ try {
         if (event.stop_reason && event.stop_reason !== 'completed' && event.stop_reason !== 'error') {
           addNote('本轮结束：' + event.stop_reason, 'warn');
         }
+        if (state.queue.length && isConnected()) {
+          const next = state.queue.shift();
+          addNote('发送排队消息：' + next, 'brand');
+          if (sendCommand({ type: 'user_message', text: next })) setBusy(true);
+          if (state.queue.length) addNote(state.queue.length + ' 条仍在排队', 'warn');
+        }
         refreshSessions();
         break;
       default:
         break;
     }
+  }
+
+  function addCompactionCard(event) {
+    const stick = isAtBottom();
+    removeEmptyState();
+    const card = el('details', 'compaction');
+    const summary = el('summary', 'compaction-head');
+    summary.append(icon('activity'),
+      el('span', null, '上下文已压缩 · 丢弃 ' + event.dropped_messages + ' 条消息'));
+    card.append(summary);
+    const body = el('pre', 'compaction-body', String(event.summary || '（无摘要）'));
+    card.append(body);
+    appendFeed(card);
+    pruneFeed();
+    maybeScroll(stick);
   }
 
   function handleNotice(event) {
@@ -3518,61 +4064,176 @@ try {
     }
   }
 
+  /// Every slash command the TUI offers, mapped onto the socket. `/lsp` takes
+  /// a subcommand because installing is what a browser cannot do by itself.
+  const SLASH_HELP = [
+    '/help                命令列表',
+    '/model [名称]        打开模型选择器，或直接切换 Agent 模型',
+    '/cwd [目录]          查看或切换工作目录',
+    '/new                 新建会话',
+    '/resume              打开本地会话列表',
+    '/rollback            回滚到更早的输入',
+    '/session             当前会话、模型与上下文',
+    '/settings            设置（会话 / 通用 / 压缩 / 网络搜索）',
+    '/files               聚焦左侧文件树',
+    '/view <路径>         在右侧只读查看文件',
+    '/lsp                 语言服务器状态',
+    '/lsp install <id>    下载最新的语言服务器',
+    '/lsp update <id>     重新安装语言服务器',
+    '/procs               后台进程',
+    '/copy                复制最后一条回复',
+    '/cancel              停止当前回合',
+    '/hotkeys             键盘快捷键'
+  ].join('\n');
+
+  function runSlash(text) {
+    const space = text.indexOf(' ');
+    const command = (space === -1 ? text : text.slice(0, space)).toLowerCase();
+    const arg = space === -1 ? '' : text.slice(space + 1).trim();
+    const clear = () => {
+      inputEl.value = '';
+      resizeInput();
+    };
+    switch (command) {
+      case '/help':
+        clear();
+        addNote(SLASH_HELP, 'brand');
+        return true;
+      case '/hotkeys':
+        clear();
+        addNote([
+          'Enter 发送 · Shift+Enter 换行',
+          'Esc 关闭浮层、抽屉与弹窗',
+          '点击顶栏模型 chip 打开模型选择器',
+          '左侧可拖动分隔条调整宽度，双击分隔条复位'
+        ].join('\n'), 'brand');
+        return true;
+      case '/model':
+        clear();
+        if (arg) sendCommand({ type: 'set_agent_model', model: arg });
+        else openModelPicker('agent');
+        return true;
+      case '/cwd':
+        clear();
+        if (arg) sendCommand({ type: 'set_cwd', path: arg });
+        else addNote('当前工作目录：' + (state.cwd || '—'), 'brand');
+        return true;
+      case '/new':
+        clear();
+        connect(null);
+        return true;
+      case '/resume':
+        clear();
+        switchSideTab('sessions');
+        if (isLeftDrawer()) openLeftDrawer();
+        else setLeftCollapsed(false);
+        return true;
+      case '/rollback':
+        clear();
+        openRollback();
+        return true;
+      case '/session': {
+        clear();
+        const lines = [
+          '会话：' + (state.sessionId || '—'),
+          '工作区：' + (state.cwd || '—'),
+          'Agent：' + (state.agentModel || 'None'),
+          '压缩：' + (state.compactModel || 'None'),
+          '上下文：' + (state.contextLimit
+            ? fmtTokens(state.contextTokens) + ' / ' + fmtTokens(state.contextLimit) +
+              '（' + Math.round((state.contextTokens / state.contextLimit) * 100) + '%）'
+            : '—'),
+          '用量：in ' + fmtTokens(state.inputTokens) + ' · out ' + fmtTokens(state.outputTokens) +
+            (state.costUsd == null ? '' : ' · $' + Number(state.costUsd).toFixed(4))
+        ];
+        addNote(lines.join('\n'), 'brand');
+        return true;
+      }
+      case '/settings':
+        clear();
+        openSettings('session');
+        return true;
+      case '/files':
+        clear();
+        switchSideTab('files');
+        if (isLeftDrawer()) openLeftDrawer();
+        else setLeftCollapsed(false);
+        return true;
+      case '/view':
+        clear();
+        if (!arg) addNote('用法：/view <路径>', 'warn');
+        else openFile(arg);
+        return true;
+      case '/lsp': {
+        clear();
+        const sub = arg.split(/\s+/).filter(Boolean);
+        if (sub.length >= 2 && (sub[0] === 'install' || sub[0] === 'update')) {
+          sendCommand({ type: 'install_lsp', server: sub[1], update: sub[0] === 'update' });
+          toast('正在' + (sub[0] === 'update' ? '重装 ' : '下载 ') + sub[1] + '…');
+          return true;
+        }
+        if (!state.lsp.size) {
+          addNote('暂无 LSP 状态事件；打开代码文件或触发定义查询后会出现。', 'brand');
+        } else {
+          const rows = Array.from(state.lsp.keys()).sort().map((language) => {
+            const status = state.lsp.get(language);
+            return language + '：' + lspLabel(status.state) + (status.detail ? ' — ' + status.detail : '');
+          });
+          addNote(rows.join('\n'), 'brand');
+        }
+        return true;
+      }
+      case '/procs':
+        clear();
+        setInspectorTab('activity');
+        openRightPanel();
+        return true;
+      case '/copy':
+        clear();
+        copyLastReply();
+        return true;
+      case '/cancel':
+        clear();
+        sendCommand({ type: 'cancel' });
+        toast('正在停止当前回合…');
+        return true;
+      default:
+        clear();
+        addNote('未知命令：' + command + '，输入 /help 查看全部命令。', 'warn');
+        return true;
+    }
+  }
+
+  async function copyLastReply() {
+    if (!state.lastAssistant) {
+      toast('还没有可复制的回复', 'error');
+      return;
+    }
+    const ok = await copyText(state.lastAssistant);
+    toast(ok ? '已复制最后一条回复' : '复制失败，请手动选择文本', ok ? '' : 'error');
+  }
+
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
-    if (text === '/help') {
-      inputEl.value = '';
-      resizeInput();
-      addNote('命令：/help · /model <名称> · /cwd <目录> · /cancel。Enter 发送，Shift+Enter 换行。', 'brand');
-      return;
-    }
-    if (text === '/model' || text.startsWith('/model ')) {
-      if (!isConnected()) {
+    // A leading slash is always a command, like in the TUI: an unknown one is
+    // reported instead of being sent to the model as prose.
+    if (text.startsWith('/')) {
+      const command = text.split(' ')[0].toLowerCase();
+      const offline = !isConnected();
+      const local = ['/help', '/hotkeys', '/settings', '/copy'].includes(command);
+      if (offline && !local) {
         toast('尚未连接', 'error');
         return;
       }
-      const model = text.slice(6).trim();
-      if (!model) {
-        addNote('当前 agent 模型：' + (state.agentModel || 'None'), 'brand');
-        inputEl.value = '';
-        resizeInput();
-        return;
-      }
-      if (sendCommand({ type: 'set_agent_model', model })) {
-        inputEl.value = '';
-        resizeInput();
-      }
-      return;
-    }
-    if (text === '/cwd' || text.startsWith('/cwd ')) {
-      if (!isConnected()) {
-        toast('尚未连接', 'error');
-        return;
-      }
-      const path = text.slice(4).trim();
-      if (!path) {
-        addNote('当前工作目录：' + (state.cwd || '—'), 'brand');
-        inputEl.value = '';
-        resizeInput();
-        return;
-      }
-      if (sendCommand({ type: 'set_cwd', path })) {
-        inputEl.value = '';
-        resizeInput();
-      }
-      return;
-    }
-    if (text === '/cancel') {
-      if (sendCommand({ type: 'cancel' })) {
-        inputEl.value = '';
-        resizeInput();
-        toast('正在停止当前回合…');
-      }
+      runSlash(text);
       return;
     }
     if (state.busy) {
-      toast('当前回合仍在运行，可点击“停止”取消。');
+      state.queue.push(text);
+      inputEl.value = '';
+      resizeInput();
+      addNote('已排队（' + state.queue.length + '）：' + text, 'warn');
       return;
     }
     if (!isConnected()) {
@@ -3605,7 +4266,7 @@ try {
 
   function bindEvents() {
     $('themeBtn').addEventListener('click', toggleTheme);
-    $('settingsBtn').addEventListener('click', () => openSettings('model'));
+    $('settingsBtn').addEventListener('click', () => openSettings('session'));
     $('newBtn').addEventListener('click', () => {
       closeDrawers();
       connect(null);
@@ -3631,15 +4292,37 @@ try {
       if (isLeftDrawer()) openLeftDrawer();
       else setLeftCollapsed(false);
     });
-    $('wsPath').addEventListener('click', () => openSettings('cwd'));
-    $('modelChip').addEventListener('click', () => openSettings('model'));
-    $('compactChip').addEventListener('click', () => openSettings('compact'));
+    $('wsPath').addEventListener('click', () => openSettings('session'));
+    $('modelChip').addEventListener('click', () => openModelPicker('agent'));
+    $('compactChip').addEventListener('click', () => openModelPicker('compact'));
     $('treeRefresh').addEventListener('click', loadTree);
     $('refreshSessions').addEventListener('click', refreshSessions);
     $('reconnectBtn').addEventListener('click', () => {
       connect(state.sessionId || state.resumeId || null);
     });
-    $('settingsForm').addEventListener('submit', saveSettings);
+    $('settingsSave').addEventListener('click', saveToken);
+    $('setTabs').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-set-tab]');
+      if (!button) return;
+      state.settings.tab = button.dataset.setTab;
+      syncSettingsTabs();
+      renderSettings();
+    });
+    $('modelFilter').addEventListener('input', () => {
+      state.models.filter = $('modelFilter').value;
+      renderModels();
+    });
+    $('addModelBtn').addEventListener('click', openAddModel);
+    $('addModelNext').addEventListener('click', () => {
+      if (state.addModel.step === 'endpoint') discoverModels();
+      else saveDiscoveredModel();
+    });
+    $('addModelBack').addEventListener('click', () => {
+      state.addModel.step = 'endpoint';
+      syncAddModelStep();
+    });
+    $('addModelFilter').addEventListener('input', renderAddModelList);
+    $('rollbackConfirmBtn').addEventListener('click', confirmRollback);
     $('denyBtn').addEventListener('click', () => decideConsent(false));
     $('allowBtn').addEventListener('click', () => decideConsent(true));
     $('fileRefresh').addEventListener('click', () => {
@@ -3660,9 +4343,11 @@ try {
     document.querySelectorAll('.itab').forEach((button) => {
       button.addEventListener('click', () => setInspectorTab(button.dataset.itab));
     });
-    $('settingsModal').addEventListener('click', (event) => {
-      if (event.target === $('settingsModal')) closeModal('settingsModal');
-    });
+    for (const id of ['settingsModal', 'modelModal', 'addModelModal', 'rollbackModal']) {
+      $(id).addEventListener('click', (event) => {
+        if (event.target === $(id)) closeModal(id);
+      });
+    }
     inputEl.addEventListener('input', resizeInput);
     inputEl.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -3676,9 +4361,11 @@ try {
         decideConsent(false);
         return;
       }
-      if (!$('settingsModal').hidden) {
-        closeModal('settingsModal');
-        return;
+      for (const id of ['#settingsModal', '#modelModal', '#addModelModal', '#rollbackModal']) {
+        if (!$(id.slice(1)).hidden) {
+          closeModal(id.slice(1));
+          return;
+        }
       }
       if (document.body.classList.contains('left-open') || document.body.classList.contains('right-open')) {
         closeDrawers();
