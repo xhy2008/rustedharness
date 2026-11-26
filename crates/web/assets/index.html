@@ -1532,6 +1532,10 @@ try {
 
   /* ---------------- model picker / add model ---------------- */
   function openModelPicker(target) {
+    if (!isConnected()) {
+      toast('尚未连接，无法切换模型', 'error');
+      return;
+    }
     state.models.target = target === 'compact' ? 'compact' : 'agent';
     state.models.filter = '';
     $('modelFilter').value = '';
@@ -1708,6 +1712,10 @@ try {
 
   /* ---------------- rollback ---------------- */
   function openRollback() {
+    if (!isConnected()) {
+      toast('尚未连接，无法回滚', 'error');
+      return;
+    }
     state.rollbackTurn = null;
     $('rollbackConfirmBtn').disabled = true;
     $('rollbackError').hidden = true;
