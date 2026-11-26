@@ -390,7 +390,7 @@ appended to the tool result.
 | --- | --- |
 | `read` | Read text ranges from files, list a directory, attach an image, or fetch an `http(s)` URL as markdown. |
 | `write` | Create/overwrite a file, or append when it already exists. |
-| `edit` | Hashline anchored edits, optionally several per call. |
+| `edit` | Hashline anchored edits: one call patches one or more files. |
 | `glob` | Workspace file discovery (respects `.gitignore`). |
 | `grep` | Regex content search with glob filters, backed by `grep-searcher`. |
 | `bash` / `powershell` | Run commands in a pty; background mode returns a pid. Which one is chosen in `/settings` → **terminal** (Windows only). |
@@ -435,29 +435,43 @@ on PATH, so a WSL install cannot be mistaken for Git Bash.
 `read` returns lines tagged as `line#anchor|content`. Line numbers choose the
 position; the anchor is an xxHash32 of that line's normalized content, rendered
 in the alphabet `ZPMQVRWSNKTXJBYH`, and only confirms the line is still the one
-the model saw. `edit` accepts a batch:
+the model saw. `edit` takes a list of files, each with its own batch:
 
 ```json
 {
-  "path": "src/lib.rs",
-  "edits": [
-    { "op": "replace", "pos": "12#VQ", "lines": ["fn main() {}"] },
-    { "op": "insert_after", "pos": "18#KZ", "lines": ["// new"] }
-  ]
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "edits": [
+        { "op": "replace", "pos": "12#VQ", "lines": ["fn main() {}"] },
+        { "op": "insert_after", "pos": "18#KZ", "lines": ["// new"] }
+      ]
+    },
+    {
+      "path": "src/lib_test.rs",
+      "edits": [{ "op": "replace_text", "oldText": "old_name", "newText": "new_name", "all": true }]
+    }
+  ],
+  "dry_run": false
 }
 ```
 
 Anchor width defaults to 2 characters and can be raised to 4 with
-`edit.anchorWidth`. The primary ops are `replace`, `insert_before`,
-`insert_after`, and `delete`; `replace_text` with a unique `oldText`/`newText`
-is the fallback for agents that cannot use line anchors.
+`edit.anchorWidth`. The ops are `replace`, `insert_before`, `insert_after` and
+`delete`, all addressed by line number; `replace_text` is for text that has no
+line address yet, requiring a unique `oldText` unless `all` is set.
 
-If any anchor is stale, the whole batch is rejected with `E_STALE_ANCHOR`; no
-partial write occurs. Editing a line changes only that line's anchor; inserts
-and deletes shift later line numbers, so the edit result returns fresh anchors
-for the shifted range. Identical lines share an anchor because the hash covers
-only content, not neighbours. `write` into an existing file appends without
-destroying content. The append result message is exactly `文件已存在，内容已追加`.
+A multi-file call is one decision: every file is read and validated first, so a
+stale anchor anywhere rejects the call with `E_STALE_ANCHOR` and nothing is
+written - the workspace is never left half-patched. Positions are all relative
+to the file as it was on disk when the call started, which is what lets the ops
+be applied bottom-up without renumbering. If a file changed on disk after it was
+read, the call aborts with `E_STALE_SNAPSHOT` rather than clobbering it. Editing
+a line changes only that line's anchor; inserts and deletes shift later line
+numbers, so the result returns fresh anchors for the touched range, plus a
+unified diff and language-server diagnostics per file. `write` into an existing
+file appends without destroying content. The append result message is exactly
+`文件已存在，内容已追加`.
 
 ## Language servers
 

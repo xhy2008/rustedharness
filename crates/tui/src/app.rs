@@ -2846,14 +2846,30 @@ fn tool_summary(name: &str, raw: &str) -> String {
             _ => first_string(&value, raw),
         },
         "edit" => {
-            let count = value
-                .get("edits")
+            let files = value
+                .get("files")
                 .and_then(serde_json::Value::as_array)
-                .map(Vec::len);
-            match (text("path"), count) {
-                (Some(path), Some(n)) => format!("{path}  ({n} edit{})", plural(n)),
-                (Some(path), None) => path,
-                (None, _) => first_string(&value, raw),
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let edits: usize = files
+                .iter()
+                .map(|file| {
+                    file.get("edits")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len)
+                })
+                .sum();
+            match (files.len(), edits) {
+                (0, _) => first_string(&value, raw),
+                (1, n) => format!(
+                    "{}  ({n} edit{})",
+                    files[0]
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?"),
+                    plural(n)
+                ),
+                (m, n) => format!("{m} files  ({n} edit{})", plural(n)),
             }
         }
         "lsp" => match (text("op"), text("path")) {
@@ -3616,6 +3632,29 @@ mod tests {
         assert!(app.settings_items()[row].detail.contains("2048 px"));
         let stored = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
         assert!(stored.contains("2048"), "{stored}");
+    }
+
+    /// The tool card names the file for a single-file patch and counts files when
+    /// one call spans several.
+    #[test]
+    fn the_edit_card_summarises_every_file_in_the_call() {
+        let one = tool_summary(
+            "edit",
+            r#"{"files":[{"path":"src/lib.rs","edits":[{"op":"replace","pos":1},{"op":"delete","pos":2}]}]}"#,
+        );
+        assert_eq!(one, "src/lib.rs (2 edits)");
+        let many = tool_summary(
+            "edit",
+            r#"{"files":[{"path":"a.rs","edits":[{"op":"replace","pos":1}]},{"path":"b.rs","edits":[{"op":"replace","pos":3}]}]}"#,
+        );
+        assert_eq!(many, "2 files (2 edits)");
+        assert_eq!(
+            tool_summary(
+                "edit",
+                r#"{"files":[{"path":"a.rs","edits":[{"op":"delete","pos":1}]}]}"#
+            ),
+            "a.rs (1 edit)"
+        );
     }
 
     /// The web-search page selects a backend and offers a credential box only

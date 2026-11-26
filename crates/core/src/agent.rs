@@ -1301,11 +1301,13 @@ pub fn system_prompt(model: &str, instructions: Option<(&str, &str)>) -> String 
          edit position; the anchor verifies that line's content. Pass it, e.g. \
          pos=\"12#AB\", to `edit`. An edit changes only that line's anchor; inserts \
          and deletes shift line numbers, so use the anchors returned by the edit.\n\
-         3. Editing: prefer `edit` with line-numbered edits[] applied bottom-up. \
+         3. Editing: `edit` takes `files: [{{path, edits: []}}]` and patches every \
+         file in one call, so a refactor across files is one call. Positions are \
+         line numbers valid against the file as it is now, applied bottom-up; \
          `lines` is the new content only: strip the `line#anchor|` prefix from \
-         read/grep output and never paste diff markers into it. A stale anchor rejects \
-         the whole batch (E_STALE_ANCHOR) and returns the current anchor table; write \
-         nothing in that case and re-read.\n\
+         read/grep output and never paste diff markers into it. Any stale anchor \
+         rejects the whole call (E_STALE_ANCHOR) and returns the current anchor \
+         table; nothing is written in that case, so re-read and retry.\n\
          4. Verify changes (build/tests) before claiming success. Report failures \
          honestly and keep responses concise.\n\
          5. Long output: a tool result too large to inline is replaced by the path \
@@ -1990,6 +1992,71 @@ mod tests {
         assert!(agent.ctx.read().unwrap().resolver.resolve(path).is_ok());
         agent.shutdown().await;
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A refactor that spans files is one call. Both files are written, and the
+    /// positions are relative to each file's own pre-edit snapshot.
+    #[tokio::test]
+    async fn one_edit_call_patches_several_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a1\na2\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b1\nb2\n").unwrap();
+        let (agent, _backend) = run_one_tool(
+            dir.path(),
+            test_config(dir.path()),
+            "edit",
+            json!({ "files": [
+                { "path": "a.txt", "edits": [
+                    { "op": "replace", "pos": 2, "lines": ["A2"] }
+                ]},
+                { "path": "b.txt", "edits": [
+                    { "op": "insert_after", "pos": 1, "lines": ["B1.5"] },
+                    { "op": "delete", "pos": 2 }
+                ]}
+            ]}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "a1\nA2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "b1\nB1.5\n"
+        );
+        agent.shutdown().await;
+    }
+
+    /// One bad file rejects the call before any file is written: a multi-file
+    /// refactor never leaves the workspace half-patched.
+    #[tokio::test]
+    async fn a_stale_anchor_in_one_file_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a1\na2\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b1\nb2\n").unwrap();
+        let (agent, _backend) = run_one_tool(
+            dir.path(),
+            test_config(dir.path()),
+            "edit",
+            json!({ "files": [
+                { "path": "a.txt", "edits": [
+                    { "op": "replace", "pos": 2, "lines": ["A2"] }
+                ]},
+                { "path": "b.txt", "edits": [
+                    { "op": "replace", "pos": "2#ZZ", "lines": ["B2"] }
+                ]}
+            ]}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "a1\na2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "b1\nb2\n"
+        );
+        agent.shutdown().await;
     }
 
     /// A tool whose result *is* the answer - `read` above all - is truncated

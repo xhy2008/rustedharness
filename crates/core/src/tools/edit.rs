@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,17 +31,27 @@ pub struct EditOpArgs {
     /// Replacement/inserted raw lines. Omit for delete. Never include a
     /// `line#anchor|` prefix or unified-diff `+/-` markers.
     pub lines: Option<Vec<String>>,
-    /// Unique substring for op=replace_text.
+    /// Substring for op=replace_text. Must be unique unless `all` is set.
     #[serde(rename = "oldText")]
     pub old_text: Option<String>,
     #[serde(rename = "newText")]
     pub new_text: Option<String>,
+    /// op=replace_text only: replace every occurrence instead of requiring a
+    /// unique one.
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct EditFileArgs {
+    pub path: String,
+    pub edits: Vec<EditOpArgs>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EditArgs {
-    pub path: String,
-    pub edits: Vec<EditOpArgs>,
+    /// One entry per file. A refactor that spans several files is one call and
+    /// one decision: either every file's batch validates or nothing is written.
+    pub files: Vec<EditFileArgs>,
     /// Validate and produce a diff without touching disk.
     pub dry_run: Option<bool>,
 }
@@ -53,18 +65,21 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> String {
-        "Apply one or more line-numbered patches to an existing file. Each edit is \
-         {op: replace|insert_before|insert_after|delete|replace_text, pos: line or \
-         \"line#anchor\", end?, lines?, oldText?, newText?}. Line numbers choose the \
-         position; an anchor verifies that line's current content. All edits are \
-         validated against one pre-edit snapshot and applied bottom-up; any stale anchor rejects \
-         the whole batch with E_STALE_ANCHOR and the current anchor table. replace_text \
-         uses oldText/newText and must be the ONLY edit in a call; mixing it with any \
-         other edit (or several replace_text ops) fails with E_INVALID_PATCH. `lines[]` is \
-         the new content only: never paste the `line#anchor|` prefix from `read`/`grep`, \
-         or unified-diff `+/-` markers, into it. Anchors belong only in `pos`/`end` as \
-         `\"12#AB\"`. Returns a unified diff, fresh anchors, and LSP diagnostics when \
-         available. dry_run=true writes nothing."
+        "Patch one or more files: {files: [{path, edits: [...]}], dry_run?}. Each edit \
+         is {op: replace|insert_before|insert_after|delete|replace_text, pos: line or \
+         \"line#anchor\", end?, lines?, oldText?, newText?, all?}. Line numbers choose \
+         the position and refer to the file as it is on disk now - the same snapshot \
+         for every edit in the batch - and an anchor verifies that line's current \
+         content. Edits are applied bottom-up, so a later edit may address a line above \
+         one already patched without adjusting numbers. Any stale anchor rejects the \
+         whole call with E_STALE_ANCHOR and the current anchor table; every file in the \
+         call is validated before any is written, so a multi-file call is all or \
+         nothing. replace_text uses oldText/newText, needs a unique oldText unless \
+         all=true, and must be the only edit for that file. `lines[]` is the new \
+         content only: never paste the `line#anchor|` prefix from `read`/`grep`, or \
+         unified-diff `+/-` markers, into it. Anchors belong only in `pos`/`end` as \
+         `\"12#AB\"`. Returns a unified diff per file, fresh anchors, and LSP \
+         diagnostics when available. dry_run=true writes nothing."
             .to_string()
     }
 
@@ -74,129 +89,186 @@ impl Tool for EditTool {
 
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let args: EditArgs = parse_args(args)?;
-        if args.edits.is_empty() {
-            return Err(HarnessError::tool("E_INVALID_PATCH", "edits[] is empty"));
+        if args.files.is_empty() {
+            return Err(HarnessError::tool("E_INVALID_PATCH", "files[] is empty"));
         }
-        if let Some(max) = ctx.config.edit.max_ops_per_call {
-            if args.edits.len() > max {
+        let dry_run = args.dry_run.unwrap_or(false);
+        let prepared = prepare_files(ctx, &args.files)?;
+
+        if prepared.iter().all(|file| !file.applied.changed) {
+            return no_changes(ctx, &prepared, dry_run);
+        }
+        for file in prepared.iter().filter(|file| file.applied.changed) {
+            ctx.noop.reset(&file.rel);
+        }
+        if dry_run {
+            let mut content = String::from("dry_run: no files were written\n");
+            for file in &prepared {
+                content.push_str(&render(file));
+            }
+            let files: Vec<Value> = prepared
+                .iter()
+                .map(|file| {
+                    json!({
+                        "path": file.rel,
+                        "changed": file.applied.changed,
+                        "lines_added": file.applied.lines_added,
+                        "lines_removed": file.applied.lines_removed,
+                    })
+                })
+                .collect();
+            return Ok(ToolOutput::ok(content).with_metadata(json!({
+                "changed": true,
+                "dry_run": true,
+                "files": files,
+            })));
+        }
+
+        // Every file is validated before any is written, and a file that changed
+        // on disk since it was read aborts the whole call: a multi-file refactor
+        // must not leave the workspace half-patched.
+        for file in &prepared {
+            let current = std::fs::read(&file.path)?;
+            if current != file.raw {
                 return Err(HarnessError::tool(
-                    "E_INVALID_PATCH",
+                    "E_STALE_SNAPSHOT",
                     format!(
-                        "{} edits supplied but edit.max_ops_per_call={max}; send at most {max} \
-                         edit(s) per call",
-                        args.edits.len()
+                        "{} changed on disk after the snapshot was read; re-read it and retry",
+                        file.rel
                     ),
                 ));
             }
         }
-        let path = ctx.resolver.resolve_existing(&args.path)?;
+        let mut content = String::new();
+        let mut files: Vec<Value> = Vec::new();
+        for file in prepared.iter().filter(|file| file.applied.changed) {
+            let applied = &file.applied;
+            let new_text = reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline);
+            atomic_write(&file.path, new_text.as_bytes(), true)?;
+            content.push_str(&render(file));
+            let diagnostics = append_diagnostics(ctx, &file.path, &mut content).await;
+            files.push(json!({
+                "path": file.rel,
+                "lines_added": applied.lines_added,
+                "lines_removed": applied.lines_removed,
+                "diagnostics": diagnostics,
+            }));
+        }
+        Ok(ToolOutput::ok(content).with_metadata(json!({
+            "changed": true,
+            "dry_run": false,
+            "files": files,
+        })))
+    }
+}
+
+/// One file of a prepared batch: read, decoded and validated, but not written.
+struct PreparedFile {
+    path: PathBuf,
+    rel: String,
+    raw: Vec<u8>,
+    applied: Applied,
+}
+
+/// Read and validate every file of the call. Nothing touches disk here, which is
+/// what makes a batch all-or-nothing.
+fn prepare_files(ctx: &ToolContext, files: &[EditFileArgs]) -> Result<Vec<PreparedFile>> {
+    let width = ctx.config.edit.anchor_width;
+    let mut prepared = Vec::with_capacity(files.len());
+    for file in files {
+        if file.edits.is_empty() {
+            return Err(HarnessError::tool(
+                "E_INVALID_PATCH",
+                format!("{}: edits[] is empty", file.path),
+            ));
+        }
+        if let Some(max) = ctx.config.edit.max_ops_per_call {
+            if file.edits.len() > max {
+                return Err(HarnessError::tool(
+                    "E_INVALID_PATCH",
+                    format!(
+                        "{}: {} edits supplied but edit.max_ops_per_call={max}; send at most \
+                         {max} edit(s) per file",
+                        file.path,
+                        file.edits.len()
+                    ),
+                ));
+            }
+        }
+        let path = ctx.resolver.resolve_existing(&file.path)?;
+        let rel = ctx.rel(&path);
         if path.is_dir() {
             return Err(HarnessError::tool(
                 "E_IS_DIR",
-                format!("{} is a directory", ctx.rel(&path)),
+                format!("{rel} is a directory"),
             ));
         }
         let raw = std::fs::read(&path)?;
         if crate::tools::fs_tools::is_binary(&raw) {
             return Err(HarnessError::tool(
                 "E_BINARY",
-                format!("refusing to edit binary file {}", ctx.rel(&path)),
+                format!("refusing to edit binary file {rel}"),
             ));
         }
-        // `is_binary` already rejects invalid UTF-8; keep this explicit so the
-        // edit path never turns undecodable bytes into replacement characters.
-        let original = std::str::from_utf8(&raw)
-            .map_err(|_| {
-                HarnessError::tool(
-                    "E_BINARY",
-                    format!("refusing to edit non-UTF-8 file {}", ctx.rel(&path)),
-                )
-            })?
-            .to_string();
-        let width = ctx.config.edit.anchor_width;
+        let original = std::str::from_utf8(&raw).map_err(|_| {
+            // `is_binary` already rejects invalid UTF-8; keep this explicit so
+            // the edit path never turns undecodable bytes into replacement
+            // characters.
+            HarnessError::tool("E_BINARY", format!("refusing to edit non-UTF-8 file {rel}"))
+        })?;
         let applied = apply_edits(
-            &original,
-            &args.edits,
+            original,
+            &file.edits,
             width,
             ctx.config.edit.enable_replace_text,
         )?;
-
-        if !applied.changed {
-            let fingerprint = format!(
-                "{:x}",
-                xxhash_rust::xxh32::xxh32(
-                    format!(
-                        "{}:{}",
-                        ctx.rel(&path),
-                        serde_json::to_string(&args.edits).unwrap_or_default()
-                    )
-                    .as_bytes(),
-                    0
-                )
-            );
-            let count = ctx.noop.record(&ctx.rel(&path), &fingerprint);
-            if count >= 3 {
-                return Err(HarnessError::tool(
-                    "E_NOOP_LOOP",
-                    format!(
-                        "the same no-op edit was applied {count} times in a row; stop repeating it \
-                         and inspect the current file with `read`"
-                    ),
-                ));
-            }
-            return Ok(ToolOutput::ok(format!(
-                "no changes (dry_run={})\n{}\n--- Anchors {}# ---\n{}",
-                args.dry_run.unwrap_or(false),
-                applied.diff,
-                applied.anchor_start,
-                applied.old_anchor_table
-            ))
-            .with_metadata(json!({ "changed": false, "noop_count": count })));
-        }
-        ctx.noop.reset(&ctx.rel(&path));
-
-        if args.dry_run.unwrap_or(false) {
-            return Ok(ToolOutput::ok(format!(
-                "dry_run: no files were written\n{}\n--- Anchors {}-{} ---\n{}",
-                applied.diff, applied.anchor_start, applied.anchor_end, applied.anchor_table
-            ))
-            .with_metadata(json!({
-                "changed": true,
-                "dry_run": true,
-                "path": ctx.rel(&path),
-            })));
-        }
-
-        // 3-way guard: if the file changed between read and write, refuse rather
-        // than clobber an external edit.
-        let current = std::fs::read(&path)?;
-        if current != raw {
-            return Err(HarnessError::tool(
-                "E_STALE_SNAPSHOT",
-                format!(
-                    "{} changed on disk after the snapshot was read; re-read it and retry",
-                    ctx.rel(&path)
-                ),
-            ));
-        }
-
-        let new_text = reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline);
-        atomic_write(&path, new_text.as_bytes(), true)?;
-
-        let mut content = format!(
-            "{}\n--- Anchors {}-{} ---\n{}",
-            applied.diff, applied.anchor_start, applied.anchor_end, applied.anchor_table
-        );
-        let diagnostics = append_diagnostics(ctx, &path, &mut content).await;
-        Ok(ToolOutput::ok(content).with_metadata(json!({
-            "changed": true,
-            "dry_run": false,
-            "path": ctx.rel(&path),
-            "lines_added": applied.lines_added,
-            "lines_removed": applied.lines_removed,
-            "diagnostics": diagnostics,
-        })))
+        prepared.push(PreparedFile {
+            path,
+            rel,
+            raw,
+            applied,
+        });
     }
+    Ok(prepared)
+}
+
+/// Diff plus the anchors the next edit can address, tagged with the file it
+/// belongs to.
+fn render(file: &PreparedFile) -> String {
+    let applied = &file.applied;
+    if !applied.changed {
+        return format!("=== {} ===\nno changes\n", file.rel);
+    }
+    format!(
+        "=== {} ===\n{}\n--- Anchors {}-{} ---\n{}",
+        file.rel, applied.diff, applied.anchor_start, applied.anchor_end, applied.anchor_table
+    )
+}
+
+/// A batch that left every file alone is reported but writes nothing. Repeating
+/// the same one is a loop the model has to break itself.
+fn no_changes(ctx: &ToolContext, prepared: &[PreparedFile], dry_run: bool) -> Result<ToolOutput> {
+    let mut content = format!("no changes (dry_run={dry_run})\n");
+    let mut counts = Vec::new();
+    for file in prepared {
+        let fingerprint = format!("{:x}", xxhash_rust::xxh32::xxh32(file.rel.as_bytes(), 0));
+        counts.push(ctx.noop.record(&file.rel, &fingerprint));
+        content.push_str(&format!(
+            "=== {} ===\nno changes\n--- Anchors {}# ---\n{}",
+            file.rel, file.applied.anchor_start, file.applied.old_anchor_table
+        ));
+    }
+    let repeated = counts.iter().copied().max().unwrap_or(0);
+    if repeated >= 3 {
+        return Err(HarnessError::tool(
+            "E_NOOP_LOOP",
+            format!(
+                "the same no-op edit was applied {repeated} times in a row; stop repeating it and \
+                 inspect the current file with `read`"
+            ),
+        ));
+    }
+    Ok(ToolOutput::ok(content).with_metadata(json!({ "changed": false })))
 }
 
 #[derive(Debug)]
@@ -297,14 +369,23 @@ pub fn apply_edits(
             ));
         }
         let hits = original.matches(old).count();
-        if hits != 1 {
+        let every = op.all.unwrap_or(false);
+        if hits == 0 || (!every && hits != 1) {
             return Err(HarnessError::tool_details(
                 "E_INVALID_PATCH",
-                format!("oldText must match exactly once; found {hits} matches"),
+                if every {
+                    "oldText matched nothing".to_string()
+                } else {
+                    format!("oldText must match exactly once; found {hits} matches")
+                },
                 json!({ "matches": hits }),
             ));
         }
-        let new_text = original.replacen(old, new, 1);
+        let new_text = if every {
+            original.replace(old, new)
+        } else {
+            original.replacen(old, new, 1)
+        };
         let new_lines: Vec<String> = new_text.lines().map(|s| s.to_string()).collect();
         let changed = new_text != original;
         let (start, end) = changed_range(&original_lines, &new_lines);
@@ -618,6 +699,7 @@ mod tests {
             lines: Some(lines.iter().map(|s| s.to_string()).collect()),
             old_text: None,
             new_text: None,
+            all: None,
         }
     }
 
@@ -685,6 +767,7 @@ mod tests {
             lines: Some(vec!["x".into()]),
             old_text: None,
             new_text: None,
+            all: None,
         };
         let err = apply_edits(SRC, &[bad], 2, true).unwrap_err();
         assert_eq!(err.code(), "E_STALE_ANCHOR");
@@ -700,6 +783,7 @@ mod tests {
             lines: Some(vec!["TWO".into()]),
             old_text: None,
             new_text: None,
+            all: None,
         };
         assert!(apply_edits(SRC, &[edit], 2, true).is_ok());
     }
@@ -722,42 +806,44 @@ mod tests {
         assert_eq!(err.code(), "E_INVALID_PATCH");
     }
 
+    fn text_op(old: &str, new: &str, all: Option<bool>) -> EditOpArgs {
+        EditOpArgs {
+            op: EditOpKind::ReplaceText,
+            pos: json!(1),
+            end: None,
+            lines: None,
+            old_text: Some(old.into()),
+            new_text: Some(new.into()),
+            all,
+        }
+    }
+
     #[test]
-    fn replace_text_must_be_unique() {
-        let edit = EditOpArgs {
-            op: EditOpKind::ReplaceText,
-            pos: json!(1),
-            end: None,
-            lines: None,
-            old_text: Some("o".into()),
-            new_text: Some("0".into()),
-        };
-        let err = apply_edits(SRC, &[edit], 2, true).unwrap_err();
-        assert_eq!(err.code(), "E_INVALID_PATCH");
-        let edit = EditOpArgs {
-            op: EditOpKind::ReplaceText,
-            pos: json!(1),
-            end: None,
-            lines: None,
-            old_text: Some("three".into()),
-            new_text: Some("THREE".into()),
-        };
-        let applied = apply_edits(SRC, &[edit], 2, true).unwrap();
+    fn replace_text_must_be_unique_unless_all_is_set() {
+        assert_eq!(
+            apply_edits(SRC, &[text_op("o", "0", None)], 2, true)
+                .unwrap_err()
+                .code(),
+            "E_INVALID_PATCH"
+        );
+        // `all` turns the same non-unique oldText into a global rename.
+        let applied = apply_edits(SRC, &[text_op("o", "0", Some(true))], 2, true).unwrap();
+        assert!(!applied.new_lines.join("\n").contains('o'));
+        let applied = apply_edits(SRC, &[text_op("three", "THREE", None)], 2, true).unwrap();
         assert!(applied.new_lines.contains(&"THREE".to_string()));
+        // Nothing to rename is an error even with `all`.
+        assert_eq!(
+            apply_edits(SRC, &[text_op("absent", "x", Some(true))], 2, true)
+                .unwrap_err()
+                .code(),
+            "E_INVALID_PATCH"
+        );
     }
 
     #[test]
     fn replace_text_preserves_crlf() {
         let src = "a\r\nb\r\nc\r\n";
-        let edit = EditOpArgs {
-            op: EditOpKind::ReplaceText,
-            pos: json!(1),
-            end: None,
-            lines: None,
-            old_text: Some("b".into()),
-            new_text: Some("B".into()),
-        };
-        let applied = apply_edits(src, &[edit], 2, true).unwrap();
+        let applied = apply_edits(src, &[text_op("b", "B", None)], 2, true).unwrap();
         assert!(applied.crlf);
         assert!(applied.trailing_newline);
     }

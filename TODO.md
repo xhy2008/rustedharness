@@ -1,5 +1,25 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：`edit` 支持多文件与全局替换（2026-11-26）
+
+起因：我这一轮干活大量用 python heredoc 改文件，问了一句"哈希行号编辑能不能更顺手"。
+
+1. **一次调用改多个文件**：`edit` 的参数从 `{path, edits}` 变成
+   `{files: [{path, edits: [...]}], dry_run?}`（不再是兼容两套写法，只有这一种）。
+   `prepare_files` 先把每个文件读出来、验证整批 anchor，全部通过后才写盘；中途文件被外部改过
+   就整体 `E_STALE_SNAPSHOT`。所以最后一个文件 anchor 过期时，前面的文件一个字节都不会动——
+   多文件重构不会留下"改了一半"的工作区。
+2. **`replace_text` 增加 `all`**：不设时仍要求 `oldText` 唯一（安全）；设了就把全文所有出现
+   替换掉，跨文件改名终于不必为每处出现写一条 edit。`all` 下匹配 0 处仍然报错，避免静默空转。
+3. 结果按文件分块返回：`=== 路径 ===` + unified diff + 改动范围的 anchor 表 + LSP 诊断，
+   metadata 里是 `files: [{path, lines_added, lines_removed, diagnostics}]`。
+   TUI 工具卡片：单文件显示 `a.rs (2 edits)`，多文件显示 `2 files (2 edits)`。
+4. 为什么这不是妥协而是更合适：字符串匹配要我复现**原始字节**（缩进、上下文、唯一性），
+   而行号+anchor 只要行号和 2 字符校验；anchor 过期会返回当前 anchor 表而不是"找不到 oldText"；
+   返回的 diff + 诊断省掉一次确认性 `read`。真正逼我用 python 的是"多文件"和"跨文件改名"两件事，
+   现在两者都在工具里了。
+
+
 ## 已完成：长输出落盘 / AGENTS.md / 图片读取（2026-11-25）
 
 1. **长工具输出落盘**：哪些工具算"输出是日志"由工具自己声明（`Tool::spills_long_output`）——

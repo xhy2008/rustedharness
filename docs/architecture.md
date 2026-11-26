@@ -184,6 +184,14 @@ applies nothing unless the whole batch is valid. The file is re-read before
 writing to detect external changes. `write` appends to existing files instead of
 truncating.
 
+A call carries `files: [{path, edits}]`, so a refactor across files is one
+call and one decision: `prepare_files` reads and validates every file into
+`PreparedFile` values without touching the disk, all snapshots are re-checked
+after that, and only then is anything written. A stale anchor in the last file
+therefore leaves the first file untouched. `replace_text` gained `all`, which is
+what makes a symbol rename across a tree a single op instead of one edit per
+occurrence.
+
 ### Token accounting
 
 `token.rs` records only the `usage` object returned by the provider. It keeps
