@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::http::{header, header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -120,10 +120,17 @@ fn open_browser(url: &str) {
     }
 }
 
+/// The same artwork the desktop bundle ships, so the browser tab and the native
+/// window are recognisably the same application.
+async fn favicon() -> impl IntoResponse {
+    const ICO: &[u8] = include_bytes!("../../gui/icons/icon.ico");
+    ([(header::CONTENT_TYPE, "image/x-icon")], ICO)
+}
+
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/favicon.ico", get(favicon))
         .route("/api/health", get(health))
         .route("/api/config", get(config_info))
         .route("/api/tree", get(workspace_tree))

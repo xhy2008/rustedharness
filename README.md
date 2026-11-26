@@ -590,7 +590,10 @@ they reject traversal and symlinks, skip hidden and build directories, cap
 listings at 500 entries, and return binary/oversized files without rendering.
 
 The Tauri GUI starts the same server on an ephemeral loopback port and points a
-native window at it, so the desktop and browser experiences stay identical.
+native window at it, so the desktop and browser experiences stay identical. It
+ships one image - a rusted saddle, the project's namesake - as the window and
+bundle icon (`crates/gui/icons/`), and the browser build serves the same
+artwork as its favicon.
 
 ## MCP
 

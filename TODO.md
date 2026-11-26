@@ -1,5 +1,22 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：GUI 图标（2026-11-26）
+
+CI 的 GUI 任务一直红在 `tauri::generate_context!()` 找不到 `crates/gui/icons/icon.png`。
+
+1. 用本机 ComfyUI 的 `image_qwen_image_2_1_t2i` 工作流（Qwen-Image 2.1，1024²，25 步，CFG 1，
+   euler/simple）出了三个候选，选定 seed 7：一具**生锈的西式马鞍**，扁平矢量贴纸风格，
+   深棕皮革开裂、鞍头/马镫/肚带扣上覆橙褐铁锈，厚重深棕描边，画满画面，无文字。
+   素材与提示词记在 `crates/gui/icons/README.md`，可复现。
+2. Qwen 这次给的是不透明近白背景（同工作流 seed 1 却是真透明），所以**不靠提示词赌透明度**：
+   `make_icon.py` 从四周 flood fill 掉背景（容差 48），再按 alpha 裁紧、留 6% 边距、缩到 1024，
+   派生 32/128/256/512 PNG 与多尺寸 ICO（PIL 的 ICO 只会缩放 base，传 `append_images`
+   会静默只留一帧——踩过一次）。
+3. `tauri.conf.json` 补 `bundle.icon`（bundle 仍 `active: false`，只影响窗口/图标嵌入）。
+   浏览器端 `favicon.ico` 从 204 改为直接返回同一份 ICO（`include_bytes!`），
+   于是标签页和原生窗口是同一个标志。
+
+
 ## 已完成：`edit` 支持多文件与全局替换（2026-11-26）
 
 起因：我这一轮干活大量用 python heredoc 改文件，问了一句"哈希行号编辑能不能更顺手"。
