@@ -610,11 +610,12 @@ impl Agent {
         Ok(())
     }
 
-    /// Largest image `read` will attach. A bigger file is downscaled to fit
-    /// before it is uploaded, so this is a spend/quality knob, not a filter.
-    pub fn set_image_max_bytes(&self, bytes: usize) -> Result<()> {
+    /// Longest edge, in pixels, an image `read` attaches may have. A bigger
+    /// image is downscaled to fit before it is uploaded, so this is a
+    /// spend/legibility knob, not a filter.
+    pub fn set_image_max_edge(&self, pixels: u32) -> Result<()> {
         self.config()
-            .save_setting(&["image", "maxBytes"], json!(bytes))?;
+            .save_setting(&["image", "maxEdge"], json!(pixels))?;
         self.reload_config()
     }
 
@@ -965,8 +966,11 @@ impl Agent {
                         ..Default::default()
                     },
                 };
-                let content =
-                    crate::spill::inline_or_spill(&call.function.name, &call.id, &output.content);
+                let content = if registry.spills_long_output(&call.function.name) {
+                    crate::spill::inline_or_spill(&call.function.name, &call.id, &output.content)
+                } else {
+                    truncate_tool_output(&output.content)
+                };
                 let _ = self.events.send(HarnessEvent::ToolResult {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -1269,6 +1273,20 @@ impl Agent {
 /// attempts are allowed, so a rate-limited provider is not hammered faster
 /// than one request every three seconds.
 pub const RATE_LIMIT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Cap for tools whose result is the value the model asked for - a file read, a
+/// language-server answer. They are cut instead of spilled: the model asked for
+/// the content itself, and a log file would only make it fetch the same bytes
+/// twice. At 256k characters this is well above every such tool's own window.
+fn truncate_tool_output(content: &str) -> String {
+    const MAX_CHARS: usize = 256_000;
+    if content.chars().count() <= MAX_CHARS {
+        return content.to_string();
+    }
+    let mut out: String = content.chars().take(MAX_CHARS).collect();
+    out.push_str("\n... [tool output truncated by harness]");
+    out
+}
 
 /// System prompt shared by every frontend. Tool-specific details live in the
 /// tool descriptions; this only carries cross-tool policy.
@@ -1930,23 +1948,20 @@ mod tests {
         (agent, backend)
     }
 
-    /// Output past the inline limit is not cut in half and it is not sent
-    /// either: the model gets the path of a log file holding all of it, and the
-    /// resolver lets it read that file even though it lives outside the
-    /// workspace.
+    /// A log-producing tool (the shell) hands over a file instead of its output:
+    /// the model gets the path, the file has everything, and the resolver lets it
+    /// read that path even though it lives outside the workspace.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn long_tool_output_is_spilled_to_a_readable_log() {
+    async fn a_long_shell_result_becomes_a_log_file() {
         let dir = tempfile::tempdir().unwrap();
-        let body = "the line that matters\n".repeat(20_000);
-        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
         let (agent, backend) = run_one_tool(
             dir.path(),
             test_config(dir.path()),
-            "read",
-            json!({ "path": "big.txt", "raw": true, "max_bytes": 600_000 }),
+            "bash",
+            json!({ "command": "seq 1 40000 | sed 's/$/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/'" }),
         )
         .await;
-        // The second request carries the tool result the model would see.
         let content = {
             let requests = backend.requests.lock().unwrap();
             requests[1]
@@ -1969,17 +1984,50 @@ mod tests {
             .find(|word| word.contains("rustedharness-logs") && word.ends_with(".log"))
             .expect("log path in the notice");
         let logged = std::fs::read_to_string(path).unwrap();
-        assert!(
-            logged.len() >= body.len(),
-            "{} < {} bytes in {path}",
-            logged.len(),
-            body.len()
-        );
-        assert!(logged.ends_with("the line that matters\n"));
+        assert!(logged.contains("exit_code: 0"), "{}", &logged[..200]);
+        assert!(logged.contains("40000"), "the tail must be in the log");
         // And the agent can actually read it back through the resolver.
         assert!(agent.ctx.read().unwrap().resolver.resolve(path).is_ok());
         agent.shutdown().await;
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A tool whose result *is* the answer - `read` above all - is truncated
+    /// rather than spilled: the model asked for those bytes, and pointing it at
+    /// a copy would only make it fetch the same thing twice.
+    #[tokio::test]
+    async fn a_long_read_is_truncated_and_never_spilled() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "the line that matters\n".repeat(20_000);
+        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+        let (agent, backend) = run_one_tool(
+            dir.path(),
+            test_config(dir.path()),
+            "read",
+            json!({ "path": "big.txt", "raw": true, "max_bytes": 600_000 }),
+        )
+        .await;
+        let content = {
+            let requests = backend.requests.lock().unwrap();
+            requests[1]
+                .messages
+                .iter()
+                .find(|message| message.role == Role::Tool)
+                .expect("tool result")
+                .content
+                .clone()
+                .unwrap_or_default()
+        };
+        assert!(!content.contains("rustedharness-logs"), "{content:.200}");
+        assert!(content.contains("[tool output truncated by harness]"));
+        assert_eq!(
+            content
+                .trim_end_matches("\n... [tool output truncated by harness]")
+                .chars()
+                .count(),
+            256_000
+        );
+        agent.shutdown().await;
     }
 
     /// `read` on an image attaches it as a user message once the tool results

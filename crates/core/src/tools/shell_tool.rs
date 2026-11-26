@@ -41,6 +41,12 @@ impl Tool for ShellTool {
         schema_of::<ShellArgs>()
     }
 
+    /// A build log is a log: it belongs in a file the model can grep, not in
+    /// the conversation.
+    fn spills_long_output(&self) -> bool {
+        true
+    }
+
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let args: ShellArgs = parse_args(args)?;
         if args.command.trim().is_empty() {
@@ -133,6 +139,10 @@ impl Tool for AwaitTool {
 
     fn schema(&self) -> Value {
         schema_of::<AwaitArgs>()
+    }
+
+    fn spills_long_output(&self) -> bool {
+        true
     }
 
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {

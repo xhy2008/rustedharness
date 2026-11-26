@@ -125,26 +125,35 @@ This is the only tool-level policy: all tools are auto-allowed otherwise.
 
 ### Spilled tool output
 
-A tool result above `spill::MAX_INLINE_BYTES` (128 KiB) never enters the
-conversation. The full text is written to
-`<temp>/rustedharness-logs/<millis>-<tool>-<call id>.log` and the tool message is
-replaced by a notice naming that file, which the model then `grep`s and `read`s.
-This is deliberately a log file and not a truncated string: build systems print
-the error at the end, and a head-truncated log keeps everything except the part
-that failed. Logs older than a day are pruned when a new one is written. A
-failed write falls back to the head of the output plus the error, so the model
-is never left believing a tool returned nothing.
+Tools declare whether a long result is a log or a value
+(`Tool::spills_long_output`). The shell, `await`, `lsp` and `web_search` say
+yes: their output is searched, not read, and cutting it loses the end - the
+failure line of a build, the last diagnostic of a file. For those, a result
+above `spill::MAX_INLINE_BYTES` (128 KiB) never enters the conversation: the
+full text is written to `<temp>/rustedharness-logs/<millis>-<tool>-<call id>.log`
+and the tool message becomes a notice naming that file, which the model then
+`grep`s and `read`s. Logs older than a day are pruned when a new one is written,
+and a failed write falls back to the head of the output plus the error so the
+model is never left believing a tool returned nothing.
+
+Everything else - `read` above all, but also `grep`, `glob` and MCP tools - is
+truncated at 256k characters by `truncate_tool_output`. There the result is the
+answer the model asked for, and a pointer to a copy of the file it just asked
+for would only cost it a second request.
 
 ### Images
 
 `imaging.rs` decides what `read` does with an image. It sniffs the format with
 the `image` crate (png, jpeg, gif, webp, bmp, ico, tiff, tga, dds, hdr, exr,
 pnm, qoi, farbfeld - everything the crate decodes in pure Rust), passes the file
-through untouched when it is already under `image.maxBytes` and in a format
-providers accept, and otherwise downscales it: each round re-derives the scale
-from the real encoded size, JPEG stays JPEG (quality 85, alpha flattened onto
-white), everything else becomes PNG. The tool result carries the caption and
-the bytes stay in `ToolOutput::images`, so they never touch the event stream.
+through untouched when its longest edge already fits `image.maxEdge` and the
+format is one providers accept, and otherwise scales it once to that edge with
+the aspect ratio kept: JPEG stays JPEG (quality 85, alpha flattened onto
+white), everything else becomes PNG. The limit is a pixel count and not a byte
+count because pixels are what the provider charges for and what makes text
+legible; a 1568 px image is comfortably inside every provider's byte cap in
+either format. The tool result carries the caption and the bytes stay in
+`ToolOutput::images`, so they never touch the event stream.
 The agent loop attaches them as a user message *after* the batch of tool
 results, because providers only accept images from the user role and a user
 message between two tool results would break call/result pairing. The message

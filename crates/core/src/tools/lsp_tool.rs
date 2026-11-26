@@ -78,6 +78,13 @@ impl Tool for LspTool {
         schema_of::<LspArgs>()
     }
 
+    /// Diagnostics for a whole file, or a symbol tree, can run to pages. Unlike
+    /// a `read` window, the model cannot ask for "the rest" of a diagnostic
+    /// list, so the result is spilt to a file it can grep rather than cut.
+    fn spills_long_output(&self) -> bool {
+        true
+    }
+
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let args: LspArgs = parse_args(args)?;
         if args.op.is_maintenance() {

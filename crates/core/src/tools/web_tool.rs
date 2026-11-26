@@ -42,6 +42,10 @@ impl Tool for WebSearchTool {
         schema_of::<WebSearchArgs>()
     }
 
+    fn spills_long_output(&self) -> bool {
+        true
+    }
+
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput> {
         let args: WebSearchArgs = parse_args(args)?;
         let query = args.query.trim();

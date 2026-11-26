@@ -150,6 +150,15 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> String;
     fn schema(&self) -> Value;
+
+    /// Whether a long result is a log to be searched rather than the value the
+    /// model asked for. Those are written to a file the model can grep; every
+    /// other tool's output is truncated instead, because a truncated answer is
+    /// still an answer while a truncated file read is not.
+    fn spills_long_output(&self) -> bool {
+        false
+    }
+
     async fn run(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput>;
 }
 
@@ -197,6 +206,10 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    pub fn spills_long_output(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|tool| tool.spills_long_output())
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

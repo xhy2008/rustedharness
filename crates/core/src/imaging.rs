@@ -1,11 +1,10 @@
 //! Turning a file on disk into an image a provider will accept.
 //!
-//! `read` hands every decodable image to the model, but providers cap both the
-//! bytes per image and the pixels they are willing to decode. An oversized
-//! screenshot is therefore resized rather than refused: [`prepare`] keeps the
-//! file as it is when it already fits, and otherwise shrinks it - re-encoding
-//! at the same quality for JPEG, as PNG for everything else - until it is under
-//! the configured limit.
+//! `read` hands every decodable image to the model, but providers cap the pixels
+//! they are willing to decode and charge by them. An oversized screenshot is
+//! therefore resized rather than refused: [`prepare`] keeps the file as it is
+//! when its longest edge already fits `image.maxEdge`, and otherwise scales it
+//! down to that edge - JPEG stays JPEG, everything else is re-encoded as PNG.
 
 use std::io::Cursor;
 
@@ -19,8 +18,8 @@ pub struct Prepared {
     pub mime: &'static str,
     pub width: u32,
     pub height: u32,
-    /// Size of the file that was read, before any downscaling.
-    pub original_bytes: usize,
+    /// Longest edge of the file that was read, before any downscaling.
+    pub original_edge: u32,
     pub scaled: bool,
 }
 
@@ -41,10 +40,9 @@ pub enum Rejected {
 /// the whole image exists in memory.
 pub const MAX_PIXELS: u64 = 40_000_000;
 
-/// Decode `bytes` and fit the result under `max_bytes`.
-pub fn prepare(bytes: &[u8], max_bytes: usize) -> Result<Prepared, Rejected> {
+/// Decode `bytes` and fit it within `max_edge` pixels on its longest side.
+pub fn prepare(bytes: &[u8], max_edge: u32) -> Result<Prepared, Rejected> {
     let format = image::guess_format(bytes).map_err(|_| Rejected::NotAnImage)?;
-    let original_bytes = bytes.len();
     let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), format)
         .into_dimensions()
         .map_err(|_| Rejected::NotAnImage)?;
@@ -54,26 +52,27 @@ pub fn prepare(bytes: &[u8], max_bytes: usize) -> Result<Prepared, Rejected> {
     let image =
         image::load_from_memory_with_format(bytes, format).map_err(|_| Rejected::NotAnImage)?;
     let (width, height) = (image.width(), image.height());
-    if bytes.len() <= max_bytes {
+    let original_edge = width.max(height);
+    if original_edge <= max_edge {
         if let Some(mime) = passthrough_mime(format) {
             return Ok(Prepared {
                 bytes: bytes.to_vec(),
                 mime,
                 width,
                 height,
-                original_bytes,
+                original_edge,
                 scaled: false,
             });
         }
     }
-    let (bytes, mime) = shrink(&image, format, max_bytes);
+    let (bytes, mime) = resize(&image, format, max_edge);
     let (width, height) = decoded_size(&bytes).unwrap_or((width, height));
     Ok(Prepared {
         bytes,
         mime,
         width,
         height,
-        original_bytes,
+        original_edge,
         scaled: true,
     })
 }
@@ -94,25 +93,23 @@ fn keeps_alpha(image: &DynamicImage) -> bool {
     image.color().has_alpha()
 }
 
-/// Resize until the encoding fits. Each round re-estimates the scale from the
-/// actual byte count, because encoded size is not linear in pixel count.
-fn shrink(image: &DynamicImage, format: ImageFormat, max_bytes: usize) -> (Vec<u8>, &'static str) {
+/// Scale the longest edge down to `max_edge`, keeping the aspect ratio. One
+/// pass is enough: the target is a pixel count, not an encoded size, and a
+/// provider's per-image byte cap is comfortably above what a 1568 px image
+/// weighs in either format.
+fn resize(image: &DynamicImage, format: ImageFormat, max_edge: u32) -> (Vec<u8>, &'static str) {
     let jpeg = format == ImageFormat::Jpeg;
-    let mut scale = 1.0f64;
-    let mut best = encode(image, jpeg);
-    for _ in 0..12 {
-        if best.len() <= max_bytes {
-            break;
-        }
-        let ratio = max_bytes as f64 / best.len() as f64;
-        scale *= ratio.sqrt() * 0.95;
-        let width = ((image.width() as f64 * scale).round() as u32).max(16);
-        let height = ((image.height() as f64 * scale).round() as u32).max(16);
-        let resized = image.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
-        best = encode(&resized, jpeg);
-    }
+    let (width, height) = (image.width(), image.height());
+    let scale = f64::from(max_edge) / f64::from(width.max(height));
+    let target_width = ((f64::from(width) * scale).round() as u32).max(1);
+    let target_height = ((f64::from(height) * scale).round() as u32).max(1);
+    let resized = image.resize_exact(
+        target_width,
+        target_height,
+        image::imageops::FilterType::Lanczos3,
+    );
     let mime = if jpeg { "image/jpeg" } else { "image/png" };
-    (best, mime)
+    (encode(&resized, jpeg), mime)
 }
 
 fn encode(image: &DynamicImage, jpeg: bool) -> Vec<u8> {
@@ -174,7 +171,7 @@ mod tests {
     #[test]
     fn an_image_that_already_fits_is_passed_through() {
         let bytes = noisy(64);
-        let prepared = prepare(&bytes, 8 * 1024 * 1024).unwrap();
+        let prepared = prepare(&bytes, 1568).unwrap();
         assert_eq!(prepared.mime, "image/png");
         assert_eq!(prepared.bytes, bytes);
         assert!(!prepared.scaled);
@@ -182,17 +179,12 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_image_is_shrunk_under_the_limit() {
+    fn an_image_with_a_long_edge_over_the_limit_is_shrunk() {
         let bytes = noisy(512);
-        assert!(bytes.len() > 256 * 1024, "fixture is {} bytes", bytes.len());
-        let prepared = prepare(&bytes, 256 * 1024).unwrap();
+        let prepared = prepare(&bytes, 128).unwrap();
         assert!(prepared.scaled);
-        assert!(
-            prepared.bytes.len() <= 256 * 1024,
-            "still {} bytes",
-            prepared.bytes.len()
-        );
-        assert!(prepared.width < 512, "width {} not reduced", prepared.width);
+        assert_eq!(prepared.original_edge, 512);
+        assert_eq!((prepared.width, prepared.height), (128, 128));
         // The result is still a real image of the size it claims.
         assert_eq!(
             decoded_size(&prepared.bytes),
@@ -207,7 +199,7 @@ mod tests {
         image
             .write_to(&mut Cursor::new(&mut bmp), ImageFormat::Bmp)
             .unwrap();
-        let prepared = prepare(&bmp, 1024 * 1024).unwrap();
+        let prepared = prepare(&bmp, 1568).unwrap();
         assert_eq!(prepared.mime, "image/png");
         assert_eq!(&prepared.bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
@@ -218,22 +210,29 @@ mod tests {
         let mut jpeg = Vec::new();
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
         encoder.encode_image(&image).unwrap();
-        let limit = jpeg.len() / 2;
-        let prepared = prepare(&jpeg, limit).unwrap();
+        let prepared = prepare(&jpeg, 100).unwrap();
         assert!(prepared.scaled);
         assert_eq!(prepared.mime, "image/jpeg");
-        assert!(
-            prepared.bytes.len() <= limit,
-            "{} > {limit}",
-            prepared.bytes.len()
-        );
-        assert!(prepared.width < 400, "width {}", prepared.width);
+        // 400x300 keeps its ratio: the long edge becomes 100.
+        assert_eq!((prepared.width, prepared.height), (100, 75));
+    }
+
+    /// A tall image keeps its shape too: only the long edge is capped.
+    #[test]
+    fn the_aspect_ratio_survives_the_downscale() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(300, 900, Rgba([4, 5, 6, 255])));
+        let mut png = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let prepared = prepare(&png, 300).unwrap();
+        assert_eq!((prepared.width, prepared.height), (100, 300));
     }
 
     #[test]
     fn text_is_not_an_image() {
         assert_eq!(
-            prepare(b"hello, world\n", 1024).unwrap_err(),
+            prepare(b"hello, world\n", 1568).unwrap_err(),
             Rejected::NotAnImage
         );
     }
@@ -247,7 +246,7 @@ mod tests {
         let mut pnm = b"P5\n8000 8000\n255\n".to_vec();
         pnm.push(0);
         assert_eq!(
-            prepare(&pnm, 1024).unwrap_err(),
+            prepare(&pnm, 1568).unwrap_err(),
             Rejected::TooManyPixels {
                 width: 8000,
                 height: 8000

@@ -1753,8 +1753,8 @@ impl App {
                                 }
                             }
                             "image" => {
-                                let next = next_image_size(self.agent.config().image.max_bytes);
-                                match self.agent.set_image_max_bytes(next) {
+                                let next = next_image_size(self.agent.config().image.max_edge);
+                                match self.agent.set_image_max_edge(next) {
                                     Ok(()) => self
                                         .notice(format!("image size: {}", image_size_label(next))),
                                     Err(err) => self.push(EntryKind::Error, "", err.to_string()),
@@ -2366,8 +2366,8 @@ impl App {
                 let image = PickerItem {
                     label: "image size".to_string(),
                     detail: format!(
-                        "{} max - bigger images are shrunk before upload",
-                        image_size_label(self.agent.config().image.max_bytes)
+                        "{} on the longest edge - bigger images are shrunk",
+                        image_size_label(self.agent.config().image.max_edge)
                     ),
                     value: "image".to_string(),
                     disabled: false,
@@ -2532,7 +2532,7 @@ impl App {
                     retry_presets_text(),
                     RATE_LIMIT_RETRY_INTERVAL.as_secs()
                 ),
-                "image" => "The largest image `read` will attach. A file above this size is downscaled before it is uploaded, so a screenshot never gets refused for being too big; nothing is cropped. Images larger than the model accepts should be avoided, but the harness keeps the file under the limit either way.".to_string(),
+                "image" => "How many pixels the longest edge of an attached image may have. A bigger image is downscaled to fit before it is uploaded, so a screenshot never gets refused for being too big; nothing is cropped and the aspect ratio is kept.".to_string(),
                 "terminal" => "Which shell the agent's shell tool spawns. Git Bash is the bash that ships with Git for Windows, so commands, quoting and paths read like a unix shell; PowerShell is the native Windows shell. Switching applies at once and stops the background processes the previous shell started.".to_string(),
                 "search" => "Which backend the web_search tool uses. Enter opens the web search page: brave, tavily, SearXNG, bing or duckduckgo. The page asks for an api key (or a SearXNG instance url) for the backend that needs one.".to_string(),
                 _ => "Compaction keeps long sessions inside the context window. Enter opens the compaction options.".to_string(),
@@ -2994,21 +2994,20 @@ pub fn slice_columns(text: &str, start: usize, end: usize) -> String {
 const ADD_MODEL_ROW: &str = "+";
 
 /// The shell the agent will spawn, as the settings row reads it.
-/// Sizes the settings panel cycles through, from a cheap screenshot to a
-/// full-resolution one. Providers cap images around 5 MB, so the top preset
-/// stays under that.
-const IMAGE_SIZE_PRESETS: [usize; 4] = [1 << 20, 2 << 20, 4 << 20, 8 << 20];
+/// Longest-edge presets, in pixels: a thumbnail, a legible screenshot, the
+/// recommendation most providers publish, and a full-resolution one.
+const IMAGE_EDGE_PRESETS: [u32; 4] = [512, 1024, 1568, 2048];
 
-fn image_size_label(bytes: usize) -> String {
-    format!("{} MiB", bytes / (1 << 20))
+fn image_size_label(pixels: u32) -> String {
+    format!("{pixels} px")
 }
 
-fn next_image_size(max_bytes: usize) -> usize {
-    let position = IMAGE_SIZE_PRESETS
+fn next_image_size(max_edge: u32) -> u32 {
+    let position = IMAGE_EDGE_PRESETS
         .iter()
-        .position(|preset| *preset >= max_bytes)
+        .position(|preset| *preset >= max_edge)
         .unwrap_or(0);
-    IMAGE_SIZE_PRESETS[(position + 1) % IMAGE_SIZE_PRESETS.len()]
+    IMAGE_EDGE_PRESETS[(position + 1) % IMAGE_EDGE_PRESETS.len()]
 }
 
 fn terminal_label(prefer: &str) -> &'static str {
@@ -3589,34 +3588,34 @@ mod tests {
         );
     }
 
-    /// The image row is always present and walks the preset ladder, writing the
+    /// The image row is always present and walks the pixel ladder, writing the
     /// chosen ceiling to `config.json` so the next `read` uses it.
     #[test]
     fn the_image_size_row_cycles_through_the_presets() {
-        assert_eq!(image_size_label(4 << 20), "4 MiB");
-        assert_eq!(next_image_size(4 << 20), 8 << 20);
-        assert_eq!(next_image_size(8 << 20), 1 << 20);
-        assert_eq!(next_image_size(1 << 20), 2 << 20);
+        assert_eq!(image_size_label(1568), "1568 px");
+        assert_eq!(next_image_size(1568), 2048);
+        assert_eq!(next_image_size(2048), 512);
+        assert_eq!(next_image_size(512), 1024);
         // A value from the config file that is not a preset rounds up first.
-        assert_eq!(next_image_size(3 << 20), 8 << 20);
+        assert_eq!(next_image_size(1200), 2048);
 
         let dir = tempfile::tempdir().unwrap();
         let mut app = crate::ui_tests::demo_app_in(dir.path());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let row = crate::ui_tests::settings_row(&app, "image");
-        assert!(app.settings_items()[row].detail.contains("4 MiB"));
+        assert!(app.settings_items()[row].detail.contains("1568 px"));
         app.overlay = Overlay::Settings {
             page: SettingsPage::Root,
             sel: row,
         };
 
         runtime.block_on(app.overlay_confirm(&tx)).unwrap();
-        assert_eq!(app.agent.config().image.max_bytes, 8 << 20);
+        assert_eq!(app.agent.config().image.max_edge, 2048);
         let row = crate::ui_tests::settings_row(&app, "image");
-        assert!(app.settings_items()[row].detail.contains("8 MiB"));
+        assert!(app.settings_items()[row].detail.contains("2048 px"));
         let stored = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
-        assert!(stored.contains("8388608"), "{stored}");
+        assert!(stored.contains("2048"), "{stored}");
     }
 
     /// The web-search page selects a backend and offers a credential box only

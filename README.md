@@ -241,7 +241,7 @@ and model selection loads unchanged.
     "diagnosticsTimeoutMs": 2000
   },
   "image": {
-    "maxBytes": 4194304
+    "maxEdge": 1568
   },
   "shell": {
     "prefer": "powershell",
@@ -345,22 +345,27 @@ appended to the tool result.
   being merged, and no parent directory is searched, so it is always clear
   which file the model is following. The file is re-read whenever the config is
   reloaded (`/settings` changes, `/model`, cwd switch).
-- **Long output**: a tool result longer than 128 KiB is not put in the
-  conversation at all. The full text is written to
-  `<temp>/rustedharness-logs/<time>-<tool>-<call>.log`, the model gets that
-  path in the tool result, and it reaches the content with `grep` and `read`
-  like any other file. The log holds exactly what the tool returned, so the far
-  end of a long result - where a build prints the failure - is never cut off.
-  Logs older than a day are deleted as new ones are written. The resolver
-  grants the agent the temp directory for exactly this, and that grant is the
-  only place outside the workspace it can touch.
+- **Long output**: some tools return a log rather than a value - the shell,
+  `await`, `lsp` diagnostics and `web_search`. Past 128 KiB their result is not
+  put in the conversation at all: the full text is written to
+  `<temp>/rustedharness-logs/<time>-<tool>-<call>.log`, the model is given that
+  path, and it reaches the content with `grep` and `read` like any other file.
+  Nothing is cut off, so the far end of a build log - where the failure is - and
+  the last diagnostics of a file both survive; logs older than a day are deleted
+  as new ones are written. The other tools (`read` above all) are truncated at
+  256k characters instead, because there the result *is* the answer the model
+  asked for and a copy on disk would only make it fetch the same bytes twice.
+  The resolver grants the agent the temp directory for exactly this, and that
+  grant is the only place outside the workspace it can touch.
 - **Images**: `read` attaches any image it can decode (png, jpeg, gif, webp,
   bmp, ico, tiff, tga, dds, hdr, exr, pnm, qoi, farbfeld) instead of dumping
   bytes, and the harness forwards it as a user message with the image, since
-  providers only accept images from that role. A file larger than
-  `image.maxBytes` (default 4 MiB, `/settings` -> **image size**) is downscaled
-  - JPEG to JPEG, everything else to PNG - until it fits, and the tool result
-  says it did. Animated GIFs that already fit are passed through untouched.
+  providers only accept images from that role. An image whose longest edge is
+  over `image.maxEdge` pixels (default 1568, `/settings` -> **image size**, and
+  the unit is pixels, not bytes) is scaled down to that edge with the aspect
+  ratio kept - JPEG to JPEG, everything else to PNG - and the tool result says
+  it did. Images that already fit are passed through untouched, animated GIFs
+  included.
 - **Rollback**: `/rollback` lists the user inputs of the current session; the
   chosen one becomes the end of the conversation and every message after it is
   deleted from the session file. Nothing is cut until the choice is confirmed a

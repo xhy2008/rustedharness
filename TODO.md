@@ -2,11 +2,14 @@
 
 ## 已完成：长输出落盘 / AGENTS.md / 图片读取（2026-11-25）
 
-1. **长工具输出不再进上下文**：超过 128 KiB（`spill::MAX_INLINE_BYTES`）的工具结果写进
-   `<temp>/rustedharness-logs/<毫秒>-<工具>-<call id>.log`，对话里只留一句带路径的提示，
-   模型用 `grep` / `read` 去查。**不截断**——编译器和测试把错误打在最后，砍掉尾巴等于把
-   失败原因砍掉。日志超过一天会在写新日志时顺手删掉。写入失败时退回"前 4 KB + 错误原因"，
-   不让模型以为工具没有输出。
+1. **长工具输出落盘**：哪些工具算"输出是日志"由工具自己声明（`Tool::spills_long_output`）——
+   shell、`await`、`lsp`、`web_search` 为真。它们超过 128 KiB（`spill::MAX_INLINE_BYTES`）的
+   结果写进 `<temp>/rustedharness-logs/<毫秒>-<工具>-<call id>.log`，对话里只留一句带路径的
+   提示，模型用 `grep` / `read` 去查。**不截断**——编译器和测试把错误打在最后、lsp 的诊断也
+   在最后，砍掉尾巴等于把失败原因砍掉。**其它工具（尤其 `read`）不落盘**，超过 256k 字符
+   直接截断：那里的结果就是模型要的答案，给个副本路径只会让它再取一次同样的字节。
+   日志超过一天会在写新日志时顺手删掉；写入失败时退回"前 4 KB + 错误原因"，不让模型以为
+   工具没有输出。
 2. **临时目录权限**：`WorkspacePathResolver` 新增 `extra_roots`，agent 构造时把
    `std::env::temp_dir()` 授给 agent（canonicalize 后比较，macOS 的 `/tmp` 是符号链接）。
    这是工作区之外**唯一**能碰的地方，README 的安全说明已注明。
@@ -16,13 +19,14 @@
    时重读。
 4. **`read` 支持图片**：`imaging.rs` 用 `image` crate 解码（png/jpeg/gif/webp/bmp/ico/tiff/
    tga/dds/hdr/exr/pnm/qoi/farbfeld；AVIF、HEIC 需要原生编解码器，不在内），
-   文件本身不超过 `image.maxBytes`（默认 4 MiB）且格式通用时原样透传（GIF 动画保留），
-   否则按实际编码字节数逐轮缩小（JPEG 仍编 JPEG q85 并把 alpha 铺白，其它编码成 PNG）。
+   **单位是像素**：最长边不超过 `image.maxEdge`（默认 1568）且格式通用时原样透传（GIF 动画
+   保留），否则等比缩到该边长（一次缩放；JPEG 仍编 JPEG q85 并把 alpha 铺白，其它编码成
+   PNG）。超过 4000 万像素的文件在解码前就报 `E_IMAGE_TOO_LARGE`，不会先吃满内存。
    图片以 **user 消息**在整批工具结果之后注入（provider 只接受 user 角色的图片，插在两条
    tool 结果之间会破坏 call/result 配对），文本以 `[image]` 开头，`/rollback` 不会把它当成
    用户输入。
-5. **设置项**：`/settings` 根页新增 `image size` 行，预设 1/2/4/8 MiB，写入
-   `config.json` 的 `image.maxBytes`，即时生效（工具每次调用读当前 config）。
+5. **设置项**：`/settings` 根页新增 `image size` 行，预设最长边 512 / 1024 / 1568 / 2048 像素，
+   写入 `config.json` 的 `image.maxEdge`，即时生效（工具每次调用读当前 config）。
 6. **更正**：设计里从来没有 `move` / `delete` 工具，我上一轮把它们列成"缺口"是错的；
    `bash` 的 `mv` / `rm` 就够，不需要加。
 

@@ -46,8 +46,8 @@ impl Tool for ReadTool {
          `line#anchor|content` line into `lines[]`. Use raw=true for literal content. \
          URLs are converted to markdown, cached, and optionally summarised by the \
          compact model; external content is untrusted. Images (any format the harness \
-         can decode) are attached so you can see them; a file over \
-         `image.maxBytes` is downscaled first and the result says so."
+         can decode) are attached so you can see them; one with a longest edge over \
+         `image.maxEdge` pixels is downscaled first and the result says so."
             .to_string()
     }
 
@@ -92,7 +92,7 @@ impl Tool for ReadTool {
             ));
         }
         let bytes = std::fs::read(&path)?;
-        match crate::imaging::prepare(&bytes, ctx.config.image.max_bytes) {
+        match crate::imaging::prepare(&bytes, ctx.config.image.max_edge) {
             Ok(image) => return Ok(read_image(ctx, &path, image)),
             Err(crate::imaging::Rejected::TooManyPixels { width, height }) => {
                 return Err(HarnessError::tool(
@@ -133,21 +133,18 @@ fn read_image(ctx: &ToolContext, path: &Path, image: crate::imaging::Prepared) -
     let name = ctx.rel(path);
     let note = if image.scaled {
         format!(
-            "{} {name}: {}x{}, downscaled from {} bytes to {} bytes to fit \
-             image.maxBytes",
+            "{} {name}: {}x{}, downscaled from a {} px longest edge to fit image.maxEdge",
             crate::session::IMAGE_NOTE_PREFIX,
             image.width,
             image.height,
-            image.original_bytes,
-            image.bytes.len()
+            image.original_edge
         )
     } else {
         format!(
-            "{} {name}: {}x{}, {} bytes",
+            "{} {name}: {}x{}",
             crate::session::IMAGE_NOTE_PREFIX,
             image.width,
-            image.height,
-            image.bytes.len()
+            image.height
         )
     };
     let part = crate::provider::ImagePart {
@@ -159,7 +156,7 @@ fn read_image(ctx: &ToolContext, path: &Path, image: crate::imaging::Prepared) -
             "kind": "image",
             "mime": image.mime,
             "bytes": image.bytes.len(),
-            "original_bytes": image.original_bytes,
+            "original_edge": image.original_edge,
             "width": image.width,
             "height": image.height,
             "scaled": image.scaled,

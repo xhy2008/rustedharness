@@ -650,16 +650,16 @@ pub struct LspDownload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ImageConfig {
-    /// Largest encoded size an attached image may have. A bigger file is
+    /// Longest edge, in pixels, an attached image may have. A bigger image is
     /// downscaled to fit before it is uploaded instead of being refused.
-    pub max_bytes: usize,
+    pub max_edge: u32,
 }
 
 impl Default for ImageConfig {
     fn default() -> Self {
-        Self {
-            max_bytes: 4 * 1024 * 1024,
-        }
+        // Anthropic recommends 1568 px on the long edge; the other providers
+        // accept it unharmed, and it keeps a screenshot's text legible.
+        Self { max_edge: 1568 }
     }
 }
 
