@@ -10,6 +10,26 @@ pub const GIT_BASH: &str = "git-bash";
 /// what the user chose.
 pub const POWERSHELL: &str = "powershell";
 
+/// ConPTY answers cursor-shape/position negotiation by writing a DSR query
+/// (`ESC[6n`) on the output pipe and waiting for a reply on the input pipe.
+/// Nothing else in this process speaks to the pty, so respond here; without
+/// this Windows shells never emit any output. Shared by the background-process
+/// runner and the web terminal.
+pub fn answer_terminal_queries(pending: &mut Vec<u8>, writer: &mut dyn std::io::Write, rows: u16) {
+    if pending.windows(4).any(|window| window == b"\x1b[6n") {
+        let reply = format!("\x1b[{rows};1R");
+        let _ = writer.write_all(reply.as_bytes());
+        let _ = writer.flush();
+        pending.clear();
+        return;
+    }
+    // Keep a small tail so a query split across reads is still matched.
+    if pending.len() > 3 {
+        let tail = pending.split_off(pending.len() - 3);
+        *pending = tail;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellFamily {
     Bash,

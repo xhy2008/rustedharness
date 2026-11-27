@@ -163,8 +163,6 @@ pub enum HarnessCommand {
         #[serde(default)]
         context_window: u64,
     },
-    /// Ask for the user inputs a rollback can target.
-    DescribeTurns,
     /// Cut the transcript back to its `turn`-th user input.
     Rollback {
         turn: usize,
@@ -177,6 +175,22 @@ pub enum HarnessCommand {
     /// Full language-server status, including the ids `InstallLsp` takes; the
     /// live `lsp_status` events carry only the language.
     DescribeLsp,
+
+    // An interactive shell in the workspace, for the right panel. Output is a
+    // rendered screen snapshot (`terminal_output`), not raw bytes: the browser
+    // then needs no ANSI parser and a slow tab cannot accumulate a backlog.
+    OpenTerminal {
+        cols: u16,
+        rows: u16,
+    },
+    TerminalInput {
+        data: String,
+    },
+    TerminalResize {
+        cols: u16,
+        rows: u16,
+    },
+    CloseTerminal,
 }
 
 /// Snapshot sent to a newly attached frontend so it can render immediately.

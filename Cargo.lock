@@ -4710,7 +4710,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "dunce",
  "futures-util",
+ "portable-pty",
  "rustedharness-core",
  "serde",
  "serde_json",
@@ -4718,6 +4720,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "vt100",
  "webbrowser",
 ]
 

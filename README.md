@@ -566,6 +566,8 @@ WebSocket handshake.
 | `DELETE /api/sessions/{id}` | Delete a saved session |
 | `GET /api/tree?session=…&path=…` | Lazy directory listing for the session workspace |
 | `GET /api/file?session=…&path=…` | Read-only text payload (256 KiB cap) |
+| `GET /api/dirs?path=…` | Directories only, absolute paths: the fallback folder picker |
+| `POST /api/cwd/pick` | The host's own folder dialog (loopback only) |
 | `GET /ws` | Bidirectional event/command stream |
 
 Each WebSocket connection gets its own `Agent`; closing the tab cancels the
@@ -575,20 +577,46 @@ over the same socket: `describe_settings` returns the whole editable surface
 allowed options and a control kind, and `set_setting` writes one key through the
 same `Agent` setter the TUI uses, so the two frontends cannot drift. The model
 picker and its add-model wizard (`describe_models`, `discover_models`,
-`add_model`, `set_compact_model`), rollback (`describe_turns`, `rollback`, which
-answers with a fresh snapshot), and language-server installs (`describe_lsp`,
-`install_lsp`) are socket commands too, because only the connection owns the
-agent. The UI is a three-column workspace: a lazy
-session/file tree, the chat stream with a todo dock and composer, and a
-read-only inspector for code, Markdown/JSON preview, and LSP/process activity.
+`add_model`, `set_compact_model`), rollback (`rollback`, which answers with a
+fresh snapshot so the feed can be rebuilt), language-server installs
+(`describe_lsp`, `install_lsp`) and the terminal (`open_terminal`,
+`terminal_input`, `terminal_resize`, `close_terminal`) are socket commands too,
+because only the connection owns the agent. The UI is a three-column workspace:
+a collapsible session/file tree, the chat stream with a todo dock and composer,
+and an inspector for code, Markdown/JSON preview, LSP/process activity, or an
+interactive shell in the workspace.
+
+The browser has controls rather than slash commands: the model is a dropdown in
+the composer's bottom-right corner, the working directory is the folder button
+next to it (the host's folder dialog when the server is local, an in-page
+directory browser otherwise), a message's context menu rolls back to it or
+copies it, and the LSP status line opens a server manager with download and
+update buttons. Only `/help`, `/hotkeys` and `/copy` are still parsed.
+
+The file tree carries `git status` per entry - modified yellow, untracked and
+added green, deleted and conflicted red, renamed purple, ignored dim - with a
+directory inheriting the strongest status below it and a one-letter mark on the
+right.
+
+The transcript is virtualized: only the messages around the viewport exist in
+the DOM, each item keeps its measured height so the scrollbar stays honest for
+the parts that were never rendered, and the height of a kind already measured
+turns into a bytes-per-pixel estimate for the rest. A 1600-message session
+mounts about eleven nodes. `overflow-anchor` is off because the list owns its
+scroll position.
+
+The terminal is a real pty in the workspace directory. Its output is pushed as a
+rendered `vt100` screen snapshot rather than raw bytes, so the browser needs no
+ANSI parser and a slow tab cannot accumulate a backlog; keys are forwarded as
+the escape sequences a terminal emulator would send, and the pty dies with the
+connection.
+
 It streams text and reasoning, renders tool cards and consent prompts, offers
 dark/light themes, and uses the real `HarnessEvent` protocol without demo data.
 Reasoning cards stay expanded while thinking streams and fold automatically once
 the message completes. Tool cards stay open while running, show sanitized live
 screen updates from `bash` commands (throttled 16 KiB tails), then fold when the
-result arrives. Large transcripts open with only the newest page rendered; a
-"load earlier" control walks backwards in bounded pages (up to 1200 messages)
-instead of building one DOM node per historical message.
+result arrives.
 The same page is responsive: the right inspector becomes an off-canvas drawer
 below 1180 px, the workspace tree below 900 px, and phone layouts use
 safe-area padding, bottom-sheet modals, and 16 px composer text to avoid iOS

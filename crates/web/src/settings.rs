@@ -604,22 +604,6 @@ pub fn models(agent: &Agent) -> Value {
     })
 }
 
-/// Every user input a rollback can target, oldest first.
-pub fn turns(agent: &Agent) -> Value {
-    let turns: Vec<Value> = agent
-        .user_turns()
-        .into_iter()
-        .map(|turn| {
-            json!({
-                "index": turn.index,
-                "after": turn.after,
-                "text": turn.text,
-            })
-        })
-        .collect();
-    json!({ "turns": turns })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

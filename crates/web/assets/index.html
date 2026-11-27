@@ -246,8 +246,9 @@ try {
   .center { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; background: var(--bg); }
   .feed {
     flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    /* The list owns its scroll position: anchoring would fight the spacers. */
+    overflow-anchor: none;
     padding: 18px 22px 26px; display: flex; flex-direction: column; gap: 12px;
-    scroll-behavior: smooth;
   }
   .feed > .msg, .feed > .think, .feed > .tool, .feed > .note, .feed > .error-card { flex: none; }
   .empty {
@@ -451,6 +452,8 @@ try {
   .inspector-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
   .ipane { position: absolute; inset: 0; display: none; overflow: auto; }
   .ipane.active { display: block; }
+  #paneTerminal { overflow: hidden; }
+  #paneTerminal.active { display: flex; flex-direction: column; }
   .empty-view {
     min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 8px; padding: 30px 22px; color: var(--faint); text-align: center;
@@ -566,6 +569,87 @@ try {
   .consent-lead { margin: 0 0 8px; color: var(--sub); font-size: 12px; line-height: 1.7; }
   .consent-box { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--sub); font-family: var(--mono); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
   .consent-label { display: block; margin-bottom: 2px; color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .5px; }
+
+  /* ---------- virtualized feed ---------- */
+  .feed { display: block; }
+  .feed-inner { position: relative; width: 100%; min-height: 0; }
+  /* Items are absolutely placed, so the old flex `gap` becomes a margin that
+     the measured height already includes. */
+  .feed-inner > * { position: absolute; left: 0; right: 0; margin-bottom: 12px; }
+  #emptyState { min-height: 100%; }
+
+  /* ---------- composer additions ---------- */
+  .composer-bar .bar-right { display: flex; align-items: center; gap: 6px; margin-left: auto; min-width: 0; }
+  .cwd-chip { max-width: 240px; }
+  .cwd-chip .icon { width: 14px; height: 14px; }
+  .cwd-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-pick { position: relative; min-width: 0; }
+  .model-pick .chip { max-width: 260px; }
+  .model-pick .chip .chev { width: 12px; height: 12px; }
+  .model-pop {
+    position: absolute; bottom: calc(100% + 8px); right: 0; z-index: 90;
+    width: min(360px, 86vw); padding: 8px; display: flex; flex-direction: column; gap: 6px;
+    border: 1px solid var(--line); border-radius: 11px; background: var(--elevated);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+  }
+  .model-pop input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; outline: none; background: var(--bg); color: var(--text); font-size: 12px; }
+  .model-pop input:focus { border-color: var(--brand); }
+  .model-list { display: flex; flex-direction: column; gap: 3px; max-height: 280px; overflow: auto; }
+  .model-opt { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border-radius: 7px; text-align: left; color: var(--sub); }
+  .model-opt:hover { background: var(--brand-soft); color: var(--text); }
+  .model-opt.sel { background: var(--brand-soft); color: var(--brand); }
+  .model-opt-name { font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+  .model-opt-meta { font-size: 9.5px; color: var(--faint); }
+  .model-add { padding: 6px 8px; border-top: 1px solid var(--line); color: var(--brand); font-size: 11.5px; text-align: left; }
+  .statusline { display: flex; align-items: center; gap: 10px; padding: 2px 10px 3px; border-top: 1px dashed var(--line); }
+  .lsp-status, .proc-status { display: inline-flex; align-items: center; gap: 5px; color: var(--faint); font-size: 10.5px; padding: 2px 5px; border-radius: 6px; }
+  .lsp-status:hover, .proc-status:hover { background: var(--brand-soft); color: var(--text); }
+  .lsp-status .dot.ok, .proc-status .dot.ok { background: var(--ok); }
+  .lsp-status .dot.warn, .proc-status .dot.warn { background: var(--warn); }
+  .lsp-status .dot.run, .proc-status .dot.run { background: var(--run); }
+
+  /* ---------- git colours in the tree ---------- */
+  .trow .tname.git-modified { color: var(--warn); }
+  .trow .tname.git-untracked, .trow .tname.git-added { color: var(--ok); }
+  .trow .tname.git-deleted, .trow .tname.git-conflicted { color: var(--danger); }
+  .trow .tname.git-renamed { color: var(--purple); }
+  .trow .tname.git-ignored { color: var(--faint); }
+  .trow .git-mark { margin-left: auto; font-size: 9px; letter-spacing: .3px; text-transform: uppercase; color: var(--faint); }
+
+  /* ---------- terminal ---------- */
+  .term-wrap { position: relative; flex: 1; min-height: 0; margin: 0; overflow: auto; background: #0d0f13; }
+  .term-screen {
+    margin: 0; padding: 8px 10px; color: #cfd6e1;
+    font-family: var(--mono); font-size: 12px; line-height: 1.35; white-space: pre;
+    tab-size: 4;
+  }
+  .term-cursor { background: var(--brand); color: #10131a; }
+  .term-input {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    padding: 0; border: 0; outline: none; resize: none;
+    background: transparent; color: transparent; caret-color: transparent;
+    opacity: .01; font-size: 12px;
+  }
+  .term-foot { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--line); }
+  .term-info { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 10.5px; }
+  .term-btn { height: 26px; padding: 0 9px; font-size: 10.5px; }
+
+  /* ---------- context menu ---------- */
+  .ctx-menu {
+    position: fixed; z-index: 200; min-width: 168px; padding: 5px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--elevated);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .45); display: flex; flex-direction: column; gap: 2px;
+  }
+  .ctx-item { display: flex; align-items: center; gap: 7px; width: 100%; padding: 6px 9px; border-radius: 6px; color: var(--sub); font-size: 12px; text-align: left; }
+  .ctx-item:hover:not(:disabled) { background: var(--brand-soft); color: var(--text); }
+  .ctx-item .icon { width: 14px; height: 14px; }
+  .ctx-item.danger:hover { background: rgba(239, 100, 104, .12); color: var(--danger); }
+  .ctx-sep { height: 1px; margin: 3px 4px; background: var(--line); }
+
+  /* ---------- lsp dialog ---------- */
+  .lsp-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); }
+  .lsp-row .lsp-lang { font-family: var(--mono); font-size: 11.5px; min-width: 110px; }
+  .lsp-row .lsp-meta { flex: 1; min-width: 0; color: var(--faint); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ---------- compaction entry ---------- */
   .compaction { border: 1px dashed var(--line); border-radius: 10px; background: var(--panel-2); }
@@ -900,7 +984,9 @@ try {
     </div>
 
     <main class="center">
-      <section class="feed" id="feed" aria-live="polite" aria-label="会话消息"></section>
+      <section class="feed" id="feed" aria-live="polite" aria-label="会话消息">
+        <div class="feed-inner" id="feedInner"></div>
+      </section>
       <div class="dock">
         <section class="todo-card closed" id="todoCard" hidden>
           <button class="todo-head" id="todoHead" type="button" aria-expanded="false">
@@ -914,19 +1000,35 @@ try {
         <section class="composer" aria-label="消息输入">
           <textarea id="input" rows="1" placeholder="给智能体派任务。Enter 发送，Shift+Enter 换行。"></textarea>
           <div class="composer-bar">
-            <div class="chips">
-              <button class="chip model-chip" id="modelChip" type="button" title="切换 agent 模型">
-                <span class="chip-key">agent</span><span id="modelChipValue">—</span>
-              </button>
-              <button class="chip compact-chip" id="compactChip" type="button" title="压缩模型（来自配置，只读）">
-                <span class="chip-key">compact</span><span id="compactChipValue">—</span>
-              </button>
-            </div>
-            <div class="send-wrap">
+            <button class="chip cwd-chip" id="cwdBtn" type="button" title="选择工作目录">
+              <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+              <span id="cwdBtnText">workspace</span>
+            </button>
+            <div class="bar-right">
+              <div class="model-pick">
+                <button class="chip model-chip" id="modelBtn" type="button"
+                  aria-haspopup="listbox" aria-expanded="false" title="切换 Agent 模型">
+                  <span class="chip-key">model</span><span id="modelBtnValue">—</span>
+                  <svg class="icon chev" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                </button>
+                <div class="model-pop" id="modelPop" hidden>
+                  <input id="modelSearch" type="text" autocomplete="off" spellcheck="false" placeholder="过滤模型…">
+                  <div class="model-list" id="modelListBox" role="listbox" aria-label="模型"></div>
+                  <button class="model-add" id="modelAddBtn" type="button">＋ 添加模型…</button>
+                </div>
+              </div>
               <button class="btn-send" id="sendBtn" type="button" title="发送">
                 <svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg><span id="sendLabel">发送</span>
               </button>
             </div>
+          </div>
+          <div class="statusline">
+            <button class="lsp-status" id="lspStatus" type="button" title="语言服务器状态">
+              <span class="dot" id="lspDot"></span><span id="lspStatusText">LSP</span>
+            </button>
+            <button class="proc-status" id="procStatus" type="button" title="后台进程">
+              <span class="dot" id="procDot"></span><span id="procStatusText">进程 0</span>
+            </button>
           </div>
           <div class="stats" id="stats" title="token 统计完全来自 API 返回的 usage 字段，不做本地估算">
             <span class="stat">上下文 <b id="ctxText">—</b> <span id="ctxNums"></span></span>
@@ -974,6 +1076,7 @@ try {
         <button class="itab" type="button" data-itab="activity" role="tab">
           活动 <span class="dotbadge" id="activityDot" hidden></span>
         </button>
+        <button class="itab" type="button" data-itab="terminal" role="tab">终端</button>
       </div>
       <div class="inspector-body">
         <div class="ipane active" id="paneCode">
@@ -994,6 +1097,19 @@ try {
         </div>
         <div class="ipane" id="paneActivity">
           <div id="activityContent"></div>
+        </div>
+        <div class="ipane" id="paneTerminal">
+          <div class="term-wrap" id="termWrap" tabindex="0" role="application" aria-label="工作目录终端">
+            <pre class="term-screen" id="termScreen"></pre>
+            <textarea id="termInput" class="term-input" autocomplete="off"
+              autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
+          </div>
+          <div class="term-foot">
+            <span class="term-info" id="termInfo">终端未启动</span>
+            <button class="btn term-btn" id="termCopy" type="button">复制屏幕</button>
+            <button class="btn term-btn" id="termCtrlC" type="button">Ctrl+C</button>
+            <button class="btn term-btn" id="termRestart" type="button">重启</button>
+          </div>
         </div>
       </div>
     </aside>
@@ -1101,27 +1217,6 @@ try {
   </div>
 </div>
 
-<div id="rollbackModal" class="modal" hidden>
-  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rollbackTitle">
-    <div class="modal-head">
-      <svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg>
-      <div>
-        <h2 id="rollbackTitle">回滚对话</h2>
-        <p id="rollbackLead">选择要保留的最后一条输入；其后的所有消息会被删除，无法撤销。</p>
-      </div>
-      <button class="icon-btn modal-close" type="button" data-close="#rollbackModal" title="关闭" aria-label="关闭">
-        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
-      </button>
-    </div>
-    <div class="pick-list" id="rollbackList"></div>
-    <div class="form-error" id="rollbackError" hidden></div>
-    <div class="modal-actions">
-      <button class="btn" type="button" data-close="#rollbackModal">取消</button>
-      <button class="btn danger" type="button" id="rollbackConfirmBtn" disabled>确认回滚</button>
-    </div>
-  </div>
-</div>
-
 <div id="consentModal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="consentTitle">
     <div class="modal-head">
@@ -1141,6 +1236,66 @@ try {
     </div>
   </div>
 </div>
+
+<div id="rollbackModal" class="modal" hidden>
+  <div class="modal-card narrow" role="dialog" aria-modal="true" aria-labelledby="rollbackTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg>
+      <div>
+        <h2 id="rollbackTitle">回滚对话</h2>
+        <p>删除这条消息之后的所有内容，保留这条消息本身。无法撤销。</p>
+      </div>
+    </div>
+    <div class="consent-box" id="rollbackPreview"></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close="#rollbackModal">取消</button>
+      <button class="btn danger" type="button" id="rollbackConfirmBtn">确认回滚</button>
+    </div>
+  </div>
+</div>
+
+<div id="lspModal" class="modal" hidden>
+  <div class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="lspTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-code"></use></svg>
+      <div>
+        <h2 id="lspTitle">语言服务器</h2>
+        <p>代码智能依赖本地 LSP。缺失的服务器可以在这里直接下载。</p>
+      </div>
+      <button class="icon-btn modal-close" type="button" data-close="#lspModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="pick-list" id="lspServers"></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="lspRefresh">刷新</button>
+      <button class="btn primary" type="button" data-close="#lspModal">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="dirModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dirTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+      <div>
+        <h2 id="dirTitle">选择工作目录</h2>
+        <p id="dirPath">—</p>
+      </div>
+      <button class="icon-btn modal-close" type="button" data-close="#dirModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="pick-list" id="dirList"></div>
+    <div class="form-error" id="dirError" hidden></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="dirUp">上一级</button>
+      <button class="btn primary" type="button" id="dirChoose">使用此目录</button>
+    </div>
+  </div>
+</div>
+
+<div id="ctxMenu" class="ctx-menu" hidden role="menu"></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
@@ -1164,9 +1319,8 @@ try {
     'not in is'
   ).split(/\s+/).filter(Boolean));
 
-  const HISTORY_INITIAL = 160;
-  const HISTORY_PAGE = 120;
-  const HISTORY_MAX = 1200;
+  // Matches `session::COMPACTION_PREFIX`; a replayed summary is not a user turn.
+  const COMPACTION_PREFIX = 'The conversation history before this point was compacted into the following summary:\n\n<summary>\n';
 
   const state = {
     ws: null,
@@ -1195,11 +1349,16 @@ try {
     models: { catalog: [], agent: '', compact: '', separate: false, target: 'agent', filter: '' },
     addModel: { step: 'endpoint', items: [], baseURL: '', apiKey: '', filter: '' },
     turns: [],
-    rollbackTurn: null,
-    assistantEl: null,
+    assistantItem: null,
+    reasoningItem: null,
+    toolItems: new Map(),
+    turnCount: 0,
+    rollbackPending: null,
+    terminal: { open: false, cols: 0, rows: 0 },
+    dirPath: '',
+    feed: { items: [], el: new Map(), seq: 0, batch: false, chars: {} },
+    scrollRaf: 0,
     assistantRaf: 0,
-    reasoningEl: null,
-    toolCards: new Map(),
     batchRender: false,
     appendTarget: null,
     history: null,
@@ -1496,14 +1655,15 @@ try {
   }
 
   function runSettingAction(action) {
-    if (action === 'models_agent') openModelPicker('agent');
+    if (action === 'models_agent') {
+      closeModal('settingsModal');
+      setInspectorTab('code');
+      toggleModelMenu(true);
+    }
     else if (action === 'models_compact') openModelPicker('compact');
     else if (action === 'cwd') {
-      const next = window.prompt('新的工作目录', state.cwd || '');
-      if (next && next.trim()) {
-        sendCommand({ type: 'set_cwd', path: next.trim() });
-        setTimeout(requestSettings, 220);
-      }
+      closeModal('settingsModal');
+      pickWorkingDirectory();
     }
   }
 
@@ -1710,60 +1870,6 @@ try {
     toast('模型已加入 models.json');
   }
 
-  /* ---------------- rollback ---------------- */
-  function openRollback() {
-    if (!isConnected()) {
-      toast('尚未连接，无法回滚', 'error');
-      return;
-    }
-    state.rollbackTurn = null;
-    $('rollbackConfirmBtn').disabled = true;
-    $('rollbackError').hidden = true;
-    $('rollbackList').replaceChildren(el('div', 'pick-empty', '正在读取对话输入…'));
-    openModal('rollbackModal');
-    sendCommand({ type: 'describe_turns' });
-  }
-
-  function renderTurns() {
-    const list = $('rollbackList');
-    if (!list) return;
-    const turns = Array.isArray(state.turns) ? state.turns : [];
-    list.replaceChildren();
-    if (!turns.length) {
-      list.append(el('div', 'pick-empty', '这段对话还没有可回滚的输入。'));
-      $('rollbackConfirmBtn').disabled = true;
-      return;
-    }
-    const last = turns.length - 1;
-    turns.forEach((turn, position) => {
-      const button = el('button', 'turn-item' + (turn.index === state.rollbackTurn ? ' sel' : ''));
-      button.type = 'button';
-      const text = String(turn.text || '').replace(/\s+/g, ' ').trim();
-      button.append(el('span', 'turn-text',
-        '#' + (turn.index + 1) + ' ' + (text.length > 120 ? text.slice(0, 120) + '…' : (text || '（空输入）'))));
-      const detail = turn.after === 0
-        ? '最后一个输入 · 回滚后无变化'
-        : '将删除其后的 ' + turn.after + ' 条消息';
-      button.append(el('span', 'turn-meta', detail));
-      button.disabled = turn.index === last;
-      if (button.disabled) button.title = '这是最后一条输入，回滚不会改变任何内容';
-      button.addEventListener('click', () => {
-        state.rollbackTurn = turn.index;
-        $('rollbackConfirmBtn').disabled = false;
-        $('rollbackError').hidden = true;
-        renderTurns();
-      });
-      list.append(button);
-    });
-  }
-
-  function confirmRollback() {
-    if (state.rollbackTurn == null) return;
-    sendCommand({ type: 'rollback', turn: state.rollbackTurn });
-    closeModal('rollbackModal');
-    state.rollbackTurn = null;
-  }
-
   function showConsent(event) {
     state.consentId = event.id;
     $('consentTitle').textContent = '下载 ' + event.display_name + ' ' + event.version + '？';
@@ -1948,16 +2054,6 @@ try {
   }
 
   /* ---------------- session chrome ---------------- */
-  function updateModelChips() {
-    const model = state.agentModel || (state.config && state.config.agent_model) || 'None';
-    const compact = state.compactModel ||
-      (state.models.catalog.length ? 'None' : (state.config && state.config.compact_model) || 'None');
-    $('modelChipValue').textContent = model;
-    $('modelChip').title = '切换 agent 模型：' + model;
-    $('compactChipValue').textContent = compact;
-    $('compactChip').title = '压缩模型：' + compact + '（只读）';
-  }
-
   function updateSessionUI() {
     $('wsPathText').textContent = state.cwd || '未连接工作区';
     $('wsPath').title = state.cwd ? ('工作目录：' + state.cwd) : '切换工作目录';
@@ -2017,58 +2113,160 @@ try {
     updateComposer();
   }
 
-  /* ---------------- feed ---------------- */
+  /* ---------------- feed: virtualized ---------------- */
+  // Only the messages around the viewport exist in the DOM. Items carry their
+  // own height once measured, so the scrollbar stays honest for the parts that
+  // were never rendered; two spacers would do the same but would need the
+  // distances the offsets already give us.
+  const FEED_OVERSCAN = 900;
+
+  function feedInnerEl() {
+    return $('feedInner');
+  }
+
+  function feedEstimate(item) {
+    const text = String((item.data && (item.data.text || item.data.content)) || '');
+    const base = { user: 44, assistant: 72, note: 38, error: 62, compaction: 44, reasoning: 42, tool: 52 }[item.kind] || 60;
+    // Once a kind has been measured, its own bytes-per-pixel ratio beats any
+    // hardcoded guess. Unvisited messages then differ by text length, not by
+    // a constant, which keeps the scrollbar from lurching as they are visited.
+    const learned = state.feed.chars[item.kind];
+    if (learned && learned.chars >= 400) {
+      const ratio = learned.height / learned.chars;
+      return Math.max(base * 0.6, base + text.length * ratio);
+    }
+    return base + Math.ceil(text.length / 72) * 20;
+  }
+
+  function feedHeight(item) {
+    return item.measured ? item.height : feedEstimate(item);
+  }
+
   function isAtBottom() {
     if (state.batchRender) return true;
-    return feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 110;
+    return feedEl.scrollHeight - feedEl.scrollTop - feedEl.clientHeight < 120;
+  }
+
+  function feedSync() {
+    const inner = feedInnerEl();
+    if (!inner) return;
+    if (inner.hidden) inner.hidden = false;
+    const items = state.feed.items;
+    if (!items.length) {
+      inner.style.height = '0px';
+      return;
+    }
+    const offsets = new Array(items.length);
+    let total = 0;
+    for (let i = 0; i < items.length; i++) {
+      offsets[i] = total;
+      total += feedHeight(items[i]);
+    }
+    const viewTop = feedEl.scrollTop - FEED_OVERSCAN;
+    const viewBottom = feedEl.scrollTop + feedEl.clientHeight + FEED_OVERSCAN;
+    const mounted = state.feed.el;
+
+    for (const [index, node] of Array.from(mounted)) {
+      const item = items[index];
+      if (!item) {
+        node.remove();
+        mounted.delete(index);
+        continue;
+      }
+      if (item.pinned) continue;
+      if (offsets[index] + feedHeight(item) < viewTop || offsets[index] > viewBottom) {
+        node.remove();
+        mounted.delete(index);
+        item.el = null;
+        item.body = null;
+      }
+    }
+
+    let changed = false;
+    const fresh = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const visible = item.pinned ||
+        (offsets[i] + feedHeight(item) >= viewTop && offsets[i] <= viewBottom);
+      if (!visible) continue;
+      const existing = mounted.get(i);
+      if (existing) {
+        existing.style.top = offsets[i] + 'px';
+        continue;
+      }
+      const node = buildFeedItem(item);
+      node.style.top = offsets[i] + 'px';
+      inner.append(node);
+      mounted.set(i, node);
+      item.el = node;
+      fresh.push(item);
+    }
+
+    for (const item of fresh) {
+      const height = item.el.getBoundingClientRect().height;
+      if (height <= 0) continue;
+      const learned = state.feed.chars[item.kind] || (state.feed.chars[item.kind] = { height: 0, chars: 0 });
+      learned.height += height;
+      learned.chars += String((item.data && (item.data.text || item.data.content)) || '').length + 1;
+      if (Math.abs(height - feedHeight(item)) > 1) {
+        item.height = height;
+        item.measured = true;
+        changed = true;
+      }
+    }
+
+    let height = 0;
+    for (let i = 0; i < items.length; i++) {
+      const node = mounted.get(i);
+      if (node) node.style.top = height + 'px';
+      height += feedHeight(items[i]);
+    }
+    inner.style.height = height + 'px';
+    return changed;
+  }
+
+  function feedToBottom() {
+    // Items mount and measure as the viewport lands on them, which moves the
+    // bottom, so settle over a couple of passes instead of once.
+    for (let pass = 0; pass < 4; pass++) {
+      feedSync();
+      feedEl.scrollTop = feedEl.scrollHeight;
+    }
+    feedSync();
   }
 
   function scrollBottom() {
-    feedEl.scrollTop = feedEl.scrollHeight;
+    feedToBottom();
   }
 
   function scrollBottomInstant() {
     const previous = feedEl.style.scrollBehavior;
     feedEl.style.scrollBehavior = 'auto';
-    feedEl.scrollTop = feedEl.scrollHeight;
+    feedToBottom();
     feedEl.style.scrollBehavior = previous;
   }
 
   function maybeScroll(stick) {
-    if (state.batchRender) return;
-    if (stick) requestAnimationFrame(scrollBottom);
+    if (state.batchRender || state.feed.batch) return;
+    if (!stick || state.scrollRaf) return;
+    state.scrollRaf = requestAnimationFrame(() => {
+      state.scrollRaf = 0;
+      scrollBottom();
+    });
   }
 
   function removeEmptyState() {
     const empty = $('emptyState');
     if (empty) empty.remove();
-  }
-
-  function pruneFeed() {
-    if (state.batchRender) return;
-    const limit = state.history ? 1600 : 420;
-    while (feedEl.children.length > limit) {
-      let first = feedEl.firstElementChild;
-      if (!first) break;
-      if (first.id === 'emptyState') {
-        if (feedEl.children.length === 1) break;
-        first.remove();
-        continue;
-      }
-      if (first.id === 'historyMore') {
-        first = first.nextElementSibling;
-        if (!first) break;
-      }
-      if (first.dataset && first.dataset.toolId) {
-        state.toolCards.delete(first.dataset.toolId);
-      }
-      first.remove();
-    }
+    const inner = feedInnerEl();
+    if (inner && inner.hidden) inner.hidden = false;
   }
 
   function showEmptyState() {
-    if (feedEl.querySelector('.msg,.tool,.think,.note,.error-card')) return;
+    if (state.feed.items.length) return;
     if ($('emptyState')) return;
+    const inner = feedInnerEl();
+    if (inner) inner.hidden = true;
     const box = el('div', 'empty');
     box.id = 'emptyState';
     const logo = el('div', 'empty-logo', 'R');
@@ -2102,53 +2300,216 @@ try {
       cancelAnimationFrame(state.assistantRaf);
       state.assistantRaf = 0;
     }
-    state.assistantEl = null;
-    state.reasoningEl = null;
-    state.toolCards.clear();
+    state.assistantItem = null;
+    state.reasoningItem = null;
+    state.toolItems = new Map();
+    state.turnCount = 0;
     state.batchRender = false;
-    state.appendTarget = null;
-    state.history = null;
-    state.historyBtn = null;
-    feedEl.replaceChildren();
+    state.feed.items = [];
+    state.feed.el = new Map();
+    state.feed.chars = {};
+    state.feed.seq = 0;
+    const inner = feedInnerEl();
+    if (inner) {
+      inner.replaceChildren();
+      inner.style.height = '0px';
+    }
+    const empty = $('emptyState');
+    if (empty) empty.remove();
     if (showEmpty !== false) showEmptyState();
   }
 
-  function appendFeed(node) {
-    if (state.appendTarget) state.appendTarget.append(node);
-    else feedEl.append(node);
+  function feedPush(kind, data, options) {
+    const opts = options || {};
+    removeEmptyState();
+    const stick = opts.stick === undefined ? isAtBottom() : !!opts.stick;
+    const item = {
+      key: ++state.feed.seq,
+      kind,
+      data: data || {},
+      measured: false,
+      height: 0,
+      el: null,
+      pinned: !!opts.pinned
+    };
+    state.feed.items.push(item);
+    if (!state.feed.batch) feedSync();
+    if (stick) maybeScroll(true);
+    return item;
   }
 
-  function addUserMessage(text) {
-    removeEmptyState();
-    const message = el('div', 'msg user');
-    message.append(el('div', 'bubble', text), el('div', 'meta', '你'));
-    appendFeed(message);
-    pruneFeed();
-    if (!state.batchRender) scrollBottom();
+  /// Re-render one mounted item after its data changed shape.
+  function feedRebuild(item) {
+    const index = state.feed.items.indexOf(item);
+    if (index < 0) return;
+    const current = state.feed.el.get(index);
+    if (!current) {
+      item.measured = false;
+      return;
+    }
+    const node = buildFeedItem(item);
+    node.style.top = current.style.top;
+    current.replaceWith(node);
+    state.feed.el.set(index, node);
+    item.el = node;
+    item.measured = false;
+    feedSync();
   }
 
-  function addNote(text, kind) {
-    const stick = isAtBottom();
-    removeEmptyState();
+  function buildFeedItem(item) {
+    switch (item.kind) {
+      case 'user': return buildUserItem(item);
+      case 'assistant': return buildAssistantItem(item);
+      case 'reasoning': return buildReasoningItem(item);
+      case 'tool': return buildToolItem(item);
+      case 'note': return buildNoteItem(item);
+      case 'error': return buildErrorItem(item);
+      case 'compaction': return buildCompactionItem(item);
+      default: return el('div', 'note', String(item.data.text || ''));
+    }
+  }
+
+  function buildUserItem(item) {
+    const node = el('div', 'msg user');
+    node.append(el('div', 'bubble', String(item.data.text || '')), el('div', 'meta', '你'));
+    node.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      showContextMenu(event, [
+        { label: '回滚到这条消息', icon: 'clock', action: () => promptRollback(item) },
+        { label: '复制这条消息', icon: 'copy', action: () => copyWithToast(item.data.text) }
+      ]);
+    });
+    return node;
+  }
+
+  function buildAssistantItem(item) {
+    const card = el('article', 'msg agent' + (item.data.streaming ? ' streaming' : ''));
+    card.append(makeAgentHead(!!item.data.streaming));
+    const body = el('div', 'md');
+    renderMarkdownInto(body, String(item.data.text || ''));
+    card.append(body);
+    item.body = body;
+    card.addEventListener('contextmenu', (event) => {
+      if (!item.data.text) return;
+      event.preventDefault();
+      showContextMenu(event, [
+        { label: '复制这条回复', icon: 'copy', action: () => copyWithToast(item.data.text) }
+      ]);
+    });
+    return card;
+  }
+
+  function buildReasoningItem(item) {
+    const block = createReasoningBlock(String(item.data.text || ''), item.data.open !== false);
+    block.el.open = item.data.open !== false && !item.data.done;
+    item.body = block.body;
+    item.count = block.count;
+    return block.el;
+  }
+
+  function buildNoteItem(item) {
+    const kind = item.data.kind;
     const note = el('div', 'note' + (kind ? ' ' + kind : ''));
     note.append(icon(kind === 'warn' ? 'alert' : kind === 'done' ? 'check-circle' : 'info'),
-      el('span', null, String(text)));
-    appendFeed(note);
-    pruneFeed();
-    maybeScroll(stick);
+      el('span', null, String(item.data.text || '')));
+    return note;
   }
 
-  function addError(message) {
-    const stick = isAtBottom();
-    removeEmptyState();
+  function buildErrorItem(item) {
     const card = el('div', 'error-card');
     card.append(icon('alert'));
     const body = el('div', 'error-body');
-    body.append(el('strong', null, '错误'), document.createTextNode(String(message || '未知错误')));
+    body.append(el('strong', null, '错误'), document.createTextNode(String(item.data.text || '未知错误')));
     card.append(body);
-    appendFeed(card);
-    pruneFeed();
-    maybeScroll(stick);
+    return card;
+  }
+
+  function buildCompactionItem(item) {
+    const card = el('details', 'compaction');
+    const head = el('summary', 'compaction-head');
+    head.append(icon('activity'),
+      el('span', null, '上下文已压缩 · 丢弃 ' + (item.data.dropped || 0) + ' 条消息'));
+    card.append(head, el('pre', 'compaction-body', String(item.data.summary || '（无摘要）')));
+    return card;
+  }
+
+  function addUserMessage(text) {
+    const item = feedPush('user', { text: String(text == null ? '' : text), turn: state.turnCount++ }, { stick: true });
+    return item;
+  }
+
+  function addNote(text, kind) {
+    return feedPush('note', { text: String(text == null ? '' : text), kind: kind || '' });
+  }
+
+  function addError(message) {
+    return feedPush('error', { text: String(message || '未知错误') }, { stick: true });
+  }
+
+  async function copyWithToast(text) {
+    const ok = await copyText(text);
+    toast(ok ? '已复制' : '复制失败，请手动选择文本', ok ? '' : 'error');
+  }
+
+  /* ---------------- context menu ---------------- */
+  function showContextMenu(event, entries) {
+    const menu = $('ctxMenu');
+    menu.replaceChildren();
+    let first = true;
+    for (const entry of entries) {
+      if (entry.separator) {
+        menu.append(el('div', 'ctx-sep'));
+        first = false;
+        continue;
+      }
+      const button = el('button', 'ctx-item' + (entry.danger ? ' danger' : ''));
+      button.type = 'button';
+      button.append(icon(entry.icon || 'info'), el('span', null, entry.label));
+      button.addEventListener('click', () => {
+        hideContextMenu();
+        entry.action();
+      });
+      menu.append(button);
+      if (first) {
+        button.focus();
+        first = false;
+      }
+    }
+    menu.hidden = false;
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const x = Math.min(event.clientX, window.innerWidth - width - 8);
+    const y = Math.min(event.clientY, window.innerHeight - height - 8);
+    menu.style.left = Math.max(8, x) + 'px';
+    menu.style.top = Math.max(8, y) + 'px';
+  }
+
+  function hideContextMenu() {
+    const menu = $('ctxMenu');
+    if (menu) menu.hidden = true;
+  }
+
+  function promptRollback(item) {
+    if (!isConnected()) {
+      toast('尚未连接，无法回滚', 'error');
+      return;
+    }
+    state.rollbackPending = typeof item.data.turn === 'number' ? item.data.turn : null;
+    if (state.rollbackPending == null) {
+      toast('这条消息无法定位到对话轮次', 'error');
+      return;
+    }
+    const text = String(item.data.text || '').replace(/\s+/g, ' ').trim();
+    $('rollbackPreview').textContent = '保留：#' + (state.rollbackPending + 1) + ' ' +
+      (text.length > 160 ? text.slice(0, 160) + '…' : text);
+    openModal('rollbackModal');
+  }
+
+  function confirmRollback() {
+    if (state.rollbackPending == null) return;
+    sendCommand({ type: 'rollback', turn: state.rollbackPending });
+    state.rollbackPending = null;
+    closeModal('rollbackModal');
   }
 
   /* ---------------- markdown ---------------- */
@@ -2534,20 +2895,9 @@ try {
     return head;
   }
 
-  function addAssistantCard(content, reasoning) {
-    if (reasoning) addReasoningBlock(reasoning);
+  function addAssistantCard(content) {
     if (!content) return null;
-    const stick = isAtBottom();
-    removeEmptyState();
-    const card = el('article', 'msg agent');
-    card.append(makeAgentHead(false));
-    const body = el('div', 'md');
-    renderMarkdownInto(body, content);
-    card.append(body);
-    appendFeed(card);
-    pruneFeed();
-    maybeScroll(stick);
-    return card;
+    return feedPush('assistant', { text: String(content) }, { stick: true });
   }
 
   function createReasoningBlock(value, open) {
@@ -2563,81 +2913,85 @@ try {
   }
 
   function addReasoningBlock(value) {
-    const stick = isAtBottom();
-    removeEmptyState();
-    const block = createReasoningBlock(value);
-    appendFeed(block.el);
-    pruneFeed();
-    maybeScroll(stick);
-    return block;
+    return feedPush('reasoning', { text: String(value || ''), open: true }, { stick: true });
   }
 
   function appendReasoning(text) {
     const stick = isAtBottom();
-    let block = state.reasoningEl;
-    if (!block) {
-      block = createReasoningBlock('', true);
-      removeEmptyState();
-      appendFeed(block.el);
-      pruneFeed();
-      state.reasoningEl = block;
+    let item = state.reasoningItem;
+    if (!item) {
+      item = feedPush('reasoning', { text: '', open: true }, { stick });
+      item.pinned = true;
+      state.reasoningItem = item;
     }
-    block.text += String(text || '');
-    block.body.textContent = block.text;
-    block.count.textContent = block.text.length + ' 字';
+    item.data.text += String(text || '');
+    if (item.el) {
+      const body = item.el.querySelector('.think-body');
+      const count = item.el.querySelector('.think-count');
+      if (body) body.textContent = item.data.text;
+      if (count) count.textContent = item.data.text.length + ' 字';
+      item.measured = false;
+    }
     maybeScroll(stick);
   }
 
-  function closeReasoningBlock(block) {
-    if (block && block.el) block.el.open = false;
+  function closeReasoningBlock(item) {
+    if (!item) return;
+    item.data.done = true;
+    item.pinned = false;
+    if (item.el) item.el.open = false;
   }
 
-  function finalizeReasoning(text, beforeEl) {
+  function finalizeReasoning(text) {
     const value = String(text || '');
-    if (!value) return;
-    const stick = isAtBottom();
-    let block = state.reasoningEl;
-    if (!block) {
-      block = createReasoningBlock(value);
-      removeEmptyState();
-      if (state.appendTarget) state.appendTarget.append(block.el);
-      else if (beforeEl && beforeEl.parentNode === feedEl) feedEl.insertBefore(block.el, beforeEl);
-      else feedEl.append(block.el);
-      pruneFeed();
-    } else {
-      block.text = value;
-      block.body.textContent = value;
-      block.count.textContent = value.length + ' 字';
+    if (!value) {
+      closeReasoningBlock(state.reasoningItem);
+      state.reasoningItem = null;
+      return;
     }
-    block.el.open = false;
-    state.reasoningEl = null;
-    maybeScroll(stick);
+    const item = state.reasoningItem;
+    if (!item) {
+      addReasoningBlock(value);
+    } else {
+      item.data.text = value;
+      item.data.done = true;
+      item.data.open = false;
+      item.pinned = false;
+      if (item.el) {
+        const body = item.el.querySelector('.think-body');
+        const count = item.el.querySelector('.think-count');
+        if (body) body.textContent = value;
+        if (count) count.textContent = value.length + ' 字';
+        item.el.open = false;
+        item.measured = false;
+      }
+    }
+    state.reasoningItem = null;
   }
 
   function ensureAssistantCard() {
-    if (state.assistantEl) return state.assistantEl;
-    removeEmptyState();
-    const card = el('article', 'msg agent streaming');
-    card.append(makeAgentHead(true));
-    const body = el('div', 'md');
-    card.append(body);
-    appendFeed(card);
-    const current = { card, body, text: '' };
-    state.assistantEl = current;
-    return current;
+    if (state.assistantItem) return state.assistantItem;
+    const item = feedPush('assistant', { text: '', streaming: true }, { stick: true });
+    item.pinned = true;
+    state.assistantItem = item;
+    return item;
   }
 
   function appendAssistantDelta(text) {
     const stick = isAtBottom();
-    const current = ensureAssistantCard();
-    current.text += String(text || '');
+    const item = ensureAssistantCard();
+    item.data.text += String(text || '');
     if (!state.assistantRaf) {
       state.assistantRaf = requestAnimationFrame(() => {
         state.assistantRaf = 0;
-        const active = state.assistantEl;
-        if (!active) return;
-        if (active.text.length > 80000) active.body.textContent = active.text;
-        else renderMarkdownInto(active.body, active.text);
+        const active = state.assistantItem;
+        if (!active || !active.el) return;
+        const body = active.el.querySelector('.md');
+        if (!body) return;
+        if (active.data.text.length > 80000) body.textContent = active.data.text;
+        else renderMarkdownInto(body, active.data.text);
+        active.measured = false;
+        feedSync();
         if (stick) scrollBottom();
       });
     }
@@ -2648,43 +3002,48 @@ try {
       cancelAnimationFrame(state.assistantRaf);
       state.assistantRaf = 0;
     }
-    const current = state.assistantEl;
-    if (current) {
-      current.card.classList.remove('streaming');
-      const live = current.card.querySelector('.live-dot');
-      if (live) live.remove();
+    const item = state.assistantItem;
+    if (item) {
+      item.pinned = false;
+      item.data.streaming = false;
+      if (item.el) {
+        item.el.classList.remove('streaming');
+        const live = item.el.querySelector('.live-dot');
+        if (live) live.remove();
+      }
+      item.measured = false;
     }
-    closeReasoningBlock(state.reasoningEl);
-    state.assistantEl = null;
-    state.reasoningEl = null;
+    closeReasoningBlock(state.reasoningItem);
+    state.reasoningItem = null;
+    state.assistantItem = null;
+    feedSync();
   }
 
   function finishAssistantMessage(event) {
     const stick = isAtBottom();
     const content = String(event.content || '');
     const reasoning = String(event.reasoning || '');
-    const current = state.assistantEl;
-    finalizeReasoning(reasoning, current ? current.card : null);
-    if (!reasoning) closeReasoningBlock(state.reasoningEl);
-    if (content && !current) {
-      addAssistantCard(content, null);
-    } else if (current) {
-      if (content) {
-        current.text = content;
-        renderMarkdownInto(current.body, content);
+    finalizeReasoning(reasoning);
+    const item = state.assistantItem;
+    if (item) {
+      item.pinned = false;
+      item.data.streaming = false;
+      item.data.text = content;
+      item.measured = false;
+      if (item.el) {
+        item.el.classList.remove('streaming');
+        const live = item.el.querySelector('.live-dot');
+        if (live) live.remove();
+        const body = item.el.querySelector('.md');
+        if (body) renderMarkdownInto(body, content);
       }
-      current.card.classList.remove('streaming');
-      const live = current.card.querySelector('.live-dot');
-      if (live) live.remove();
-      if (!(current.body.textContent || '').trim()) current.card.remove();
+      feedSync();
+    } else if (content) {
+      addAssistantCard(content);
     }
     state.lastAssistant = content || state.lastAssistant;
-    state.assistantEl = null;
-    state.reasoningEl = null;
-    if (state.assistantRaf) {
-      cancelAnimationFrame(state.assistantRaf);
-      state.assistantRaf = 0;
-    }
+    state.assistantItem = null;
+    state.reasoningItem = null;
     maybeScroll(stick);
   }
 
@@ -2766,25 +3125,35 @@ try {
 
   function addToolCard(name, args, id, options) {
     const opts = options || {};
-    const stick = isAtBottom();
-    removeEmptyState();
+    const item = feedPush('tool', {
+      name: name || 'tool',
+      args: args,
+      id: id || null,
+      status: 'running',
+      live: '',
+      result: null,
+      open: opts.open !== false
+    }, { stick: true });
+    if (id) state.toolItems.set(id, item);
+    return item;
+  }
+
+  function buildToolItem(item) {
+    const data = item.data;
     const card = document.createElement('details');
-    card.className = 'tool';
-    card.open = opts.open !== false;
-    if (id) {
-      card.dataset.toolId = id;
-      state.toolCards.set(id, card);
-    }
+    card.className = 'tool' + (data.status === 'failed' ? ' failed' : '');
+    card.open = data.open !== false;
     const summary = document.createElement('summary');
-    const toolIcon = icon(toolIconName(name));
+    const toolIcon = icon(toolIconName(data.name));
     toolIcon.classList.add('tool-ico');
-    const nameEl = el('span', 'tname', name || 'tool');
-    const argsEl = el('span', 'targs', summarizeArgs(args));
-    const status = el('span', 'tstat run', '运行中');
+    const nameEl = el('span', 'tname', data.name || 'tool');
+    const argsEl = el('span', 'targs', summarizeArgs(data.args));
+    const status = el('span', 'tstat ' + (data.status === 'running' ? 'run' : data.status === 'failed' ? 'err' : 'ok'),
+      data.status === 'running' ? '运行中' : data.status === 'failed' ? '失败' : '完成');
     summary.append(toolIcon, nameEl, argsEl, status, icon('chevron-down', 'chev'));
 
     const body = el('div', 'tool-body');
-    const path = pickPath(args);
+    const path = pickPath(data.args);
     if (path) {
       const open = el('button', 'tool-path');
       open.type = 'button';
@@ -2796,7 +3165,7 @@ try {
       });
       body.append(open);
     }
-    const pretty = prettyArgs(args);
+    const pretty = prettyArgs(data.args);
     if (pretty) {
       const wrap = el('div');
       wrap.append(el('div', 'tool-label', '参数'));
@@ -2804,71 +3173,67 @@ try {
       body.append(wrap);
     }
     const liveWrap = el('div', 'live-wrap');
-    liveWrap.hidden = true;
+    liveWrap.hidden = !data.live;
     const liveHead = el('div', 'tool-result-head');
-    const liveSize = el('span', 'live-size');
+    const liveSize = el('span', 'live-size', data.live ? data.live.length + ' 字符 · 实时' : '实时');
     liveHead.append(el('div', 'tool-label', '实时输出'), liveSize);
-    const live = el('pre', 'tool-live');
+    const live = el('pre', 'tool-live', data.live || '（等待输出…）');
     liveWrap.append(liveHead, live);
     body.append(liveWrap);
+
     const resultWrap = el('div', 'result-wrap');
-    resultWrap.hidden = true;
+    resultWrap.hidden = data.result == null;
     const resultHead = el('div', 'tool-result-head');
-    resultHead.append(el('div', 'tool-label', '输出'), el('span', 'result-size'));
-    const result = el('pre', 'tool-result');
+    resultHead.append(el('div', 'tool-label', '输出'),
+      el('span', 'result-size', data.result ? data.result.length + ' 字符' : ''));
+    const result = el('pre', 'tool-result', data.result == null ? '' : truncateText(data.result, 60000));
     resultWrap.append(resultHead, result);
     body.append(resultWrap);
 
     card.append(summary, body);
-    appendFeed(card);
-    pruneFeed();
-    maybeScroll(stick);
+    item.body = body;
     return card;
   }
 
   function updateToolLive(id, name, text) {
-    let card = id ? state.toolCards.get(id) : null;
-    if (!card) {
-      card = addToolCard(name || 'tool', {}, id || null, { open: true });
-    }
-    if (card.dataset.done === '1') return;
+    let item = id ? state.toolItems.get(id) : null;
+    if (!item) item = addToolCard(name || 'tool', {}, id || null, { open: true });
+    if (item.data.status !== 'running') return;
     const stick = isAtBottom();
-    const wrap = card.querySelector('.live-wrap');
-    const live = card.querySelector('.tool-live');
-    if (!wrap || !live) return;
-    wrap.hidden = false;
-    const value = String(text == null ? '' : text);
-    live.textContent = value || '（等待输出…）';
-    live.scrollTop = live.scrollHeight;
-    const size = wrap.querySelector('.live-size');
-    if (size) size.textContent = value ? value.length + ' 字符 · 实时' : '实时';
-    if (stick) maybeScroll(stick);
+    item.data.live = String(text == null ? '' : text);
+    if (item.el) {
+      const wrap = item.el.querySelector('.live-wrap');
+      const live = item.el.querySelector('.tool-live');
+      if (live) {
+        live.textContent = item.data.live || '（等待输出…）';
+        live.scrollTop = live.scrollHeight;
+      }
+      if (wrap) wrap.hidden = false;
+      const size = item.el.querySelector('.live-size');
+      if (size) size.textContent = item.data.live ? item.data.live.length + ' 字符 · 实时' : '实时';
+      item.measured = false;
+      feedSync();
+    }
+    maybeScroll(stick);
   }
 
-  function fillToolResult(card, ok, content) {
-    if (!card) return;
+  function fillToolResult(item, ok, content) {
+    if (!item) return;
     const stick = isAtBottom();
-    setToolStatus(card, ok ? 'ok' : 'err', ok ? '完成' : '失败');
-    const wrap = card.querySelector('.result-wrap');
-    const result = card.querySelector('.tool-result');
-    const size = card.querySelector('.result-wrap .result-size');
-    const text = String(content == null ? '' : content);
-    if (result) result.textContent = text ? truncateText(text, 60000) : '（无输出）';
-    if (size) size.textContent = text ? text.length + ' 字符' : '';
-    if (wrap) wrap.hidden = false;
-    const liveWrap = card.querySelector('.live-wrap');
-    if (liveWrap) liveWrap.hidden = true;
-    card.dataset.done = '1';
-    card.classList.toggle('failed', !ok);
+    item.data.status = ok ? 'ok' : 'failed';
+    item.data.result = String(content == null ? '' : content);
+    item.data.live = '';
     // Finished calls fold away; the summary still shows status and args.
-    card.open = false;
+    item.data.open = false;
+    if (item.el) feedRebuild(item);
+    else item.measured = false;
     maybeScroll(stick);
   }
 
   function attachToolResult(id, name, ok, content) {
-    let card = id ? state.toolCards.get(id) : null;
-    if (!card) card = addToolCard(name || 'tool', {}, id || null, { open: true });
-    fillToolResult(card, ok, content);
+    let item = id ? state.toolItems.get(id) : null;
+    if (!item) item = addToolCard(name || 'tool', {}, id || null, { open: true });
+    fillToolResult(item, ok, content);
   }
 
   /* ---------------- compaction / activity ---------------- */
@@ -2927,6 +3292,7 @@ try {
     }
     $('activityBadge').hidden = !alert;
     $('activityDot').hidden = !alert;
+    renderLspBar();
   }
 
   function renderActivity() {
@@ -3192,7 +3558,9 @@ try {
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.setAttribute('aria-expanded', 'false');
-        row.append(icon('chevron-right', 'chev'), icon('folder', 'fico'), el('span', 'tname', entry.name));
+        const name = el('span', 'tname' + (entry.git ? ' git-' + entry.git : ''), entry.name);
+        row.append(icon('chevron-right', 'chev'), icon('folder', 'fico'), name);
+        if (entry.git) row.append(el('span', 'git-mark', gitMark(entry.git)));
         const children = el('div', 'tkids');
         children.hidden = true;
         const toggle = () => toggleDir(row, children, entry, depth, generation);
@@ -3211,7 +3579,7 @@ try {
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.append(el('span', 'tspacer'), icon('file', 'filico'),
-          el('span', 'tname', entry.name),
+          el('span', 'tname' + (entry.git ? ' git-' + entry.git : ''), entry.name),
           el('span', 'tsize', entry.size ? fmtBytes(entry.size) : ''));
         row.addEventListener('click', () => openFile(entry.path));
         row.addEventListener('keydown', (event) => {
@@ -3223,6 +3591,13 @@ try {
         container.append(row);
       }
     }
+  }
+
+  /// One letter per status: `M`odified, `U`ntracked, `A`dded, `D`eleted,
+  /// `R`enamed, `C`onflicted, `I`gnored.
+  function gitMark(status) {
+    return ({ modified: 'M', untracked: 'U', added: 'A', deleted: 'D',
+      renamed: 'R', conflicted: 'C', ignored: 'I' })[status] || '';
   }
 
   async function toggleDir(row, children, entry, depth, generation) {
@@ -3289,7 +3664,7 @@ try {
   }
 
   function setInspectorTab(tab) {
-    if (!['code', 'preview', 'activity'].includes(tab)) tab = 'code';
+    if (!['code', 'preview', 'activity', 'terminal'].includes(tab)) tab = 'code';
     state.inspectorTab = tab;
     document.querySelectorAll('.itab').forEach((button) => {
       button.classList.toggle('active', button.dataset.itab === tab);
@@ -3297,9 +3672,15 @@ try {
     $('paneCode').classList.toggle('active', tab === 'code');
     $('panePreview').classList.toggle('active', tab === 'preview');
     $('paneActivity').classList.toggle('active', tab === 'activity');
+    $('paneTerminal').classList.toggle('active', tab === 'terminal');
     if (tab === 'activity') {
       renderActivity();
       requestLspStatus();
+    }
+    if (tab === 'terminal') {
+      if (!state.terminal.open) openTerminal();
+      else resizeTerminal();
+      setTimeout(() => $('termInput').focus(), 30);
     }
     syncInspectorHeader();
   }
@@ -3539,6 +3920,269 @@ try {
     toast(ok ? '已复制文件内容' : '复制失败，请手动选择文本', ok ? '' : 'error');
   }
 
+  /* ---------------- model dropdown ---------------- */
+  function updateModelChips() {
+    const model = state.agentModel || (state.config && state.config.agent_model) || 'None';
+    $('modelBtnValue').textContent = model;
+    $('modelBtn').title = 'Agent 模型：' + model;
+  }
+
+  function toggleModelMenu(force) {
+    const pop = $('modelPop');
+    const open = force === undefined ? pop.hidden : !!force;
+    pop.hidden = !open;
+    $('modelBtn').setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    $('modelSearch').value = '';
+    renderModelMenu();
+    if (isConnected()) sendCommand({ type: 'describe_models' });
+    setTimeout(() => $('modelSearch').focus(), 20);
+  }
+
+  function renderModelMenu() {
+    const box = $('modelListBox');
+    if (!box) return;
+    const query = $('modelSearch').value.trim().toLowerCase();
+    const catalog = Array.isArray(state.models.catalog) ? state.models.catalog : [];
+    const rows = catalog.filter((model) => !query ||
+      String(model.reference).toLowerCase().includes(query) ||
+      String(model.name || '').toLowerCase().includes(query));
+    box.replaceChildren();
+    if (!rows.length) {
+      box.append(el('div', 'pick-empty', catalog.length ? '没有匹配的模型。' : '配置里还没有模型。'));
+      return;
+    }
+    for (const model of rows) {
+      const button = el('button', 'model-opt' + (model.reference === state.agentModel ? ' sel' : ''));
+      button.type = 'button';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', String(model.reference === state.agentModel));
+      button.append(el('span', 'model-opt-name', model.reference));
+      const meta = [];
+      if (model.context_window) meta.push(fmtTokens(model.context_window) + ' ctx');
+      if (model.reasoning) meta.push('reasoning');
+      button.append(el('span', 'model-opt-meta', meta.join(' · ')));
+      button.addEventListener('click', () => {
+        toggleModelMenu(false);
+        if (model.reference === state.agentModel) return;
+        sendCommand({ type: 'set_agent_model', model: model.reference });
+      });
+      box.append(button);
+    }
+  }
+
+  /* ---------------- working directory ---------------- */
+  async function pickWorkingDirectory() {
+    if (!isConnected()) {
+      toast('尚未连接', 'error');
+      return;
+    }
+    try {
+      const picked = await api('/api/cwd/pick', { method: 'POST' });
+      if (picked && picked.path) {
+        sendCommand({ type: 'set_cwd', path: picked.path });
+        return;
+      }
+      if (picked && picked.cancelled) return;
+    } catch (_) {
+      // Fall through to the server-side browser.
+    }
+    openDirPicker(state.cwd);
+  }
+
+  async function openDirPicker(path) {
+    $('dirError').hidden = true;
+    $('dirList').replaceChildren(el('div', 'pick-empty', '正在读取目录…'));
+    openModal('dirModal');
+    try {
+      const listing = await api('/api/dirs?' + queryString({ path: path || '' }));
+      state.dirPath = listing.path;
+      $('dirPath').textContent = listing.path;
+      const list = $('dirList');
+      list.replaceChildren();
+      if (!(listing.entries || []).length) {
+        list.append(el('div', 'pick-empty', '这个目录没有子目录。'));
+      }
+      for (const entry of (listing.entries || [])) {
+        const button = el('button', 'pick');
+        button.type = 'button';
+        button.append(el('span', 'pick-name', entry.name + '/'));
+        button.addEventListener('click', () => openDirPicker(entry.path));
+        list.append(button);
+      }
+      $('dirUp').disabled = !listing.parent;
+      $('dirUp').dataset.parent = listing.parent || '';
+    } catch (error) {
+      $('dirList').replaceChildren();
+      const node = $('dirError');
+      node.textContent = error.message || String(error);
+      node.hidden = false;
+    }
+  }
+
+  /* ---------------- language servers ---------------- */
+  function renderLspBar() {
+    const statuses = Array.from(state.lsp.values());
+    const running = statuses.filter((status) => status.state === 'running').length;
+    const missing = statuses.filter((status) => status.state === 'absent' || status.state === 'degraded').length;
+    const dot = $('lspDot');
+    dot.className = 'dot ' + (missing ? 'warn' : running ? 'ok' : '');
+    $('lspStatusText').textContent = statuses.length
+      ? 'LSP ' + running + ' 运行' + (missing ? ' · ' + missing + ' 缺失' : '')
+      : 'LSP';
+    const procs = Array.from(state.processes.values());
+    const live = procs.filter((proc) => proc.status === 'running' || proc.status === 'timeout').length;
+    $('procDot').className = 'dot ' + (live ? 'run' : '');
+    $('procStatusText').textContent = '进程 ' + live + '/' + procs.length;
+  }
+
+  function openLspDialog() {
+    if (!isConnected()) {
+      toast('尚未连接', 'error');
+      return;
+    }
+    $('lspServers').replaceChildren(el('div', 'pick-empty', '正在读取语言服务器…'));
+    openModal('lspModal');
+    sendCommand({ type: 'describe_lsp' });
+  }
+
+  function renderLspDialog() {
+    const list = $('lspServers');
+    if (!list || $('lspModal').hidden) return;
+    const statuses = Array.from(state.lsp.values())
+      .sort((a, b) => a.language.localeCompare(b.language));
+    list.replaceChildren();
+    if (!statuses.length) {
+      list.append(el('div', 'pick-empty', '还没有语言服务器状态。打开一个代码文件后会开始检测。'));
+      return;
+    }
+    for (const status of statuses) {
+      const row = el('div', 'lsp-row');
+      row.append(el('span', 'lsp-lang', status.language));
+      row.append(el('span', 'tstat ' + lspClass(status.state), lspLabel(status.state)));
+      const meta = [];
+      if (status.server) meta.push(status.server);
+      if (status.version) meta.push('v' + status.version);
+      if (status.restarts) meta.push('重启 ' + status.restarts);
+      if (status.detail) meta.push(status.detail);
+      row.append(el('span', 'lsp-meta', meta.join(' · ') || (status.install_hint || '')));
+      if (status.server) {
+        const install = el('button', 'install-btn', status.state === 'running' ? '更新' : '下载');
+        install.type = 'button';
+        install.addEventListener('click', () => {
+          sendCommand({
+            type: 'install_lsp',
+            server: status.server,
+            update: status.state === 'running'
+          });
+          toast('正在处理 ' + status.server + '…');
+        });
+        row.append(install);
+      }
+      if (status.install_hint && status.state !== 'running') {
+        row.title = status.install_hint;
+      }
+      list.append(row);
+    }
+  }
+
+  /* ---------------- terminal ---------------- */
+  const TERM_KEYMAP = {
+    Enter: '\r', NumpadEnter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
+    ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D',
+    Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~', PageUp: '\x1b[5~', PageDown: '\x1b[6~'
+  };
+
+  function termSend(data) {
+    if (!isConnected() || !state.terminal.open) return;
+    sendCommand({ type: 'terminal_input', data });
+  }
+
+  function openTerminal() {
+    if (!isConnected()) {
+      toast('尚未连接', 'error');
+      return;
+    }
+    const wrap = $('termWrap');
+    const cols = Math.max(20, Math.floor((wrap.clientWidth - 16) / 7.23));
+    const rows = Math.max(4, Math.floor((wrap.clientHeight - 12) / 16.2));
+    state.terminal.open = true;
+    $('termInfo').textContent = '正在启动终端…';
+    sendCommand({ type: 'open_terminal', cols, rows });
+  }
+
+  function closeTerminal() {
+    if (!isConnected()) return;
+    sendCommand({ type: 'close_terminal' });
+    state.terminal.open = false;
+  }
+
+  function renderTerminal(event) {
+    const screen = $('termScreen');
+    const lines = String(event.screen || '').split('\n');
+    if (event.cursor_hidden) {
+      screen.textContent = lines.join('\n');
+    } else {
+      const row = Math.min(Math.max(Number(event.cursor_row) || 0, 0), Math.max(lines.length - 1, 0));
+      const col = Math.max(Number(event.cursor_col) || 0, 0);
+      const line = lines[row] == null ? '' : lines[row];
+      const before = line.slice(0, col);
+      const under = line.charAt(col) || ' ';
+      const after = line.slice(col + 1);
+      screen.replaceChildren(
+        document.createTextNode((lines.slice(0, row).join('\n') + (row > 0 ? '\n' : ''))),
+        document.createTextNode(before),
+        el('span', 'term-cursor', under === '' ? ' ' : under),
+        document.createTextNode(after + (row < lines.length - 1 ? '\n' + lines.slice(row + 1).join('\n') : ''))
+      );
+    }
+    const wrap = $('termWrap');
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+
+  function bindTerminalInput() {
+    const input = $('termInput');
+    input.addEventListener('keydown', (event) => {
+      if (!state.terminal.open) return;
+      let data = null;
+      if (event.ctrlKey && !event.altKey && !event.metaKey && /^[a-zA-Z]$/.test(event.key)) {
+        data = String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
+      } else if (TERM_KEYMAP[event.key]) {
+        data = TERM_KEYMAP[event.key];
+      } else if (event.key === 'c' && event.ctrlKey) {
+        data = '\x03';
+      }
+      if (data === null && (event.ctrlKey || event.altKey || event.metaKey)) return;
+      if (data !== null) {
+        event.preventDefault();
+        termSend(data);
+      }
+    });
+    input.addEventListener('input', () => {
+      const value = input.value;
+      if (!value) return;
+      input.value = '';
+      termSend(value);
+    });
+    input.addEventListener('paste', (event) => {
+      const text = (event.clipboardData && event.clipboardData.getData('text')) || '';
+      if (!text) return;
+      event.preventDefault();
+      termSend(text);
+    });
+  }
+
+  function resizeTerminal() {
+    if (!state.terminal.open || !isConnected()) return;
+    const wrap = $('termWrap');
+    const cols = Math.max(20, Math.floor((wrap.clientWidth - 16) / 7.23));
+    const rows = Math.max(4, Math.floor((wrap.clientHeight - 12) / 16.2));
+    if (cols === state.terminal.cols && rows === state.terminal.rows) return;
+    state.terminal.cols = cols;
+    state.terminal.rows = rows;
+    sendCommand({ type: 'terminal_resize', cols, rows });
+  }
+
   /* ---------------- websocket / protocol ---------------- */
   function authHeaders() {
     return state.token ? { Authorization: 'Bearer ' + state.token } : {};
@@ -3617,8 +4261,12 @@ try {
     state.lsp.clear();
     state.processes.clear();
     settleStreaming();
-    state.toolCards.clear();
     clearFeed();
+    state.terminal.open = false;
+    state.terminal.cols = 0;
+    state.terminal.rows = 0;
+    $('termScreen').replaceChildren();
+    $('termInfo').textContent = '终端未启动';
     renderTodos();
     renderActivity();
     clearViewer();
@@ -3684,91 +4332,6 @@ try {
     };
   }
 
-  function historyStartFor(messages, count) {
-    let start = Math.max(0, messages.length - count);
-    // Prefer starting at a user turn so a page never begins with an orphaned
-    // tool result whose assistant call is outside the window.
-    for (let i = start; i >= Math.max(0, start - 8); i--) {
-      if (messages[i] && messages[i].role === 'user') return i;
-    }
-    return start;
-  }
-
-  function renderHistoryRange(from, to) {
-    const history = state.history;
-    if (!history) return;
-    const previousBatch = state.batchRender;
-    const previousTarget = state.appendTarget;
-    state.batchRender = true;
-    try {
-      for (let i = from; i < to; i++) renderSnapshotMessage(history.messages[i]);
-    } finally {
-      state.batchRender = previousBatch;
-      state.appendTarget = previousTarget;
-    }
-  }
-
-  function syncHistoryButton() {
-    const history = state.history;
-    let button = state.historyBtn;
-    if (!history || history.start <= 0) {
-      if (button) button.hidden = true;
-      return;
-    }
-    if (!button) {
-      button = el('button', 'history-more');
-      button.type = 'button';
-      button.id = 'historyMore';
-      button.addEventListener('click', loadEarlierHistory);
-      state.historyBtn = button;
-      feedEl.prepend(button);
-    }
-    button.hidden = false;
-    const rendered = history.end - history.start;
-    if (rendered >= HISTORY_MAX) {
-      button.disabled = true;
-      button.textContent = '更早的 ' + history.start + ' 条消息已折叠以控制内存';
-    } else {
-      button.disabled = false;
-      const take = Math.min(HISTORY_PAGE, history.start);
-      button.replaceChildren(icon('chevron-up'),
-        el('span', null, '载入更早的 ' + take + ' 条 · 共 ' + history.start + ' 条'));
-    }
-  }
-
-  function loadEarlierHistory() {
-    const history = state.history;
-    if (!history || history.start <= 0) return;
-    if (history.end - history.start >= HISTORY_MAX) return;
-    let from = Math.max(0, history.start - HISTORY_PAGE);
-    for (let i = from; i >= Math.max(0, from - 8); i--) {
-      if (history.messages[i] && history.messages[i].role === 'user') {
-        from = i;
-        break;
-      }
-    }
-    const stick = isAtBottom();
-    const beforeHeight = feedEl.scrollHeight;
-    const beforeTop = feedEl.scrollTop;
-    const fragment = document.createDocumentFragment();
-    state.appendTarget = fragment;
-    try {
-      renderHistoryRange(from, history.start);
-    } finally {
-      state.appendTarget = null;
-    }
-    history.start = from;
-    const anchor = state.historyBtn ? state.historyBtn.nextSibling : feedEl.firstChild;
-    feedEl.insertBefore(fragment, anchor);
-    if (!stick) {
-      const previous = feedEl.style.scrollBehavior;
-      feedEl.style.scrollBehavior = 'auto';
-      feedEl.scrollTop = beforeTop + (feedEl.scrollHeight - beforeHeight);
-      feedEl.style.scrollBehavior = previous;
-    }
-    syncHistoryButton();
-  }
-
   function applySnapshot(snapshot) {
     const previous = state.sessionId;
     state.sessionId = snapshot.session_id;
@@ -3790,11 +4353,11 @@ try {
     settleStreaming();
     clearFeed(false);
     const messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
-    const start = historyStartFor(messages, HISTORY_INITIAL);
-    state.history = messages.length ? { messages, start, end: messages.length } : null;
-    if (messages.length) {
-      renderHistoryRange(start, messages.length);
-      syncHistoryButton();
+    state.feed.batch = true;
+    try {
+      for (const message of messages) renderSnapshotMessage(message);
+    } finally {
+      state.feed.batch = false;
     }
     state.todos = Array.isArray(snapshot.todos) ? snapshot.todos : [];
     updateSessionUI();
@@ -3802,23 +4365,37 @@ try {
     updateStats();
     renderTodos();
     renderActivity();
-    if (!messages.length) showEmptyState();
+    // Emptiness is about rendered items: a snapshot can carry messages this
+    // UI skips (system prompts, empty content) and still have nothing to show.
+    if (!state.feed.items.length) showEmptyState();
+    feedSync();
     scrollBottomInstant();
     scheduleTreeReload(120);
     refreshSessions();
+    requestSettings();
+    requestLspStatus();
   }
 
   function renderSnapshotMessage(message) {
     if (!message || !message.role) return;
     if (message.role === 'system') return;
     if (message.role === 'user') {
-      if (message.content) addUserMessage(message.content);
+      const content = String(message.content || '');
+      if (!content) return;
+      if (content.startsWith(COMPACTION_PREFIX)) {
+        const summary = content.slice(COMPACTION_PREFIX.length).replace(/\n<\/summary>$/, '');
+        feedPush('compaction', { summary, dropped: 0 }, { stick: false });
+      } else if (content.startsWith('[image]')) {
+        feedPush('note', { text: content, kind: '' }, { stick: false });
+      } else {
+        addUserMessage(content);
+      }
       return;
     }
     if (message.role === 'assistant') {
       if (message.reasoning_content) addReasoningBlock(message.reasoning_content);
       if (message.content) {
-        addAssistantCard(message.content, null);
+        addAssistantCard(message.content);
         state.lastAssistant = message.content;
       }
       for (const call of (message.tool_calls || [])) {
@@ -3829,12 +4406,12 @@ try {
     }
     if (message.role === 'tool') {
       const id = message.tool_call_id;
-      const existing = id ? state.toolCards.get(id) : null;
+      const existing = id ? state.toolItems.get(id) : null;
       if (existing) {
         fillToolResult(existing, true, message.content || '');
       } else {
-        const card = addToolCard(message.name || 'tool', {}, null, { open: false });
-        fillToolResult(card, true, message.content || '');
+        const item = addToolCard(message.name || 'tool', {}, null, { open: false });
+        fillToolResult(item, true, message.content || '');
       }
     }
   }
@@ -3885,6 +4462,8 @@ try {
           state.lsp.set(server.language, Object.assign({}, known, server));
         }
         renderActivity();
+        renderLspDialog();
+        renderLspBar();
         break;
       case 'lsp_status': {
         const previous = state.lsp.get(event.language) || {};
@@ -3895,6 +4474,7 @@ try {
             (event.detail ? ' — ' + event.detail : ''), 'warn');
         }
         renderActivity();
+        renderLspBar();
         break;
       }
       case 'process_snapshot':
@@ -3904,6 +4484,7 @@ try {
           exit_code: event.exit_code
         });
         renderActivity();
+        renderLspBar();
         break;
       case 'process_exited': {
         const existing = state.processes.get(event.pid) || { screen: '' };
@@ -3917,12 +4498,16 @@ try {
             (event.exit_code != null ? '（exit ' + event.exit_code + '）' : ''), 'warn');
         }
         renderActivity();
+        renderLspBar();
         break;
       }
       case 'download_consent':
         showConsent(event);
         break;
       case 'download_status':
+        setTimeout(() => {
+          if (!$('lspModal').hidden) sendCommand({ type: 'describe_lsp' });
+        }, 400);
         addNote('LSP 下载 ' + event.server_id + '：' + event.state +
           (event.percent != null ? ' ' + event.percent + '%' : '') +
           (event.detail ? ' — ' + event.detail : ''));
@@ -3951,6 +4536,7 @@ try {
         if (state.models.agent) state.agentModel = state.models.agent;
         state.compactModel = state.models.separate ? state.models.compact : '';
         renderModels();
+        renderModelMenu();
         updateModelChips();
         break;
       case 'model_catalog':
@@ -3963,9 +4549,19 @@ try {
           if (event.error) setAddModelError('未能拉取模型列表：' + event.error + '（仍可直接输入模型 id）');
         }
         break;
-      case 'turns':
-        state.turns = Array.isArray(event.turns) ? event.turns : [];
-        renderTurns();
+      case 'terminal_state':
+        state.terminal.open = event.state === 'running';
+        $('termInfo').textContent = event.state === 'running'
+          ? (event.shell || 'shell') + ' · ' + (event.cwd || state.cwd)
+          : '终端已退出';
+        if (event.state === 'running') resizeTerminal();
+        break;
+      case 'terminal_output':
+        renderTerminal(event);
+        break;
+      case 'terminal_size':
+        state.terminal.cols = Number(event.cols) || state.terminal.cols;
+        state.terminal.rows = Number(event.rows) || state.terminal.rows;
         break;
       case 'compaction':
         addCompactionCard(event);
@@ -4004,18 +4600,10 @@ try {
   }
 
   function addCompactionCard(event) {
-    const stick = isAtBottom();
-    removeEmptyState();
-    const card = el('details', 'compaction');
-    const summary = el('summary', 'compaction-head');
-    summary.append(icon('activity'),
-      el('span', null, '上下文已压缩 · 丢弃 ' + event.dropped_messages + ' 条消息'));
-    card.append(summary);
-    const body = el('pre', 'compaction-body', String(event.summary || '（无摘要）'));
-    card.append(body);
-    appendFeed(card);
-    pruneFeed();
-    maybeScroll(stick);
+    feedPush('compaction', {
+      summary: String(event.summary || ''),
+      dropped: Number(event.dropped_messages) || 0
+    }, { stick: true });
   }
 
   function handleNotice(event) {
@@ -4072,144 +4660,46 @@ try {
     }
   }
 
-  /// Every slash command the TUI offers, mapped onto the socket. `/lsp` takes
-  /// a subcommand because installing is what a browser cannot do by itself.
+  // The browser has controls for everything the TUI does with `/name`, so only
+  // the three that read better as text are still parsed.
   const SLASH_HELP = [
-    '/help                命令列表',
-    '/model [名称]        打开模型选择器，或直接切换 Agent 模型',
-    '/cwd [目录]          查看或切换工作目录',
-    '/new                 新建会话',
-    '/resume              打开本地会话列表',
-    '/rollback            回滚到更早的输入',
-    '/session             当前会话、模型与上下文',
-    '/settings            设置（会话 / 通用 / 压缩 / 网络搜索）',
-    '/files               聚焦左侧文件树',
-    '/view <路径>         在右侧只读查看文件',
-    '/lsp                 语言服务器状态',
-    '/lsp install <id>    下载最新的语言服务器',
-    '/lsp update <id>     重新安装语言服务器',
-    '/procs               后台进程',
-    '/copy                复制最后一条回复',
-    '/cancel              停止当前回合',
-    '/hotkeys             键盘快捷键'
+    '浏览器里绝大多数操作都是界面控件，只剩三条命令：',
+    '/help      这条帮助',
+    '/hotkeys   键盘快捷键',
+    '/copy      复制最后一条回复',
+    '',
+    '模型：输入框右下角的下拉框',
+    '工作目录：输入框左下角的文件夹按钮',
+    '回滚 / 复制某条消息：在消息上点右键',
+    '设置 / 语言服务器 / 终端：右上角齿轮、底部 LSP 状态栏、右侧「终端」标签'
   ].join('\n');
 
   function runSlash(text) {
-    const space = text.indexOf(' ');
-    const command = (space === -1 ? text : text.slice(0, space)).toLowerCase();
-    const arg = space === -1 ? '' : text.slice(space + 1).trim();
+    const command = text.split(' ')[0].toLowerCase();
     const clear = () => {
       inputEl.value = '';
       resizeInput();
     };
-    switch (command) {
-      case '/help':
-        clear();
-        addNote(SLASH_HELP, 'brand');
-        return true;
-      case '/hotkeys':
-        clear();
-        addNote([
-          'Enter 发送 · Shift+Enter 换行',
-          'Esc 关闭浮层、抽屉与弹窗',
-          '点击顶栏模型 chip 打开模型选择器',
-          '左侧可拖动分隔条调整宽度，双击分隔条复位'
-        ].join('\n'), 'brand');
-        return true;
-      case '/model':
-        clear();
-        if (arg) sendCommand({ type: 'set_agent_model', model: arg });
-        else openModelPicker('agent');
-        return true;
-      case '/cwd':
-        clear();
-        if (arg) sendCommand({ type: 'set_cwd', path: arg });
-        else addNote('当前工作目录：' + (state.cwd || '—'), 'brand');
-        return true;
-      case '/new':
-        clear();
-        connect(null);
-        return true;
-      case '/resume':
-        clear();
-        switchSideTab('sessions');
-        if (isLeftDrawer()) openLeftDrawer();
-        else setLeftCollapsed(false);
-        return true;
-      case '/rollback':
-        clear();
-        openRollback();
-        return true;
-      case '/session': {
-        clear();
-        const lines = [
-          '会话：' + (state.sessionId || '—'),
-          '工作区：' + (state.cwd || '—'),
-          'Agent：' + (state.agentModel || 'None'),
-          '压缩：' + (state.compactModel || 'None'),
-          '上下文：' + (state.contextLimit
-            ? fmtTokens(state.contextTokens) + ' / ' + fmtTokens(state.contextLimit) +
-              '（' + Math.round((state.contextTokens / state.contextLimit) * 100) + '%）'
-            : '—'),
-          '用量：in ' + fmtTokens(state.inputTokens) + ' · out ' + fmtTokens(state.outputTokens) +
-            (state.costUsd == null ? '' : ' · $' + Number(state.costUsd).toFixed(4))
-        ];
-        addNote(lines.join('\n'), 'brand');
-        return true;
-      }
-      case '/settings':
-        clear();
-        openSettings('session');
-        return true;
-      case '/files':
-        clear();
-        switchSideTab('files');
-        if (isLeftDrawer()) openLeftDrawer();
-        else setLeftCollapsed(false);
-        return true;
-      case '/view':
-        clear();
-        if (!arg) addNote('用法：/view <路径>', 'warn');
-        else openFile(arg);
-        return true;
-      case '/lsp': {
-        clear();
-        const sub = arg.split(/\s+/).filter(Boolean);
-        if (sub.length >= 2 && (sub[0] === 'install' || sub[0] === 'update')) {
-          sendCommand({ type: 'install_lsp', server: sub[1], update: sub[0] === 'update' });
-          toast('正在' + (sub[0] === 'update' ? '重装 ' : '下载 ') + sub[1] + '…');
-          return true;
-        }
-        if (!state.lsp.size) {
-          addNote('暂无 LSP 状态事件；打开代码文件或触发定义查询后会出现。', 'brand');
-        } else {
-          const rows = Array.from(state.lsp.keys()).sort().map((language) => {
-            const status = state.lsp.get(language);
-            return language + '：' + lspLabel(status.state) + (status.detail ? ' — ' + status.detail : '');
-          });
-          addNote(rows.join('\n'), 'brand');
-        }
-        return true;
-      }
-      case '/procs':
-        clear();
-        setInspectorTab('activity');
-        openRightPanel();
-        return true;
-      case '/copy':
-        clear();
-        copyLastReply();
-        return true;
-      case '/cancel':
-        clear();
-        sendCommand({ type: 'cancel' });
-        toast('正在停止当前回合…');
-        return true;
-      default:
-        clear();
-        addNote('未知命令：' + command + '，输入 /help 查看全部命令。', 'warn');
-        return true;
+    clear();
+    if (command === '/help') {
+      addNote(SLASH_HELP, 'brand');
+      return true;
     }
+    if (command === '/hotkeys') {
+      addNote([
+        'Enter 发送 · Shift+Enter 换行',
+        '消息右键：回滚 / 复制',
+        'Esc 关闭浮层、下拉框与弹窗',
+        '终端标签里直接敲键盘；Ctrl+C 按钮发中断'
+      ].join('\n'), 'brand');
+      return true;
+    }
+    if (command === '/copy') {
+      copyLastReply();
+      return true;
+    }
+    addNote('斜杠命令已改为界面控件，只剩 /help、/hotkeys、/copy。输入 /help 查看对应位置。', 'warn');
+    return true;
   }
 
   async function copyLastReply() {
@@ -4224,16 +4714,8 @@ try {
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
-    // A leading slash is always a command, like in the TUI: an unknown one is
-    // reported instead of being sent to the model as prose.
+    // A leading slash is still a command attempt; anything else is prose.
     if (text.startsWith('/')) {
-      const command = text.split(' ')[0].toLowerCase();
-      const offline = !isConnected();
-      const local = ['/help', '/hotkeys', '/settings', '/copy'].includes(command);
-      if (offline && !local) {
-        toast('尚未连接', 'error');
-        return;
-      }
       runSlash(text);
       return;
     }
@@ -4300,9 +4782,51 @@ try {
       if (isLeftDrawer()) openLeftDrawer();
       else setLeftCollapsed(false);
     });
-    $('wsPath').addEventListener('click', () => openSettings('session'));
-    $('modelChip').addEventListener('click', () => openModelPicker('agent'));
-    $('compactChip').addEventListener('click', () => openModelPicker('compact'));
+    $('wsPath').addEventListener('click', pickWorkingDirectory);
+    $('modelBtn').addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleModelMenu();
+    });
+    $('modelPop').addEventListener('click', (event) => event.stopPropagation());
+    $('modelSearch').addEventListener('input', renderModelMenu);
+    $('modelSearch').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        toggleModelMenu(false);
+      }
+      if (event.key === 'Enter') {
+        const first = $('modelListBox').querySelector('.model-opt');
+        if (first) first.click();
+      }
+    });
+    $('modelAddBtn').addEventListener('click', () => {
+      toggleModelMenu(false);
+      openAddModel();
+    });
+    $('cwdBtn').addEventListener('click', pickWorkingDirectory);
+    $('lspStatus').addEventListener('click', openLspDialog);
+    $('procStatus').addEventListener('click', () => {
+      setInspectorTab('activity');
+      openRightPanel();
+    });
+    $('lspRefresh').addEventListener('click', () => sendCommand({ type: 'describe_lsp' }));
+    $('dirUp').addEventListener('click', () => openDirPicker($('dirUp').dataset.parent || ''));
+    $('dirChoose').addEventListener('click', () => {
+      if (!state.dirPath) return;
+      sendCommand({ type: 'set_cwd', path: state.dirPath });
+      closeModal('dirModal');
+    });
+    $('termRestart').addEventListener('click', () => {
+      closeTerminal();
+      setTimeout(openTerminal, 250);
+    });
+    $('termCopy').addEventListener('click', () => copyWithToast($('termScreen').textContent || ''));
+    $('termCtrlC').addEventListener('click', () => {
+      termSend('\x03');
+      setTimeout(resizeTerminal, 60);
+    });
+    $('termWrap').addEventListener('click', () => $('termInput').focus());
+    bindTerminalInput();
     $('treeRefresh').addEventListener('click', loadTree);
     $('refreshSessions').addEventListener('click', refreshSessions);
     $('reconnectBtn').addEventListener('click', () => {
@@ -4351,11 +4875,20 @@ try {
     document.querySelectorAll('.itab').forEach((button) => {
       button.addEventListener('click', () => setInspectorTab(button.dataset.itab));
     });
-    for (const id of ['settingsModal', 'modelModal', 'addModelModal', 'rollbackModal']) {
+    for (const id of ['settingsModal', 'modelModal', 'addModelModal', 'rollbackModal', 'lspModal', 'dirModal']) {
       $(id).addEventListener('click', (event) => {
         if (event.target === $(id)) closeModal(id);
       });
     }
+    feedEl.addEventListener('scroll', () => {
+      hideContextMenu();
+      feedSync();
+    }, { passive: true });
+    if (window.ResizeObserver) {
+      new ResizeObserver(() => feedSync()).observe(feedEl);
+      new ResizeObserver(() => resizeTerminal()).observe($('termWrap'));
+    }
+    window.addEventListener('resize', () => feedSync());
     inputEl.addEventListener('input', resizeInput);
     inputEl.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -4363,13 +4896,26 @@ try {
         sendMessage();
       }
     });
+    document.addEventListener('click', () => {
+      hideContextMenu();
+      if (!$('modelPop').hidden) toggleModelMenu(false);
+    });
+    window.addEventListener('blur', () => {
+      hideContextMenu();
+      if (!$('modelPop').hidden) toggleModelMenu(false);
+    });
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
+      if (!$('modelPop').hidden) {
+        toggleModelMenu(false);
+        return;
+      }
+      hideContextMenu();
       if (!$('consentModal').hidden) {
         decideConsent(false);
         return;
       }
-      for (const id of ['#settingsModal', '#modelModal', '#addModelModal', '#rollbackModal']) {
+      for (const id of ['#settingsModal', '#modelModal', '#addModelModal', '#rollbackModal', '#lspModal', '#dirModal']) {
         if (!$(id.slice(1)).hidden) {
           closeModal(id.slice(1));
           return;
@@ -4408,6 +4954,12 @@ try {
   }
 
   init();
+
+  // `?debug=1` exposes the feed internals so a browser test can drive a
+  // synthetic snapshot (real ones need a provider) and count mounted nodes.
+  if (new URLSearchParams(location.search).has('debug')) {
+    window.__rh = { state, feedSync, showEmptyState, clearFeed, applySnapshot, renderSnapshotMessage };
+  }
 })();
 </script>
 </body>

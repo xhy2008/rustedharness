@@ -3,14 +3,17 @@
 //! Every browser tab owns one agent session. The WebSocket carries the same
 //! `HarnessEvent` / `HarnessCommand` protocol as the TUI, so new frontends do
 //! not need any server-specific event mapping. REST endpoints expose saved
-//! sessions and non-secret configuration.
+//! sessions, non-secret configuration, the workspace tree (with git status) and
+//! the directory browser; the interactive shell lives in [`terminal`], and the
+//! settings surface in [`settings`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -25,7 +28,9 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
+mod git;
 mod settings;
+mod terminal;
 
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::{Config, NewModel};
@@ -43,6 +48,10 @@ struct AppState {
     config: Config,
     cwd: PathBuf,
     token: Option<String>,
+    /// Where the server is reachable. Native dialogs are only offered when that
+    /// is loopback: popping a file picker on a shared host is not a service a
+    /// remote browser should be able to trigger.
+    local: SocketAddr,
     /// Per-session workspace roots so the file browser follows `/cwd`.
     cwds: Mutex<HashMap<String, PathBuf>>,
 }
@@ -92,6 +101,7 @@ pub async fn spawn(
         config,
         cwd,
         token,
+        local,
         cwds: Mutex::new(HashMap::new()),
     }));
     let handle = tokio::spawn(async move {
@@ -137,6 +147,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/config", get(config_info))
         .route("/api/tree", get(workspace_tree))
         .route("/api/file", get(workspace_file))
+        .route("/api/dirs", get(list_dirs))
+        .route("/api/cwd/pick", axum::routing::post(pick_dir))
         .route("/api/sessions", get(list_sessions))
         .route(
             "/api/sessions/{id}",
@@ -226,7 +238,24 @@ async fn workspace_tree(
     headers: HeaderMap,
     Query(query): Query<PathQuery>,
 ) -> Response {
-    workspace_payload(&state, &headers, &query, tree_payload)
+    if let Err(status) = authorized(&state, &headers) {
+        return status.into_response();
+    }
+    let resolver = match WorkspacePathResolver::new(workspace_root(&state, &query.session)) {
+        Ok(resolver) => resolver,
+        Err(err) => return core_error(err),
+    };
+    let (entries, rel, dir) = match tree_entries(&resolver, &query.path) {
+        Ok(triple) => triple,
+        Err(err) => return core_error(err),
+    };
+    // `git status` walks the whole work tree, so it runs off the reactor.
+    let probe = dir.clone();
+    let statuses = tokio::task::spawn_blocking(move || git::statuses(&probe))
+        .await
+        .ok()
+        .flatten();
+    Json(tree_json(entries, &rel, &dir, statuses.as_ref())).into_response()
 }
 
 async fn workspace_file(
@@ -258,6 +287,165 @@ fn workspace_payload(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DirQuery {
+    #[serde(default)]
+    path: String,
+}
+
+/// Directories only, absolute paths: the fallback picker for browsers that
+/// cannot ask the host for a real folder dialog (or when the host has none).
+async fn list_dirs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DirQuery>,
+) -> Response {
+    if let Err(status) = authorized(&state, &headers) {
+        return status.into_response();
+    }
+    let requested = if query.path.trim().is_empty() {
+        state.cwd.clone()
+    } else {
+        PathBuf::from(query.path.trim())
+    };
+    match dir_listing(&requested) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(err) => core_error(err),
+    }
+}
+
+fn dir_listing(dir: &std::path::Path) -> std::result::Result<Value, HarnessError> {
+    let dir = dunce::canonicalize(dir).map_err(|err| {
+        HarnessError::tool("E_INVALID_CWD", format!("cannot open directory: {err}"))
+    })?;
+    let mut entries = Vec::new();
+    let read = fs::read_dir(&dir).map_err(|err| io_error("cannot read directory", err))?;
+    for entry in read {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        entries.push((name, entry.path()));
+    }
+    entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    let entries: Vec<Value> = entries
+        .into_iter()
+        .map(|(name, path)| json!({ "name": name, "path": path.to_string_lossy() }))
+        .collect();
+    Ok(json!({
+        "path": dir.to_string_lossy(),
+        "parent": dir.parent().map(|parent| parent.to_string_lossy().to_string()),
+        "entries": entries,
+        "home": std::env::var("HOME").ok(),
+    }))
+}
+
+/// Ask the machine running the server for its folder dialog. Only loopback may
+/// do this; anywhere else the browser gets `unsupported` and shows its own
+/// picker instead.
+async fn pick_dir(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorized(&state, &headers) {
+        return status.into_response();
+    }
+    if !state.local.ip().is_loopback() {
+        return Json(json!({ "unsupported": true })).into_response();
+    }
+    let start = state.cwd.clone();
+    let picked = tokio::task::spawn_blocking(move || native_directory_dialog(&start))
+        .await
+        .ok()
+        .flatten();
+    match picked {
+        Some(Some(path)) => Json(json!({ "path": path.to_string_lossy() })).into_response(),
+        Some(None) => Json(json!({ "cancelled": true })).into_response(),
+        None => Json(json!({ "unsupported": true })).into_response(),
+    }
+}
+
+/// `None` when the platform has no dialog we can drive, `Some(None)` when the
+/// user cancelled.
+fn native_directory_dialog(start: &std::path::Path) -> Option<Option<PathBuf>> {
+    let start = start.to_string_lossy().to_string();
+    let mut command = if cfg!(target_os = "macos") {
+        let script = format!(
+            "POSIX path of (choose folder with prompt \"选择工作目录\" default location POSIX file \"{start}\")"
+        );
+        let mut command = std::process::Command::new("osascript");
+        command.arg("-e").arg(script);
+        command
+    } else if cfg!(windows) {
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+             $d.SelectedPath = '{start}'; \
+             if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }}"
+        );
+        let mut command = std::process::Command::new("powershell");
+        command.args(["-NoProfile", "-STA", "-Command", &script]);
+        command
+    } else if which("zenity") {
+        let mut command = std::process::Command::new("zenity");
+        command.args([
+            "--file-selection",
+            "--directory",
+            "--title=选择工作目录",
+            &format!("--filename={start}/"),
+        ]);
+        command
+    } else if which("kdialog") {
+        let mut command = std::process::Command::new("kdialog");
+        command.args(["--getexistingdirectory", &start, "--title", "选择工作目录"]);
+        command
+    } else {
+        return None;
+    };
+
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Some(None);
+                }
+                let output = child.wait_with_output().ok()?;
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if text.is_empty() {
+                    return Some(None);
+                }
+                return Some(Some(PathBuf::from(text)));
+            }
+            Ok(None) if Instant::now() > deadline => {
+                let _ = child.kill();
+                return Some(None);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(120)),
+            Err(_) => return Some(None),
+        }
+    }
+}
+
+fn which(program: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
+}
+
 fn core_error(err: HarnessError) -> Response {
     let status = match err.code() {
         "E_NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -272,10 +460,18 @@ fn core_error(err: HarnessError) -> Response {
         .into_response()
 }
 
-fn tree_payload(
+struct TreeEntry {
+    is_dir: bool,
+    name: String,
+    path: String,
+    size: u64,
+    abs: PathBuf,
+}
+
+fn tree_entries(
     resolver: &WorkspacePathResolver,
     rel: &str,
-) -> std::result::Result<Value, HarnessError> {
+) -> std::result::Result<(Vec<TreeEntry>, String, PathBuf), HarnessError> {
     let rel = rel.trim().trim_matches('/');
     let rel = if rel == "." { "" } else { rel };
     let dir = resolver.resolve_existing(rel)?;
@@ -288,11 +484,9 @@ fn tree_payload(
     }
 
     let mut entries = Vec::new();
-    let mut truncated = false;
     let read = fs::read_dir(&dir).map_err(|err| io_error("cannot read directory", err))?;
     for entry in read {
         if entries.len() >= TREE_LIMIT {
-            truncated = true;
             break;
         }
         let entry = match entry {
@@ -321,34 +515,72 @@ fn tree_payload(
         } else {
             format!("{rel}/{name}")
         };
+        let abs = entry.path();
         let size = if is_dir {
             0
         } else {
             entry.metadata().map(|meta| meta.len()).unwrap_or(0)
         };
-        entries.push((is_dir, name, path, size));
+        entries.push(TreeEntry {
+            is_dir,
+            name,
+            path,
+            size,
+            abs,
+        });
     }
     entries.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
+    Ok((entries, rel.to_string(), dir))
+}
 
+fn tree_json(
+    entries: Vec<TreeEntry>,
+    rel: &str,
+    dir: &std::path::Path,
+    statuses: Option<&BTreeMap<PathBuf, git::Status>>,
+) -> Value {
+    let truncated = entries.len() >= TREE_LIMIT;
+    let root = statuses.and_then(|_| git::toplevel(dir));
     let entries: Vec<Value> = entries
         .into_iter()
-        .map(|(dir, name, path, size)| {
+        .map(|entry| {
+            let status = match (statuses, root.as_ref()) {
+                (Some(statuses), Some(root)) => entry
+                    .abs
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|path| git::find(statuses, path, entry.is_dir))
+                    .map(|status| status.label()),
+                _ => None,
+            };
             json!({
-                "name": name,
-                "path": path,
-                "dir": dir,
-                "size": size,
+                "name": entry.name,
+                "path": entry.path,
+                "dir": entry.is_dir,
+                "size": entry.size,
+                "git": status,
             })
         })
         .collect();
-    Ok(json!({
+    json!({
         "path": if rel.is_empty() { "." } else { rel },
         "entries": entries,
         "truncated": truncated,
-    }))
+    })
+}
+
+/// Tree payload without git colours, for the tests that only exercise listing.
+#[cfg(test)]
+fn tree_payload(
+    resolver: &WorkspacePathResolver,
+    rel: &str,
+) -> std::result::Result<Value, HarnessError> {
+    let (entries, rel, dir) = tree_entries(resolver, rel)?;
+    Ok(tree_json(entries, &rel, &dir, None))
 }
 
 fn file_payload(
@@ -525,10 +757,6 @@ fn models_event(agent: &Agent) -> Value {
     json!({ "type": "models", "models": settings::models(agent) })
 }
 
-fn turns_event(agent: &Agent) -> Value {
-    json!({ "type": "turns", "turns": settings::turns(agent)["turns"].clone() })
-}
-
 fn lsp_event(agent: &Agent) -> Value {
     let servers: Vec<Value> = agent
         .lsp_statuses()
@@ -599,6 +827,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
     let cmd_state = state.clone();
     let cmd_out = out_tx.clone();
     let mut recv_task = tokio::spawn(async move {
+        // Owned by the connection: dropping it kills the shell, which is what
+        // closing the tab should do.
+        let mut terminal: Option<terminal::Terminal> = None;
         while let Some(message) = socket_rx.next().await {
             let message = match message {
                 Ok(message) => message,
@@ -743,7 +974,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                         }
                     }
                 }
-                HarnessCommand::DescribeTurns => push(&cmd_out, turns_event(&cmd_agent)),
                 HarnessCommand::DescribeLsp => push(&cmd_out, lsp_event(&cmd_agent)),
                 HarnessCommand::Rollback { turn } => match cmd_agent.rollback_to_turn(turn) {
                     Ok(()) => {
@@ -753,7 +983,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                             json!({ "type": "snapshot", "snapshot": cmd_agent.snapshot() })
                                 .to_string(),
                         );
-                        push(&cmd_out, turns_event(&cmd_agent));
                         let _ = cmd_out.send(client_notice("info", "已回滚到选中的输入"));
                     }
                     Err(err) => {
@@ -776,6 +1005,41 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                             }
                         }
                     });
+                }
+                HarnessCommand::OpenTerminal { cols, rows } => {
+                    terminal = None;
+                    let spec = rustedharness_core::shell::ShellSpec::detect(
+                        &cmd_agent.config().shell.prefer,
+                    );
+                    match terminal::Terminal::open(
+                        &cmd_agent.cwd(),
+                        &spec,
+                        cols,
+                        rows,
+                        cmd_out.clone(),
+                    ) {
+                        Ok(opened) => terminal = Some(opened),
+                        Err(err) => {
+                            let _ = cmd_out.send(client_error(err));
+                        }
+                    }
+                }
+                HarnessCommand::TerminalInput { data } => {
+                    if let Some(terminal) = terminal.as_mut() {
+                        terminal.write(&data);
+                    }
+                }
+                HarnessCommand::TerminalResize { cols, rows } => {
+                    if let Some(terminal) = terminal.as_mut() {
+                        let size = terminal.resize(cols, rows);
+                        push(&cmd_out, size);
+                        push(&cmd_out, terminal.snapshot());
+                    }
+                }
+                HarnessCommand::CloseTerminal => {
+                    terminal = None;
+                    let _ = cmd_out
+                        .send(json!({ "type": "terminal_state", "state": "closed" }).to_string());
                 }
                 HarnessCommand::Shutdown => break,
             }
@@ -807,6 +1071,27 @@ mod tests {
         fs::write(dir.path().join(".hidden"), "secret\n").unwrap();
         let resolver = WorkspacePathResolver::new(dir.path()).unwrap();
         (dir, resolver)
+    }
+
+    #[test]
+    fn directory_listing_only_walks_down() {
+        let (dir, _resolver) = workspace();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        let listing = dir_listing(dir.path()).unwrap();
+        let names: Vec<&str> = listing["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        // `target/` is a legitimate workspace even though the file tree hides it.
+        assert_eq!(names, vec!["src", "target"]);
+        assert_eq!(
+            listing["parent"],
+            dir.path().parent().unwrap().to_string_lossy().as_ref()
+        );
+        // A file is not a directory and must be refused, not listed.
+        assert!(dir_listing(&dir.path().join("a.txt")).is_err());
     }
 
     #[test]
