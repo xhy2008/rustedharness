@@ -336,7 +336,7 @@ fn dir_listing(dir: &std::path::Path) -> std::result::Result<Value, HarnessError
         }
         entries.push((name, entry.path()));
     }
-    entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    entries.sort_by_key(|entry| entry.0.to_lowercase());
     let entries: Vec<Value> = entries
         .into_iter()
         .map(|(name, path)| json!({ "name": name, "path": path.to_string_lossy() }))
