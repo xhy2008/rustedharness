@@ -3258,7 +3258,10 @@ mod tests {
             "one",
         ]);
         std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
+        // A file inside: git reports ignored directories inconsistently, but a
+        // directory is as dirty as its children, which every platform lists.
         std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/out.bin"), "x").unwrap();
         std::fs::write(dir.path().join(".hidden"), "x\n").unwrap();
 
         let rows = list_dir(dir.path(), "").unwrap();
