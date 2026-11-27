@@ -23,6 +23,7 @@ use rustedharness_core::config::{
     Config, CredentialKind, CredentialSource, NewModel, SearchBackend, SearchConfig,
 };
 use rustedharness_core::discovery::CatalogModel;
+use rustedharness_core::git::Status;
 use rustedharness_core::lsp::ServerStatus;
 use rustedharness_core::protocol::{HarnessEvent, SessionSnapshot};
 use rustedharness_core::provider::{ChatMessage, Role};
@@ -108,7 +109,7 @@ impl TurnRow {
 pub struct FileRow {
     pub label: String,
     pub is_dir: bool,
-    pub status: Option<&'static str>,
+    pub status: Option<Status>,
 }
 
 pub enum Overlay {
@@ -2812,20 +2813,13 @@ fn list_dir(root: &std::path::Path, rel: &str) -> std::io::Result<Vec<FileRow>> 
         });
     }
     let statuses = rustedharness_core::git::statuses(root);
-    let repo = rustedharness_core::git::toplevel(root);
     let mut items: Vec<FileRow> = Vec::new();
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let status = match (&statuses, &repo) {
-            (Some(map), Some(repo)) => entry
-                .path()
-                .strip_prefix(repo)
-                .ok()
-                .and_then(|path| rustedharness_core::git::find(map, path, is_dir))
-                .map(|status| status.label()),
-            _ => None,
-        };
+        let status = statuses
+            .as_ref()
+            .and_then(|statuses| statuses.of(&entry.path(), is_dir));
         items.push(FileRow {
             label: if is_dir { format!("{name}/") } else { name },
             is_dir,
@@ -3276,9 +3270,9 @@ mod tests {
                 .find(|row| row.label == label)
                 .and_then(|row| row.status)
         };
-        assert_eq!(status("target/"), Some("ignored"));
-        assert_eq!(status("tracked.txt"), Some("modified"));
-        assert_eq!(status(".hidden"), Some("untracked"));
+        assert_eq!(status("target/"), Some(Status::Ignored));
+        assert_eq!(status("tracked.txt"), Some(Status::Modified));
+        assert_eq!(status(".hidden"), Some(Status::Untracked));
 
         // Listing through a symlink is the macOS `/var` -> `/private/var` case:
         // the statuses must survive a root that is spelled differently from the
@@ -3293,7 +3287,7 @@ mod tests {
                 rows.iter()
                     .find(|row| row.label == "tracked.txt")
                     .and_then(|row| row.status),
-                Some("modified")
+                Some(Status::Modified)
             );
         }
     }

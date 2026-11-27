@@ -1,5 +1,44 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：按 AGENTS.md 复查一遍（2026-11-27）
+
+发现并修掉的真问题（不是"确认不存在的行为"）：
+
+1. **web 的数值型设置根本改不了**。选择行发送的是选项自身的文本（`"30"`），服务端
+   `number_value` 只接 JSON 数字，于是 `429 重试次数 / 图片最长边 / 压缩阈值 /
+   保留最近轮次 / 完整发送最近轮次` 五行走出去全是
+   `configuration error: setting … expects a number`。现在数字解析接受文本，
+   设置测试也改用浏览器真实的形状（`json!("30")`）——原来测的是 `json!(30)`，
+   于是本地和 CI 都绿。
+2. **终端设置写的是显示名**。选项值是 `"Git Bash"`，而 `ShellSpec::detect` 比的是
+   `git-bash`，所以在 Windows 上选 Git Bash 既不会生效，还会把 `"Git Bash"` 写进
+   `config.json`。现在选项值就是配置值，`apply` 也只收这两个常量（`"Git Bash"` 报错）。
+3. **出站队列无界**。上一版把终端改成原始字节后，`out` 仍是 `unbounded_channel`：一个
+   不读的标签页会让 pty 输出（以及每一条 agent 事件）在服务端堆到 OOM。现在是有界队列，
+   pty 读线程用 `blocking_send`，实测把 socket 暂停后 `yes` 跑 4 秒服务端只涨 150 KB，
+   连接断开后没有孤儿进程。
+4. **重启终端会把旧 shell 的字节画进新屏幕**。每个终端有 id，帧里带 id，页面按 id 过滤；
+   `关闭 → 重开` 的两条命令可能交错，现在旧帧被丢弃。
+5. **`write` 会卡住 reactor**。粘贴大段文本时 pty 阻塞写会卡住整个连接（连 Ctrl+C 都进
+   不来）。键入了单独的写线程 + 有界队列，同步命令循环不再直接写 pty。
+6. **`saw_terminal_query` 每次读都复制整块**。proc.rs 的 `pending` 还会涨到 8 KiB 再被
+   清掉；现在只有 3 字节 carry，跨读边界用固定 6 字节探针，零分配。
+7. **`git status` 每次列目录跑两遍**（`statuses` 内部一次 `toplevel`，调用方再一次），
+   而且调用方还要自己拼 `strip_prefix`——macOS/Windows 的路径形态差异正是上一轮那个
+   真 bug 的来源。现在是 `Statuses { root, entries }` + `of(abs, is_dir)`，一次子进程，
+   调用方不再碰路径。
+8. **web/TUI 行为不一致**：思考等级在 TUI 里可选（附一句"模型未声明 reasoning"），
+   web 里却被禁用。现在两边一致：可选，提示里说明。
+9. **web 没有快捷键说明**。去掉斜杠命令后，页面的按键（Enter / Shift+Enter / Esc、
+   右键、点击卡片）没有任何入口可查，TUI 的 `/hotkeys` 也没了对应物。补了一个 `⌨`
+   按钮的对话框；同时把 `feedSync()` 里没人读的返回值删了，xterm 缺失时
+   `ensureTerminal()` 不再在事件处理里抛异常。`/api/dirs` 里页面从未用过的 `home`
+   字段也删了。
+
+复查过但**没有**改的：`git status` 在 TUI 里是同步执行的（大仓库会有一次可见停顿），
+`feedSync` 每次滚动都新分配一个 offsets 数组（1600 条无感），终端一帧一次读在
+`yes` 下约 7.5k 帧/秒、单核 30%（合并需要再加一个定时线程，衡量后不值得）。
+
 ## 已完成：输入框不再解析命令、真终端、统一目录选择、显示所有文件（2026-11-27）
 
 1. **web/GUI 里 `/` 只是普通字符**。删掉了 `runSlash`、`SLASH_HELP` 和输入框里的拦截：
@@ -17,7 +56,8 @@
    浏览器在另一台机器时完全不可用。现在是页面内的目录浏览器，任何平台都一样。
 4. **文件浏览器显示所有文件**。web 的树和 TUI 的 `/files` 都不再跳过 `.` 开头的名字和
    `target`/`node_modules` 之类，因为两者都是"每次只读一层"，大目录不展开就不花钱。
-   两边统一用 `core::git` 的 `statuses()`/`find()`，TUI 的行尾多一个同样配色的单字母标记。
+   两边统一用 `core::git` 的 `statuses()`（现在返回 `Statuses`，见下一节），TUI 的行尾多
+   一个同样配色的单字母标记。
    `crates/web/src/git.rs` 因此搬到 `crates/core/src/git.rs`。
 5. **测试大清理**。删掉只用来确认"某功能不存在/被拒绝"的断言：`unknown setting`、
    `wrong type`、`altavista`、`../outside` 逃逸、`E_NOT_FILE`/`E_NOT_DIR`、空 `options`

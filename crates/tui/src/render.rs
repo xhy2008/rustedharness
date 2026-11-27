@@ -1359,15 +1359,16 @@ fn draw_file_browser(
 }
 
 /// The one-letter mark and colour a git status gets in the file browser.
-fn git_badge(status: &str) -> (&'static str, ratatui::style::Color) {
+fn git_badge(status: rustedharness_core::git::Status) -> (&'static str, ratatui::style::Color) {
+    use rustedharness_core::git::Status;
     match status {
-        "modified" => ("M", YELLOW),
-        "untracked" => ("U", GREEN),
-        "added" => ("A", GREEN),
-        "deleted" => ("D", RED),
-        "renamed" => ("R", crate::theme::ACCENT),
-        "conflicted" => ("C", RED),
-        _ => ("I", FAINT),
+        Status::Modified => ("M", YELLOW),
+        Status::Untracked => ("U", GREEN),
+        Status::Added => ("A", GREEN),
+        Status::Deleted => ("D", RED),
+        Status::Renamed => ("R", crate::theme::ACCENT),
+        Status::Conflicted => ("C", RED),
+        Status::Ignored => ("I", FAINT),
     }
 }
 

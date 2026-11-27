@@ -2,15 +2,16 @@
 //!
 //! Both the TUI and the web UI colour entries by status: modified yellow,
 //! untracked and added green, deleted and conflicted red, renamed purple,
-//! ignored dimmed. One `git status` per directory listing, then a prefix match
-//! per entry - a directory is as dirty as the dirtiest thing below it.
+//! ignored dimmed. `statuses` runs one `git status` and keeps the repository
+//! root next to the map, so a listing asks for the status of an absolute path
+//! and never has to spell the root the way git would.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// What the tree shows for one entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// A file the repository ignores; lowest priority, so a real change in the
     /// same directory still wins.
@@ -51,9 +52,39 @@ impl Status {
     }
 }
 
-/// Status per path, relative to the repository root. `None` when `dir` is not
-/// inside a git work tree or `git` is not installed.
-pub fn statuses(dir: &Path) -> Option<BTreeMap<PathBuf, Status>> {
+/// Every change in the work tree that contains `dir`, plus the root the paths
+/// are relative to. `None` when `dir` is not inside a git work tree or `git` is
+/// not installed.
+pub struct Statuses {
+    root: PathBuf,
+    entries: BTreeMap<PathBuf, Status>,
+}
+
+impl Statuses {
+    /// The status of one entry, given its absolute path.
+    pub fn of(&self, abs: &Path, is_dir: bool) -> Option<Status> {
+        let rel = abs.strip_prefix(&self.root).ok()?;
+        self.find(rel, is_dir)
+    }
+
+    /// The entry's own status, or the strongest status of anything below it.
+    fn find(&self, rel: &Path, is_dir: bool) -> Option<Status> {
+        let own = self.entries.get(rel).copied();
+        if !is_dir {
+            return own;
+        }
+        // A directory can be both (an untracked folder) and contain changes.
+        // Keys are sorted, so the descendants are one contiguous run.
+        self.entries
+            .range(rel.to_path_buf()..)
+            .take_while(|(path, _)| path.starts_with(rel))
+            .map(|(_, status)| *status)
+            .chain(own)
+            .max_by_key(|status| status.rank())
+    }
+}
+
+pub fn statuses(dir: &Path) -> Option<Statuses> {
     let root = toplevel(dir)?;
     let mut command = Command::new("git");
     command
@@ -95,7 +126,7 @@ pub fn statuses(dir: &Path) -> Option<BTreeMap<PathBuf, Status>> {
             })
             .or_insert_with(|| classification(code));
     }
-    Some(map)
+    Some(Statuses { root, entries: map })
 }
 
 fn classification(code: &str) -> Status {
@@ -126,7 +157,7 @@ fn classification(code: &str) -> Status {
 
 /// `None` when `dir` is not in a repository. Working directories inside a
 /// linked worktree resolve to the worktree root, not the main one.
-pub fn toplevel(dir: &Path) -> Option<PathBuf> {
+fn toplevel(dir: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -148,20 +179,6 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     Some(dunce::canonicalize(&root).unwrap_or(root))
 }
 
-/// The entry's own status, or the strongest status of anything below it.
-pub fn find(map: &BTreeMap<PathBuf, Status>, rel: &Path, is_dir: bool) -> Option<Status> {
-    let own = map.get(rel).copied();
-    if !is_dir {
-        return own;
-    }
-    // A directory can be both (an untracked folder) and contain changes.
-    map.iter()
-        .filter(|(path, _)| path.starts_with(rel))
-        .map(|(_, status)| *status)
-        .chain(own)
-        .max_by_key(|status| status.rank())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,19 +198,37 @@ mod tests {
 
     #[test]
     fn a_directory_is_as_dirty_as_its_dirtiest_child() {
-        let mut map = BTreeMap::new();
-        map.insert(PathBuf::from("src"), Status::Ignored);
-        map.insert(PathBuf::from("src/lib.rs"), Status::Modified);
-        map.insert(PathBuf::from("src/old.rs"), Status::Deleted);
+        let statuses = Statuses {
+            root: PathBuf::from("/repo"),
+            entries: BTreeMap::from([
+                (PathBuf::from("src"), Status::Ignored),
+                (PathBuf::from("src/lib.rs"), Status::Modified),
+                (PathBuf::from("src/old.rs"), Status::Deleted),
+                (PathBuf::from("srcfoo/x.rs"), Status::Conflicted),
+            ]),
+        };
         assert_eq!(
-            find(&map, Path::new("src"), true),
+            statuses.find(Path::new("src"), true),
             Some(Status::Modified),
             "a change outranks a deletion in the same directory"
         );
         assert_eq!(
-            find(&map, Path::new("src/lib.rs"), false),
+            statuses.of(Path::new("/repo/src/lib.rs"), false),
             Some(Status::Modified)
         );
-        assert_eq!(find(&map, Path::new("README.md"), false), None);
+        assert_eq!(
+            statuses.of(Path::new("/repo/srcfoo/x.rs"), false),
+            Some(Status::Conflicted)
+        );
+        assert_eq!(
+            statuses.of(Path::new("/repo/src"), true),
+            Some(Status::Modified)
+        );
+        assert_eq!(statuses.of(Path::new("/repo/README.md"), false), None);
+        assert_eq!(
+            statuses.of(Path::new("/elsewhere/src"), true),
+            None,
+            "a path outside the root has no status"
+        );
     }
 }

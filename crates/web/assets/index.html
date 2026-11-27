@@ -667,6 +667,10 @@ try {
   .set-label { font-size: 12.5px; font-weight: 600; }
   .set-value { margin-left: auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sub); font-family: var(--mono); font-size: 11px; }
   .set-hint { color: var(--faint); font-size: 10.5px; line-height: 1.6; }
+  .key-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .key-row { display: flex; align-items: center; gap: 10px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); font-size: 12px; }
+  .key-row span { color: var(--dim); }
+  .key-row kbd { flex: 0 0 auto; min-width: 110px; padding: 3px 7px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; background: var(--code-bg); color: var(--fg); font: inherit; font-size: 11px; text-align: center; }
   .set-opts { display: flex; flex-wrap: wrap; gap: 6px; }
   .opt { padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--sub); font-size: 11px; white-space: nowrap; }
   .opt:hover:not(:disabled) { border-color: var(--brand); color: var(--text); }
@@ -857,6 +861,7 @@ try {
   <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a6.8 6.8 0 0 0 11 11z"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></symbol>
   <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.96 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.96a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 8.96 4.6 1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V8.96c.15.64.68 1.04 1.56 1.04H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></symbol>
@@ -917,6 +922,9 @@ try {
     </button>
     <button id="themeBtn" class="icon-btn" type="button" title="切换主题" aria-label="切换主题">
       <svg class="icon" aria-hidden="true"><use href="#i-sun"></use></svg>
+    </button>
+    <button id="keysBtn" class="icon-btn" type="button" title="键盘与鼠标" aria-label="键盘与鼠标">
+      <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
     </button>
     <button id="settingsBtn" class="icon-btn" type="button" title="设置" aria-label="设置">
       <svg class="icon" aria-hidden="true"><use href="#i-settings"></use></svg>
@@ -1267,6 +1275,32 @@ try {
   </div>
 </div>
 
+<div id="keysModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="keysTitle">
+    <div class="modal-head">
+      <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
+      <div>
+        <h2 id="keysTitle">键盘与鼠标</h2>
+        <p>浏览器里没有命令，所有操作都是控件；下面是键盘还能做的事。</p>
+      </div>
+      <button class="icon-btn modal-close" type="button" data-close="#keysModal" title="关闭" aria-label="关闭">
+        <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+      </button>
+    </div>
+    <div class="key-list">
+      <div class="key-row"><kbd>Enter</kbd><span>发送；正在运行时排队</span></div>
+      <div class="key-row"><kbd>Shift + Enter</kbd><span>换行</span></div>
+      <div class="key-row"><kbd>Esc</kbd><span>关闭菜单、对话框或抽屉</span></div>
+      <div class="key-row"><kbd>点击工具卡片</kbd><span>展开或折叠</span></div>
+      <div class="key-row"><kbd>右键用户消息</kbd><span>回滚到该输入，或复制</span></div>
+      <div class="key-row"><kbd>拖选终端</kbd><span>选中文本，滚轮回看历史</span></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn primary" type="button" data-close="#keysModal">关闭</button>
+    </div>
+  </div>
+</div>
+
 <div id="dirModal" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dirTitle">
     <div class="modal-head">
@@ -1340,7 +1374,6 @@ try {
     outputTokens: 0,
     costUsd: null,
     cacheHitPct: null,
-    lastAssistant: '',
     settings: { items: [], tab: 'session', pending: false },
     models: { catalog: [], agent: '', compact: '', separate: false, target: 'agent', filter: '' },
     addModel: { step: 'endpoint', items: [], baseURL: '', apiKey: '', filter: '' },
@@ -1350,7 +1383,7 @@ try {
     toolItems: new Map(),
     turnCount: 0,
     rollbackPending: null,
-    terminal: { open: false, cols: 0, rows: 0, term: null, fit: null },
+    terminal: { open: false, cols: 0, rows: 0, id: 0, term: null, fit: null },
     dirPath: '',
     feed: { items: [], el: new Map(), seq: 0, batch: false, chars: {} },
     scrollRaf: 0,
@@ -2178,7 +2211,6 @@ try {
       }
     }
 
-    let changed = false;
     const fresh = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
@@ -2207,7 +2239,6 @@ try {
       if (Math.abs(height - feedHeight(item)) > 1) {
         item.height = height;
         item.measured = true;
-        changed = true;
       }
     }
 
@@ -2218,7 +2249,6 @@ try {
       height += feedHeight(items[i]);
     }
     inner.style.height = height + 'px';
-    return changed;
   }
 
   function feedToBottom() {
@@ -3037,7 +3067,6 @@ try {
     } else if (content) {
       addAssistantCard(content);
     }
-    state.lastAssistant = content || state.lastAssistant;
     state.assistantItem = null;
     state.reasoningItem = null;
     maybeScroll(stick);
@@ -3110,13 +3139,6 @@ try {
     if (/todo/.test(value)) return 'todo';
     if (/mcp/.test(value)) return 'wrench';
     return 'wrench';
-  }
-
-  function setToolStatus(card, kind, text) {
-    const status = card.querySelector('.tstat');
-    if (!status) return;
-    status.className = 'tstat ' + kind;
-    status.textContent = text;
   }
 
   function addToolCard(name, args, id, options) {
@@ -4111,8 +4133,8 @@ try {
   function ensureTerminal() {
     if (state.terminal.term) return state.terminal.term;
     if (typeof Terminal !== 'function') {
-      $('termInfo').textContent = '终端组件缺失';
-      throw new Error('xterm.js 未加载');
+      $('termInfo').textContent = '终端组件缺失（xterm.js 未加载）';
+      return null;
     }
     const term = new Terminal({
       fontFamily: monoFont(),
@@ -4169,6 +4191,7 @@ try {
       return;
     }
     const term = ensureTerminal();
+    if (!term) return;
     term.reset();
     fitTerminal();
     state.terminal.open = true;
@@ -4187,7 +4210,11 @@ try {
   }
 
   function renderTerminal(event) {
+    // A restarted shell must not paint its first frames into the screen of the
+    // one it replaced: every terminal announces an id and frames carry it.
+    if (Number(event.id) !== state.terminal.id) return;
     const term = ensureTerminal();
+    if (!term) return;
     const binary = atob(String(event.data || ''));
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -4275,7 +4302,6 @@ try {
     state.outputTokens = 0;
     state.costUsd = null;
     state.cacheHitPct = null;
-    state.lastAssistant = '';
     state.settings.pending = false;
     state.queue = [];
     state.models.catalog = [];
@@ -4369,7 +4395,6 @@ try {
     state.cacheHitPct = usage && usage.prompt_tokens > 0 && usage.cached_tokens > 0
       ? Math.min(100, Math.round((usage.cached_tokens * 100) / usage.prompt_tokens))
       : null;
-    state.lastAssistant = '';
     state.resumeId = snapshot.session_id;
     if (previous && previous !== state.sessionId) clearViewer();
     settleStreaming();
@@ -4416,10 +4441,7 @@ try {
     }
     if (message.role === 'assistant') {
       if (message.reasoning_content) addReasoningBlock(message.reasoning_content);
-      if (message.content) {
-        addAssistantCard(message.content);
-        state.lastAssistant = message.content;
-      }
+      if (message.content) addAssistantCard(message.content);
       for (const call of (message.tool_calls || [])) {
         const fn = call.function || {};
         addToolCard(fn.name || 'tool', fn.arguments, call.id, { open: false });
@@ -4572,15 +4594,21 @@ try {
         }
         break;
       case 'terminal_state':
-        state.terminal.open = event.state === 'running';
-        $('termInfo').textContent = event.state === 'running'
-          ? (event.shell || 'shell') + ' · ' + (event.cwd || state.cwd)
-          : '终端已退出';
         if (event.state === 'running') {
+          if (state.terminal.open && Number(event.id) === state.terminal.id) break;
+          state.terminal.id = Number(event.id) || 0;
+          state.terminal.open = true;
+          $('termInfo').textContent = (event.shell || 'shell') + ' · ' + (event.cwd || state.cwd);
           fitTerminal();
           if (state.terminal.term) state.terminal.term.focus();
-        } else if (state.terminal.term) {
-          state.terminal.term.write('\r\n\x1b[2m[进程已退出]\x1b[0m\r\n');
+        } else {
+          // Only the shell this page is showing can end it.
+          if (Number(event.id) !== state.terminal.id || !state.terminal.open) break;
+          state.terminal.open = false;
+          $('termInfo').textContent = '终端已退出';
+          if (state.terminal.term) {
+            state.terminal.term.write('\r\n\x1b[2m[进程已退出]\x1b[0m\r\n');
+          }
         }
         break;
       case 'terminal_output':
@@ -4687,15 +4715,6 @@ try {
     }
   }
 
-  async function copyLastReply() {
-    if (!state.lastAssistant) {
-      toast('还没有可复制的回复', 'error');
-      return;
-    }
-    const ok = await copyText(state.lastAssistant);
-    toast(ok ? '已复制最后一条回复' : '复制失败，请手动选择文本', ok ? '' : 'error');
-  }
-
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
@@ -4739,6 +4758,7 @@ try {
   function bindEvents() {
     $('themeBtn').addEventListener('click', toggleTheme);
     $('settingsBtn').addEventListener('click', () => openSettings('session'));
+    $('keysBtn').addEventListener('click', () => openModal('keysModal'));
     $('newBtn').addEventListener('click', () => {
       closeDrawers();
       connect(null);
@@ -4868,7 +4888,7 @@ try {
     document.querySelectorAll('.itab').forEach((button) => {
       button.addEventListener('click', () => setInspectorTab(button.dataset.itab));
     });
-    for (const id of ['settingsModal', 'modelModal', 'addModelModal', 'rollbackModal', 'lspModal', 'dirModal']) {
+    for (const id of ['settingsModal', 'modelModal', 'addModelModal', 'rollbackModal', 'lspModal', 'dirModal', 'keysModal']) {
       $(id).addEventListener('click', (event) => {
         if (event.target === $(id)) closeModal(id);
       });
@@ -4908,7 +4928,7 @@ try {
         decideConsent(false);
         return;
       }
-      for (const id of ['#settingsModal', '#modelModal', '#addModelModal', '#rollbackModal', '#lspModal', '#dirModal']) {
+      for (const id of ['#settingsModal', '#modelModal', '#addModelModal', '#rollbackModal', '#lspModal', '#dirModal', '#keysModal']) {
         if (!$(id.slice(1)).hidden) {
           closeModal(id.slice(1));
           return;

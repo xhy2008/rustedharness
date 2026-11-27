@@ -15,7 +15,7 @@ use crate::shell::ShellSpec;
 
 const MAX_RAW_BYTES: usize = 1_048_576;
 
-use crate::shell::answer_terminal_queries;
+use crate::shell::{answer_terminal_query, saw_terminal_query};
 const MAX_SCREEN_LINES: usize = 10_000;
 /// Maximum size of one live tool-output update. The screen tail is sent as a
 /// replacement snapshot, so the frontend never has to replay raw pty bytes.
@@ -511,7 +511,7 @@ impl ProcRegistry {
             std::thread::spawn(move || {
                 let mut writer = writer;
                 let mut buf = [0u8; 8192];
-                let mut pending: Vec<u8> = Vec::new();
+                let mut carry = [0u8; 3];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => break,
@@ -529,10 +529,8 @@ impl ProcRegistry {
                                 *t = Instant::now();
                             }
                             if let Some(writer) = writer.as_mut() {
-                                pending.extend_from_slice(&buf[..n]);
-                                answer_terminal_queries(&mut pending, writer, pty_rows);
-                                if pending.len() > 256 {
-                                    pending.clear();
+                                if saw_terminal_query(&mut carry, &buf[..n]) {
+                                    answer_terminal_query(writer, pty_rows);
                                 }
                             }
                         }

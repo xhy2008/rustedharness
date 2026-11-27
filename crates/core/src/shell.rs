@@ -15,27 +15,35 @@ pub const POWERSHELL: &str = "powershell";
 /// Nothing else in this process speaks to the pty, so respond here; without
 /// this Windows shells never emit any output. Shared by the background-process
 /// runner and the web terminal.
-pub fn answer_terminal_queries(pending: &mut Vec<u8>, writer: &mut dyn std::io::Write, rows: u16) {
-    if saw_terminal_query(pending, &[]) {
-        let reply = format!("\x1b[{rows};1R");
-        let _ = writer.write_all(reply.as_bytes());
-        let _ = writer.flush();
-        pending.clear();
-    }
+pub fn answer_terminal_query(writer: &mut dyn std::io::Write, rows: u16) {
+    let reply = format!("\x1b[{rows};1R");
+    let _ = writer.write_all(reply.as_bytes());
+    let _ = writer.flush();
 }
 
-/// Detect a DSR query in `chunk`, remembering the last three bytes of the
-/// previous chunk so a split query is still found. Nothing is removed from
-/// `chunk`: callers that forward the raw stream keep every byte.
-pub fn saw_terminal_query(carry: &mut Vec<u8>, chunk: &[u8]) -> bool {
-    let split = carry.len();
-    let mut joined = Vec::with_capacity(split + chunk.len());
-    joined.extend_from_slice(carry);
-    joined.extend_from_slice(chunk);
-    let found = joined.windows(4).any(|window| window == b"\x1b[6n");
-    let keep = joined.len().saturating_sub(3);
-    carry.clear();
-    carry.extend_from_slice(&joined[keep..]);
+/// The query a terminal is waiting for.
+const DSR: &[u8] = b"\x1b[6n";
+
+/// Find a DSR query in `chunk`, remembering the last three bytes of the
+/// previous chunk so a query split across two reads is still found. Nothing is
+/// copied or removed: callers that forward the raw stream keep every byte.
+pub fn saw_terminal_query(carry: &mut [u8; 3], chunk: &[u8]) -> bool {
+    // The only window that is not inside `chunk` is the one formed by the
+    // carry and the first bytes of this read.
+    let head = chunk.len().min(carry.len());
+    let mut probe = [0u8; 6];
+    probe[..carry.len()].copy_from_slice(carry);
+    probe[carry.len()..carry.len() + head].copy_from_slice(&chunk[..head]);
+    let found = probe[..carry.len() + head]
+        .windows(DSR.len())
+        .any(|window| window == DSR)
+        || chunk.windows(DSR.len()).any(|window| window == DSR);
+    let keep = carry.len();
+    let take = chunk.len().min(keep);
+    if take > 0 {
+        carry.copy_within(take.., 0);
+        carry[keep - take..].copy_from_slice(&chunk[chunk.len() - take..]);
+    }
     found
 }
 

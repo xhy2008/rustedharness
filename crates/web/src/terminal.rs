@@ -8,36 +8,49 @@
 //! worse renderer, and it cannot give the user a scrollback or let a full-screen
 //! program track the mouse.
 //!
-//! Everything here is blocking and runs on the pty reader thread; only JSON
-//! strings travel on the async channel.
+//! Two threads belong to a terminal: one reads the pty and forwards each read as
+//! one frame (`read` returns what the child wrote, so a prompt is a frame of its
+//! own and never waits for a deadline), and one writes keys into it. Writes go
+//! through a queue rather than the reactor, because `write` on a pty blocks once
+//! the child stops draining it and a paste must not stall the whole session.
 
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::json;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 use rustedharness_core::shell::{saw_terminal_query, ShellSpec};
 
-/// Bytes accumulated before a burst is flushed to the browser, so a command
-/// that writes thousands of small chunks does not become thousands of
-/// WebSocket frames. A read that fills the buffer less than completely means
-/// the child went quiet, and that is flushed immediately: it is where prompts
-/// and command results arrive.
-const FLUSH_BYTES: usize = 16 * 1024;
 const READ_BYTES: usize = 16 * 1024;
+/// How many key batches may wait for the pty before typing applies
+/// back-pressure. Small on purpose: this queue only exists to keep the reactor
+/// out of a blocking write.
+const KEY_QUEUE: usize = 32;
 
 pub struct Terminal {
-    master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Distinguishes this shell from the one it replaced in the same connection.
+    id: u64,
+    /// `MasterPty` is `Send` but not `Sync`, and `write` holds `&self` across
+    /// an await, so the handle lives behind a lock.
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    keys: Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    rows: Arc<AtomicU16>,
     alive: Arc<AtomicBool>,
+}
+
+/// Distinguishes two terminals of one connection: a restarted shell must not
+/// mix its first frames into the screen of the shell it replaced.
+fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Clamp both axes into a range a pty accepts.
@@ -49,17 +62,17 @@ fn size(rows: u16, cols: u16) -> (NonZeroU16, NonZeroU16) {
 }
 
 impl Terminal {
-    pub fn open(
+    pub async fn open(
         cwd: &Path,
         spec: &ShellSpec,
         cols: u16,
         rows: u16,
-        out: UnboundedSender<String>,
+        out: Sender<String>,
     ) -> Result<Self, String> {
-        let cols = cols.clamp(20, 500);
-        let rows = rows.clamp(4, 200);
-        let pty_system = native_pty_system();
-        let pair = pty_system
+        let (rows, cols) = size(rows, cols);
+        let (rows, cols) = (rows.get(), cols.get());
+        let id = next_id();
+        let pair = native_pty_system()
             .openpty(PtySize {
                 rows,
                 cols,
@@ -76,95 +89,110 @@ impl Terminal {
         cmd.env("LINES", rows.to_string());
         // The pty is a terminal, so tools should colour their output for it.
         cmd.env("CLICOLOR_FORCE", "1");
-        let _child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|err| format!("cannot start {}: {err}", spec.program.display()))?;
         drop(pair.slave);
 
-        let killer = _child.clone_killer();
+        let killer = child.clone_killer();
         let mut reader = pair
             .master
             .try_clone_reader()
             .map_err(|err| format!("cannot read the pty: {err}"))?;
-        // The writer is shared: the connection types keys with it, and the
-        // reader thread uses it to answer ConPTY's startup cursor query (which
-        // otherwise blocks all child output on Windows).
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-            pair.master
-                .take_writer()
-                .map_err(|err| format!("cannot write the pty: {err}"))?,
-        ));
-        let reader_writer = writer.clone();
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|err| format!("cannot write the pty: {err}"))?;
+
+        let (keys, mut queued) = tokio::sync::mpsc::channel::<Vec<u8>>(KEY_QUEUE);
+        std::thread::spawn(move || {
+            while let Some(bytes) = queued.blocking_recv() {
+                if writer
+                    .write_all(&bytes)
+                    .and_then(|()| writer.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Announce the shell before its first frame can arrive, so the page
+        // knows which terminal the bytes belong to.
+        let _ = out
+            .send(
+                json!({
+                    "type": "terminal_state",
+                    "state": "running",
+                    "id": id,
+                    "shell": spec.display_name,
+                    "cwd": cwd.to_string_lossy(),
+                    "cols": cols,
+                    "rows": rows,
+                })
+                .to_string(),
+            )
+            .await;
+
         let alive = Arc::new(AtomicBool::new(true));
-
-        let _ = out.send(
-            json!({
-                "type": "terminal_state",
-                "state": "running",
-                "shell": spec.display_name,
-                "cwd": cwd.to_string_lossy(),
-                "cols": cols,
-                "rows": rows,
-            })
-            .to_string(),
-        );
-
+        let rows = Arc::new(AtomicU16::new(rows));
+        let reply_rows = rows.clone();
+        let reply_keys = keys.clone();
         let reader_out = out.clone();
         let reader_alive = alive.clone();
         std::thread::spawn(move || {
             let mut buf = vec![0u8; READ_BYTES];
-            let mut burst: Vec<u8> = Vec::new();
-            let mut carry: Vec<u8> = Vec::new();
+            let mut carry = [0u8; 3];
             loop {
                 let read = match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(read) => read,
                     Err(_) => break,
                 };
-                if saw_terminal_query(&mut carry, &buf[..read]) {
-                    if let Ok(mut writer) = reader_writer.lock() {
-                        let _ = writer.write_all(format!("\x1b[{rows};1R").as_bytes());
-                        let _ = writer.flush();
-                    }
+                let chunk = &buf[..read];
+                if saw_terminal_query(&mut carry, chunk) {
+                    // ConPTY blocks the child until this is answered. It goes
+                    // through the same queue as typed keys so replies and keys
+                    // cannot interleave inside one write.
+                    let reply = format!("\x1b[{};1R", reply_rows.load(Ordering::Relaxed));
+                    let _ = reply_keys.blocking_send(reply.into_bytes());
                 }
-                burst.extend_from_slice(&buf[..read]);
-                if burst.len() >= FLUSH_BYTES || read < buf.len() {
-                    if send_bytes(&reader_out, &burst).is_err() {
-                        break;
-                    }
-                    burst.clear();
+                if send_bytes(&reader_out, id, chunk).is_err() {
+                    break;
                 }
-            }
-            if !burst.is_empty() {
-                let _ = send_bytes(&reader_out, &burst);
             }
             if reader_alive.swap(false, Ordering::SeqCst) {
-                let _ = reader_out
-                    .send(json!({ "type": "terminal_state", "state": "closed" }).to_string());
+                let _ = reader_out.blocking_send(
+                    json!({ "type": "terminal_state", "state": "closed", "id": id }).to_string(),
+                );
             }
         });
 
         Ok(Self {
-            master: pair.master,
-            writer,
+            id,
+            master: Mutex::new(pair.master),
+            keys,
             killer,
+            rows,
             alive,
         })
     }
 
-    /// Write keys straight to the pty: xterm.js sends the same escape sequences
-    /// a terminal emulator would.
-    pub fn write(&mut self, data: &str) {
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = writer.write_all(data.as_bytes());
-            let _ = writer.flush();
-        }
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Option<serde_json::Value> {
+    /// Write keys straight to the pty: xterm.js sends the same escape sequences
+    /// a terminal emulator would.
+    pub async fn write(&self, data: &str) {
+        let _ = self.keys.send(data.as_bytes().to_vec()).await;
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Option<serde_json::Value> {
         let (rows, cols) = size(rows, cols);
-        self.master
+        let master = self.master.lock().ok()?;
+        master
             .resize(PtySize {
                 rows: rows.get(),
                 cols: cols.get(),
@@ -172,16 +200,18 @@ impl Terminal {
                 pixel_height: 0,
             })
             .ok()?;
+        self.rows.store(rows.get(), Ordering::Relaxed);
         Some(json!({ "type": "terminal_size", "cols": cols.get(), "rows": rows.get() }))
     }
 }
 
 /// Base64, because a pty is a byte stream and JSON is not: a chunk can end in
 /// the middle of a UTF-8 sequence.
-fn send_bytes(out: &UnboundedSender<String>, bytes: &[u8]) -> Result<(), ()> {
+fn send_bytes(out: &Sender<String>, id: u64, bytes: &[u8]) -> Result<(), ()> {
     let payload = BASE64.encode(bytes);
-    out.send(
-        json!({ "type": "terminal_output", "data": payload, "bytes": bytes.len() }).to_string(),
+    out.blocking_send(
+        json!({ "type": "terminal_output", "id": id, "data": payload, "bytes": bytes.len() })
+            .to_string(),
     )
     .map_err(|_| ())
 }

@@ -588,10 +588,16 @@ interactive shell in the workspace.
 
 The browser has controls and no commands: the model is a dropdown in the
 composer's bottom-right corner, the working directory is the folder button next
-to it, a message's context menu rolls back to it or copies it, and the LSP
-status line opens a server manager with download and update buttons. A line
-starting with `/` is prose and goes to the model - there is nothing to parse it
-as a command any more.
+to it, a message's context menu rolls back to it or copies it, the LSP status
+line opens a server manager with download and update buttons, and the keyboard
+button in the header lists what the page's keys do. A line starting with `/` is
+prose and goes to the model - there is nothing to parse it as a command any
+more.
+
+Every setting row sends the value of the option that was clicked, and that value
+is text - `"30"` for the retry count, `"git-bash"` for the shell, never the
+label the row renders. The server parses it, so a row cannot be added to the UI
+that the server then rejects.
 
 The folder picker is one dialog, drawn by the page. Driving zenity, kdialog,
 osascript or the PowerShell shell from the server produced a different window on
@@ -616,9 +622,17 @@ The terminal is a real pty in the workspace directory, rendered by xterm.js with
 the bytes going straight from the pty to the emulator. That is what buys
 scrollback, 256/true colour, mouse reporting and full-screen programs; a
 server-side emulator can replay a screen but cannot hand back the history a user
-scrolls through. Output is base64 because a chunk can end mid-UTF-8, bursts are
-coalesced to one frame, and the pty dies with the connection. xterm.js is
-vendored (`crates/web/assets/`) so the page works offline.
+scrolls through. Output is base64 because a chunk can end mid-UTF-8, one read is
+one frame, and the pty dies with the connection. xterm.js is vendored
+(`crates/web/assets/`) so the page works offline.
+
+A terminal has an id, and its frames carry it: restarting the shell must not
+paint the old shell's last bytes into the new screen. Its two threads keep the
+reactor out of the pty - keys are queued to a writer thread instead of blocking
+the connection on a child that stopped reading, and the frame queue is bounded,
+so a tab that stops reading stalls the shell exactly like a real terminal
+instead of growing memory here (measured: 150 KB of growth for four seconds of
+`yes` into a paused socket).
 
 It streams text and reasoning, renders tool cards and consent prompts, offers
 dark/light themes, and uses the real `HarnessEvent` protocol without demo data.

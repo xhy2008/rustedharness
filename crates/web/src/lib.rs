@@ -7,7 +7,7 @@
 //! the directory browser; the interactive shell lives in [`terminal`], and the
 //! settings surface in [`settings`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::net::SocketAddr;
@@ -42,6 +42,10 @@ use rustedharness_core::VERSION;
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const TREE_LIMIT: usize = 500;
 const FILE_LIMIT: usize = 256 * 1024;
+/// Frames that may wait for one browser tab. The queue is the connection's flow
+/// control: a tab that stops reading stalls the agent instead of growing this
+/// process, and a shell that floods its pty stalls on the pty buffer.
+const SOCKET_QUEUE: usize = 256;
 
 struct AppState {
     config: Config,
@@ -276,7 +280,7 @@ async fn workspace_tree(
         .await
         .ok()
         .flatten();
-    Json(tree_json(entries, &rel, &dir, statuses.as_ref())).into_response()
+    Json(tree_json(entries, &rel, statuses.as_ref())).into_response()
 }
 
 async fn workspace_file(
@@ -363,7 +367,6 @@ fn dir_listing(dir: &std::path::Path) -> std::result::Result<Value, HarnessError
         "path": dir.to_string_lossy(),
         "parent": dir.parent().map(|parent| parent.to_string_lossy().to_string()),
         "entries": entries,
-        "home": std::env::var("HOME").ok(),
     }))
 }
 
@@ -452,26 +455,14 @@ fn tree_entries(
     Ok((entries, rel.to_string(), dir))
 }
 
-fn tree_json(
-    entries: Vec<TreeEntry>,
-    rel: &str,
-    dir: &std::path::Path,
-    statuses: Option<&BTreeMap<PathBuf, git::Status>>,
-) -> Value {
+fn tree_json(entries: Vec<TreeEntry>, rel: &str, statuses: Option<&git::Statuses>) -> Value {
     let truncated = entries.len() >= TREE_LIMIT;
-    let root = statuses.and_then(|_| git::toplevel(dir));
     let entries: Vec<Value> = entries
         .into_iter()
         .map(|entry| {
-            let status = match (statuses, root.as_ref()) {
-                (Some(statuses), Some(root)) => entry
-                    .abs
-                    .strip_prefix(root)
-                    .ok()
-                    .and_then(|path| git::find(statuses, path, entry.is_dir))
-                    .map(|status| status.label()),
-                _ => None,
-            };
+            let status = statuses
+                .and_then(|statuses| statuses.of(&entry.abs, entry.is_dir))
+                .map(|status| status.label());
             json!({
                 "name": entry.name,
                 "path": entry.path,
@@ -494,8 +485,8 @@ fn tree_payload(
     resolver: &WorkspacePathResolver,
     rel: &str,
 ) -> std::result::Result<Value, HarnessError> {
-    let (entries, rel, dir) = tree_entries(resolver, rel)?;
-    Ok(tree_json(entries, &rel, &dir, None))
+    let (entries, rel, _) = tree_entries(resolver, rel)?;
+    Ok(tree_json(entries, &rel, None))
 }
 
 fn file_payload(
@@ -620,11 +611,23 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
-    if given == Some(token.as_str()) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    match given {
+        // Byte-wise and length-independent: the token is the only thing between
+        // a stranger and this machine's file system, so it is not compared with
+        // a `==` that stops at the first wrong byte.
+        Some(given) if constant_time_eq(given.as_bytes(), token.as_bytes()) => Ok(()),
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = usize::from(a.len() != b.len());
+    for index in 0..a.len().max(b.len()) {
+        let left = a.get(index).copied().unwrap_or(0);
+        let right = b.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left != right);
+    }
+    diff == 0
 }
 
 async fn ws_handler(
@@ -660,8 +663,8 @@ fn client_notice(level: &str, message: impl std::fmt::Display) -> String {
 
 /// Out-of-band answers to the settings commands. They are not `HarnessEvent`s
 /// because nothing outside this server produces them.
-fn push(out: &mpsc::UnboundedSender<String>, value: Value) {
-    let _ = out.send(value.to_string());
+async fn push(out: &mpsc::Sender<String>, value: Value) {
+    let _ = out.send(value.to_string()).await;
 }
 
 fn settings_event(agent: &Agent) -> Value {
@@ -712,8 +715,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
     };
 
     let (mut socket_tx, mut socket_rx) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-    let _ = out_tx.send(json!({ "type": "snapshot", "snapshot": agent.snapshot() }).to_string());
+    // Bounded: a tab that stops reading must slow the agent down instead of
+    // letting its events pile up in this process. Terminal output is a byte
+    // stream, so there it is the shell that blocks, exactly like a real pty.
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(SOCKET_QUEUE);
+    let _ = out_tx
+        .send(json!({ "type": "snapshot", "snapshot": agent.snapshot() }).to_string())
+        .await;
     if let Ok(mut cwds) = state.cwds.lock() {
         cwds.insert(agent.session_id(), agent.cwd());
     }
@@ -732,7 +740,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
             let text = serde_json::to_string(&event).unwrap_or_else(|_| {
                 json!({ "type": "error", "message": "event serialization failed" }).to_string()
             });
-            if event_out.send(text).is_err() {
+            if event_out.send(text).await.is_err() {
                 break;
             }
         }
@@ -759,7 +767,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
             let command: HarnessCommand = match serde_json::from_str(&text) {
                 Ok(command) => command,
                 Err(err) => {
-                    let _ = cmd_out.send(client_error(format!("invalid command: {err}")));
+                    let _ = cmd_out
+                        .send(client_error(format!("invalid command: {err}")))
+                        .await;
                     continue;
                 }
             };
@@ -769,7 +779,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                         continue;
                     }
                     if cmd_agent.busy() {
-                        let _ = cmd_out.send(client_error("a turn is already running"));
+                        let _ = cmd_out
+                            .send(client_error("a turn is already running"))
+                            .await;
                         continue;
                     }
                     let agent = cmd_agent.clone();
@@ -781,12 +793,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                 HarnessCommand::SetAgentModel { model } => {
                     match cmd_agent.set_agent_model(&model) {
                         Ok(()) => {
-                            let _ = cmd_out.send(client_notice("info", format!("model: {model}")));
-                            push(&cmd_out, models_event(&cmd_agent));
-                            push(&cmd_out, settings_event(&cmd_agent));
+                            let _ = cmd_out
+                                .send(client_notice("info", format!("model: {model}")))
+                                .await;
+                            push(&cmd_out, models_event(&cmd_agent)).await;
+                            push(&cmd_out, settings_event(&cmd_agent)).await;
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
@@ -796,52 +810,58 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                             if let Ok(mut cwds) = cmd_state.cwds.lock() {
                                 cwds.insert(cmd_agent.session_id(), cmd_agent.cwd());
                             }
-                            let _ = cmd_out.send(client_notice(
-                                "info",
-                                format!("workspace: {}", cmd_agent.cwd().display()),
-                            ));
-                            push(&cmd_out, settings_event(&cmd_agent));
+                            let _ = cmd_out
+                                .send(client_notice(
+                                    "info",
+                                    format!("workspace: {}", cmd_agent.cwd().display()),
+                                ))
+                                .await;
+                            push(&cmd_out, settings_event(&cmd_agent)).await;
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
                 HarnessCommand::DownloadConsent { id, allow } => {
                     cmd_agent.grant_download_by_id(&id, allow);
                 }
-                HarnessCommand::DescribeSettings => push(&cmd_out, settings_event(&cmd_agent)),
+                HarnessCommand::DescribeSettings => {
+                    push(&cmd_out, settings_event(&cmd_agent)).await
+                }
                 HarnessCommand::SetSetting { key, value } => {
                     match settings::apply(&cmd_agent, &key, &value) {
                         Ok(notice) => {
-                            let _ = cmd_out.send(client_notice("info", notice));
-                            push(&cmd_out, settings_event(&cmd_agent));
+                            let _ = cmd_out.send(client_notice("info", notice)).await;
+                            push(&cmd_out, settings_event(&cmd_agent)).await;
                             // The model rows and the web-search credential row are
                             // derived from the config, so a reload can move both.
-                            push(&cmd_out, models_event(&cmd_agent));
+                            push(&cmd_out, models_event(&cmd_agent)).await;
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
-                HarnessCommand::DescribeModels => push(&cmd_out, models_event(&cmd_agent)),
+                HarnessCommand::DescribeModels => push(&cmd_out, models_event(&cmd_agent)).await,
                 HarnessCommand::SetCompactModel { model } => {
                     match cmd_agent.set_compact_model(&model) {
                         Ok(()) => {
-                            let _ = cmd_out.send(client_notice(
-                                "info",
-                                if model.trim().is_empty() {
-                                    "压缩复用主模型".to_string()
-                                } else {
-                                    format!("compact model: {model}")
-                                },
-                            ));
-                            push(&cmd_out, models_event(&cmd_agent));
-                            push(&cmd_out, settings_event(&cmd_agent));
+                            let _ = cmd_out
+                                .send(client_notice(
+                                    "info",
+                                    if model.trim().is_empty() {
+                                        "压缩复用主模型".to_string()
+                                    } else {
+                                        format!("compact model: {model}")
+                                    },
+                                ))
+                                .await;
+                            push(&cmd_out, models_event(&cmd_agent)).await;
+                            push(&cmd_out, settings_event(&cmd_agent)).await;
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
@@ -861,7 +881,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                                 "error": err.to_string(),
                             }),
                         };
-                        push(&out, value);
+                        push(&out, value).await;
                     });
                 }
                 HarnessCommand::AddModel {
@@ -880,28 +900,33 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                     match cmd_agent.add_model(&new) {
                         Ok(reference) => {
                             let _ = cmd_out
-                                .send(client_notice("info", format!("已添加模型 {reference}")));
-                            push(&cmd_out, models_event(&cmd_agent));
-                            push(&cmd_out, settings_event(&cmd_agent));
+                                .send(client_notice("info", format!("已添加模型 {reference}")))
+                                .await;
+                            push(&cmd_out, models_event(&cmd_agent)).await;
+                            push(&cmd_out, settings_event(&cmd_agent)).await;
                         }
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
-                HarnessCommand::DescribeLsp => push(&cmd_out, lsp_event(&cmd_agent)),
+                HarnessCommand::DescribeLsp => push(&cmd_out, lsp_event(&cmd_agent)).await,
                 HarnessCommand::Rollback { turn } => match cmd_agent.rollback_to_turn(turn) {
                     Ok(()) => {
                         // The transcript changed underneath the feed, so the
                         // browser gets a fresh snapshot instead of an edit list.
-                        let _ = cmd_out.send(
-                            json!({ "type": "snapshot", "snapshot": cmd_agent.snapshot() })
-                                .to_string(),
-                        );
-                        let _ = cmd_out.send(client_notice("info", "已回滚到选中的输入"));
+                        let _ = cmd_out
+                            .send(
+                                json!({ "type": "snapshot", "snapshot": cmd_agent.snapshot() })
+                                    .to_string(),
+                            )
+                            .await;
+                        let _ = cmd_out
+                            .send(client_notice("info", "已回滚到选中的输入"))
+                            .await;
                     }
                     Err(err) => {
-                        let _ = cmd_out.send(client_error(err));
+                        let _ = cmd_out.send(client_error(err)).await;
                     }
                 },
                 HarnessCommand::InstallLsp { server, update } => {
@@ -910,13 +935,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                     tokio::spawn(async move {
                         match agent.install_lsp(&server, update).await {
                             Ok(path) => {
-                                let _ = out.send(client_notice(
-                                    "info",
-                                    format!("{server} 已安装到 {}", path.display()),
-                                ));
+                                let _ = out
+                                    .send(client_notice(
+                                        "info",
+                                        format!("{server} 已安装到 {}", path.display()),
+                                    ))
+                                    .await;
                             }
                             Err(err) => {
-                                let _ = out.send(client_error(err));
+                                let _ = out.send(client_error(err)).await;
                             }
                         }
                     });
@@ -932,29 +959,40 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                         cols,
                         rows,
                         cmd_out.clone(),
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(opened) => terminal = Some(opened),
                         Err(err) => {
-                            let _ = cmd_out.send(client_error(err));
+                            let _ = cmd_out.send(client_error(err)).await;
                         }
                     }
                 }
                 HarnessCommand::TerminalInput { data } => {
                     if let Some(terminal) = terminal.as_mut() {
-                        terminal.write(&data);
+                        terminal.write(&data).await;
                     }
                 }
                 HarnessCommand::TerminalResize { cols, rows } => {
                     if let Some(terminal) = terminal.as_mut() {
                         if let Some(size) = terminal.resize(cols, rows) {
-                            push(&cmd_out, size);
+                            push(&cmd_out, size).await;
                         }
                     }
                 }
                 HarnessCommand::CloseTerminal => {
-                    terminal = None;
-                    let _ = cmd_out
-                        .send(json!({ "type": "terminal_state", "state": "closed" }).to_string());
+                    if let Some(closed) = terminal.take() {
+                        let _ = cmd_out
+                            .send(
+                                json!({
+                                    "type": "terminal_state",
+                                    "state": "closed",
+                                    "id": closed.id(),
+                                })
+                                .to_string(),
+                            )
+                            .await;
+                    }
                 }
                 HarnessCommand::Shutdown => break,
             }

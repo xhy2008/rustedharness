@@ -262,7 +262,7 @@ pub fn describe(config: &Config, live: &Live) -> Vec<Item> {
             "general",
             "终端",
             "切换会立即生效，并终止上一个 shell 启动的后台进程。",
-            &terminal_label(prefer),
+            prefer,
             [
                 (shell::GIT_BASH.to_string(), "Git Bash".to_string()),
                 (shell::POWERSHELL.to_string(), "PowerShell".to_string()),
@@ -298,13 +298,16 @@ pub fn describe(config: &Config, live: &Live) -> Vec<Item> {
             "compaction.thinking",
             "compaction",
             "思考等级",
-            "摘要请求的推理强度；模型未声明 reasoning 时不发送。",
+            if summary_reasons {
+                "摘要请求的推理强度。"
+            } else {
+                "摘要模型未声明 reasoning，这一等级不会被发送。"
+            },
             compaction.compact_thinking.label(),
             ThinkingLevel::ALL
                 .into_iter()
                 .map(|level| (level.label().to_string(), level.label().to_string())),
-        )
-        .disabled(!summary_reasons),
+        ),
         Item::choice(
             "compaction.threshold",
             "compaction",
@@ -470,9 +473,12 @@ fn bool_value(value: &Value, key: &str) -> Result<bool, HarnessError> {
         .ok_or_else(|| HarnessError::Config(format!("setting {key} expects true or false")))
 }
 
+/// A choice carries its value as text (that is what the browser has), so a
+/// numeric row accepts `"30"` as well as `30`.
 fn number_value(value: &Value, key: &str) -> Result<u64, HarnessError> {
     value
         .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
         .ok_or_else(|| HarnessError::Config(format!("setting {key} expects a number")))
 }
 
@@ -494,8 +500,17 @@ pub fn apply(agent: &Agent, key: &str, value: &Value) -> Result<String, HarnessE
         }
         "terminal" => {
             let prefer = string_value(value, key)?;
+            if !prefer.eq_ignore_ascii_case(shell::GIT_BASH)
+                && !prefer.eq_ignore_ascii_case(shell::POWERSHELL)
+            {
+                return Err(HarnessError::Config(format!(
+                    "unknown terminal {prefer}; expected {} or {}",
+                    shell::GIT_BASH,
+                    shell::POWERSHELL
+                )));
+            }
             agent.set_shell_prefer(&prefer)?;
-            Ok(format!("终端已切换为 {prefer}"))
+            Ok(format!("终端已切换为 {}", terminal_label(&prefer)))
         }
         "image" => {
             let pixels = number_value(value, key)? as u32;
@@ -736,13 +751,16 @@ mod tests {
     fn apply_writes_every_knob_and_describe_reads_it_back() {
         let dir = tempfile::tempdir().unwrap();
         let agent = agent_in(dir.path());
+        // A choice sends the option's own value, which is text for every row -
+        // including the numeric ones ("30", not 30). Anything else is a shape
+        // the browser never produces.
         let cases: Vec<(&str, Value)> = vec![
             ("notices", json!(false)),
-            ("retry", json!(30)),
-            ("image", json!(1024)),
-            ("compaction.threshold", json!(65)),
-            ("compaction.keep", json!(4)),
-            ("compaction.send", json!(3)),
+            ("retry", json!("30")),
+            ("image", json!("1024")),
+            ("compaction.threshold", json!("65")),
+            ("compaction.keep", json!("4")),
+            ("compaction.send", json!("3")),
             ("compaction.strip", json!(false)),
             ("compaction.thinking", json!("medium")),
             ("compaction.content", json!("none")),
@@ -776,6 +794,19 @@ mod tests {
         assert_eq!(reloaded.agent.compact_threshold, 0.65);
         assert_eq!(reloaded.agent.keep_recent_turns, 4);
         assert_eq!(reloaded.agent.strip_content, StripContent::Nothing);
+
+        // The shell row's value is `shell.prefer`, not the label it renders.
+        // Writing "Git Bash" would be accepted by the file and then ignored by
+        // `ShellSpec::detect`, which compares against `git-bash`.
+        assert!(apply(&agent, "terminal", &json!("Git Bash")).is_err());
+        apply(
+            &agent,
+            "terminal",
+            &json!(rustedharness_core::shell::GIT_BASH),
+        )
+        .unwrap();
+        let reloaded = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(reloaded.shell.prefer, rustedharness_core::shell::GIT_BASH);
     }
 
     #[test]
