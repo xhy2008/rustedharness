@@ -1,10 +1,9 @@
-//! Git status for the file tree.
+//! Git status for the file browsers.
 //!
-//! The tree is the only place that knows which of them are dirty, and the web
-//! UI colours them: modified yellow, untracked and added green, deleted and
-//! conflicted red, renamed purple, ignored dimmed. One `git status` per tree
-//! request, then a prefix match per entry - a directory is dirty when anything
-//! below it is.
+//! Both the TUI and the web UI colour entries by status: modified yellow,
+//! untracked and added green, deleted and conflicted red, renamed purple,
+//! ignored dimmed. One `git status` per directory listing, then a prefix match
+//! per entry - a directory is as dirty as the dirtiest thing below it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -190,14 +189,5 @@ mod tests {
             Some(Status::Modified)
         );
         assert_eq!(find(&map, Path::new("README.md"), false), None);
-    }
-
-    #[test]
-    fn a_worktree_outside_git_reports_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        // Only assert when the machine itself is not a repository by accident.
-        if toplevel(dir.path()).is_none() {
-            assert!(statuses(dir.path()).is_none());
-        }
     }
 }

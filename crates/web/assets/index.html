@@ -12,6 +12,7 @@ try {
   if (savedTheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
 } catch (e) {}
 </script>
+<link rel="stylesheet" href="/assets/xterm.css">
 <style>
   :root {
     --brand: #ff6600;
@@ -617,19 +618,12 @@ try {
   .trow .git-mark { margin-left: auto; font-size: 9px; letter-spacing: .3px; text-transform: uppercase; color: var(--faint); }
 
   /* ---------- terminal ---------- */
-  .term-wrap { position: relative; flex: 1; min-height: 0; margin: 0; overflow: auto; background: #0d0f13; }
-  .term-screen {
-    margin: 0; padding: 8px 10px; color: #cfd6e1;
-    font-family: var(--mono); font-size: 12px; line-height: 1.35; white-space: pre;
-    tab-size: 4;
-  }
-  .term-cursor { background: var(--brand); color: #10131a; }
-  .term-input {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    padding: 0; border: 0; outline: none; resize: none;
-    background: transparent; color: transparent; caret-color: transparent;
-    opacity: .01; font-size: 12px;
-  }
+  .term-wrap { flex: 1; min-height: 0; overflow: hidden; padding: 6px 2px 0 8px; background: var(--code-bg); }
+  .term-mount { width: 100%; height: 100%; }
+  .term-mount .xterm { height: 100%; padding-bottom: 4px; }
+  .term-mount .xterm-viewport { background: transparent !important; scrollbar-width: thin; }
+  .term-mount .xterm-viewport::-webkit-scrollbar { width: 9px; }
+  .term-mount .xterm-viewport::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; }
   .term-foot { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--line); }
   .term-info { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 10.5px; }
   .term-btn { height: 26px; padding: 0 9px; font-size: 10.5px; }
@@ -1099,15 +1093,14 @@ try {
           <div id="activityContent"></div>
         </div>
         <div class="ipane" id="paneTerminal">
-          <div class="term-wrap" id="termWrap" tabindex="0" role="application" aria-label="工作目录终端">
-            <pre class="term-screen" id="termScreen"></pre>
-            <textarea id="termInput" class="term-input" autocomplete="off"
-              autocapitalize="off" spellcheck="false" aria-label="终端输入"></textarea>
+          <div class="term-wrap" id="termWrap">
+            <div class="term-mount" id="termMount"></div>
           </div>
           <div class="term-foot">
             <span class="term-info" id="termInfo">终端未启动</span>
-            <button class="btn term-btn" id="termCopy" type="button">复制屏幕</button>
+            <button class="btn term-btn" id="termCopy" type="button">复制</button>
             <button class="btn term-btn" id="termCtrlC" type="button">Ctrl+C</button>
+            <button class="btn term-btn" id="termClear" type="button">清屏</button>
             <button class="btn term-btn" id="termRestart" type="button">重启</button>
           </div>
         </div>
@@ -1298,7 +1291,10 @@ try {
 <div id="ctxMenu" class="ctx-menu" hidden role="menu"></div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/assets/xterm.js"></script>
+<script src="/assets/addon-fit.js"></script>
 <script>
+/* global Terminal, FitAddon */
 (() => {
   'use strict';
 
@@ -1354,7 +1350,7 @@ try {
     toolItems: new Map(),
     turnCount: 0,
     rollbackPending: null,
-    terminal: { open: false, cols: 0, rows: 0 },
+    terminal: { open: false, cols: 0, rows: 0, term: null, fit: null },
     dirPath: '',
     feed: { items: [], el: new Map(), seq: 0, batch: false, chars: {} },
     scrollRaf: 0,
@@ -2290,7 +2286,7 @@ try {
       });
       chips.append(button);
     }
-    const hint = el('div', 'empty-hint', 'Enter 发送 · Shift+Enter 换行 · /help 查看命令');
+    const hint = el('div', 'empty-hint', 'Enter 发送 · Shift+Enter 换行');
     box.append(logo, title, lead, chips, hint);
     feedEl.append(box);
   }
@@ -3678,9 +3674,11 @@ try {
       requestLspStatus();
     }
     if (tab === 'terminal') {
-      if (!state.terminal.open) openTerminal();
-      else resizeTerminal();
-      setTimeout(() => $('termInput').focus(), 30);
+      requestAnimationFrame(() => {
+        fitTerminal();
+        if (!state.terminal.open) openTerminal();
+        else if (state.terminal.term) state.terminal.term.focus();
+      });
     }
     syncInspectorHeader();
   }
@@ -3972,20 +3970,14 @@ try {
   }
 
   /* ---------------- working directory ---------------- */
-  async function pickWorkingDirectory() {
+  /// There is one folder picker and it is ours: driving zenity, osascript or a
+  /// PowerShell dialog from the server meant three different windows and a
+  /// hidden dependency on the host's desktop, and it could only ever work when
+  /// the browser and the server share a screen.
+  function pickWorkingDirectory() {
     if (!isConnected()) {
       toast('尚未连接', 'error');
       return;
-    }
-    try {
-      const picked = await api('/api/cwd/pick', { method: 'POST' });
-      if (picked && picked.path) {
-        sendCommand({ type: 'set_cwd', path: picked.path });
-        return;
-      }
-      if (picked && picked.cancelled) return;
-    } catch (_) {
-      // Fall through to the server-side browser.
     }
     openDirPicker(state.cwd);
   }
@@ -4087,15 +4079,88 @@ try {
   }
 
   /* ---------------- terminal ---------------- */
-  const TERM_KEYMAP = {
-    Enter: '\r', NumpadEnter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
-    ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D',
-    Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~', PageUp: '\x1b[5~', PageDown: '\x1b[6~'
-  };
+  // xterm.js is the terminal emulator. It gets the pty's bytes verbatim, which
+  // is the only way to keep scrollback, colours, mouse reporting and
+  // full-screen programs: a server-side emulator can only replay a screen, and
+  // never the history a user scrolls through.
+  function termPalette() {
+    const css = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
+    return {
+      background: read('--code-bg', '#0d0f13'),
+      foreground: read('--code-fg', '#cfd6e1'),
+      cursor: read('--brand', '#ff6600'),
+      cursorAccent: read('--bg', '#12141a'),
+      selectionBackground: read('--brand-soft', 'rgba(255,102,0,.25)'),
+      black: '#1c2027', red: '#e06c75', green: '#98c379', yellow: '#e5c07b',
+      blue: '#61afef', magenta: '#c678dd', cyan: '#56b6c2', white: '#cfd6e1',
+      brightBlack: '#5c6370', brightRed: '#ef7a84', brightGreen: '#a9d489',
+      brightYellow: '#f0cd88', brightBlue: '#7bc0f5', brightMagenta: '#d68fe8',
+      brightCyan: '#6fc9d4', brightWhite: '#eef2f8'
+    };
+  }
+
+  // xterm measures glyphs on a canvas, so it needs a literal font stack: a
+  // `var()` reference does not resolve there and falls back to another font.
+  function monoFont() {
+    const value = getComputedStyle(document.documentElement)
+      .getPropertyValue('--mono').trim();
+    return value || 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  }
+
+  function ensureTerminal() {
+    if (state.terminal.term) return state.terminal.term;
+    if (typeof Terminal !== 'function') {
+      $('termInfo').textContent = '终端组件缺失';
+      throw new Error('xterm.js 未加载');
+    }
+    const term = new Terminal({
+      fontFamily: monoFont(),
+      fontSize: 12.5,
+      lineHeight: 1.1,
+      letterSpacing: 0,
+      cursorBlink: true,
+      scrollback: 8000,
+      macro: false,
+      theme: termPalette()
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open($('termMount'));
+    term.onData((data) => termSend(data));
+    term.onResize(({ cols, rows }) => {
+      state.terminal.cols = cols;
+      state.terminal.rows = rows;
+      if (state.terminal.open && isConnected()) {
+        sendCommand({ type: 'terminal_resize', cols, rows });
+      }
+    });
+    state.terminal.term = term;
+    state.terminal.fit = fit;
+    return term;
+  }
+
+  function disposeTerminal() {
+    if (!state.terminal.term) return;
+    state.terminal.term.dispose();
+    state.terminal.term = null;
+    state.terminal.fit = null;
+    $('termMount').replaceChildren();
+  }
 
   function termSend(data) {
     if (!isConnected() || !state.terminal.open) return;
     sendCommand({ type: 'terminal_input', data });
+  }
+
+  function fitTerminal() {
+    if (!state.terminal.fit || !state.inspectorTab || state.inspectorTab !== 'terminal') return;
+    try {
+      state.terminal.fit.fit();
+    } catch (_) {
+      // The pane can be zero-sized while a layout is in flight; the observer
+      // fires again when it has a box.
+    }
   }
 
   function openTerminal() {
@@ -4103,12 +4168,16 @@ try {
       toast('尚未连接', 'error');
       return;
     }
-    const wrap = $('termWrap');
-    const cols = Math.max(20, Math.floor((wrap.clientWidth - 16) / 7.23));
-    const rows = Math.max(4, Math.floor((wrap.clientHeight - 12) / 16.2));
+    const term = ensureTerminal();
+    term.reset();
+    fitTerminal();
     state.terminal.open = true;
     $('termInfo').textContent = '正在启动终端…';
-    sendCommand({ type: 'open_terminal', cols, rows });
+    sendCommand({
+      type: 'open_terminal',
+      cols: term.cols || 80,
+      rows: term.rows || 24
+    });
   }
 
   function closeTerminal() {
@@ -4118,69 +4187,22 @@ try {
   }
 
   function renderTerminal(event) {
-    const screen = $('termScreen');
-    const lines = String(event.screen || '').split('\n');
-    if (event.cursor_hidden) {
-      screen.textContent = lines.join('\n');
-    } else {
-      const row = Math.min(Math.max(Number(event.cursor_row) || 0, 0), Math.max(lines.length - 1, 0));
-      const col = Math.max(Number(event.cursor_col) || 0, 0);
-      const line = lines[row] == null ? '' : lines[row];
-      const before = line.slice(0, col);
-      const under = line.charAt(col) || ' ';
-      const after = line.slice(col + 1);
-      screen.replaceChildren(
-        document.createTextNode((lines.slice(0, row).join('\n') + (row > 0 ? '\n' : ''))),
-        document.createTextNode(before),
-        el('span', 'term-cursor', under === '' ? ' ' : under),
-        document.createTextNode(after + (row < lines.length - 1 ? '\n' + lines.slice(row + 1).join('\n') : ''))
-      );
-    }
-    const wrap = $('termWrap');
-    wrap.scrollTop = wrap.scrollHeight;
+    const term = ensureTerminal();
+    const binary = atob(String(event.data || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    term.write(bytes);
   }
 
-  function bindTerminalInput() {
-    const input = $('termInput');
-    input.addEventListener('keydown', (event) => {
-      if (!state.terminal.open) return;
-      let data = null;
-      if (event.ctrlKey && !event.altKey && !event.metaKey && /^[a-zA-Z]$/.test(event.key)) {
-        data = String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
-      } else if (TERM_KEYMAP[event.key]) {
-        data = TERM_KEYMAP[event.key];
-      } else if (event.key === 'c' && event.ctrlKey) {
-        data = '\x03';
-      }
-      if (data === null && (event.ctrlKey || event.altKey || event.metaKey)) return;
-      if (data !== null) {
-        event.preventDefault();
-        termSend(data);
-      }
-    });
-    input.addEventListener('input', () => {
-      const value = input.value;
-      if (!value) return;
-      input.value = '';
-      termSend(value);
-    });
-    input.addEventListener('paste', (event) => {
-      const text = (event.clipboardData && event.clipboardData.getData('text')) || '';
-      if (!text) return;
-      event.preventDefault();
-      termSend(text);
-    });
-  }
-
-  function resizeTerminal() {
-    if (!state.terminal.open || !isConnected()) return;
-    const wrap = $('termWrap');
-    const cols = Math.max(20, Math.floor((wrap.clientWidth - 16) / 7.23));
-    const rows = Math.max(4, Math.floor((wrap.clientHeight - 12) / 16.2));
-    if (cols === state.terminal.cols && rows === state.terminal.rows) return;
-    state.terminal.cols = cols;
-    state.terminal.rows = rows;
-    sendCommand({ type: 'terminal_resize', cols, rows });
+  function terminalText() {
+    const term = state.terminal.term;
+    if (!term) return '';
+    const selected = term.getSelection();
+    if (selected) return selected;
+    term.selectAll();
+    const all = term.getSelection();
+    term.clearSelection();
+    return all;
   }
 
   /* ---------------- websocket / protocol ---------------- */
@@ -4265,7 +4287,7 @@ try {
     state.terminal.open = false;
     state.terminal.cols = 0;
     state.terminal.rows = 0;
-    $('termScreen').replaceChildren();
+    disposeTerminal();
     $('termInfo').textContent = '终端未启动';
     renderTodos();
     renderActivity();
@@ -4554,7 +4576,12 @@ try {
         $('termInfo').textContent = event.state === 'running'
           ? (event.shell || 'shell') + ' · ' + (event.cwd || state.cwd)
           : '终端已退出';
-        if (event.state === 'running') resizeTerminal();
+        if (event.state === 'running') {
+          fitTerminal();
+          if (state.terminal.term) state.terminal.term.focus();
+        } else if (state.terminal.term) {
+          state.terminal.term.write('\r\n\x1b[2m[进程已退出]\x1b[0m\r\n');
+        }
         break;
       case 'terminal_output':
         renderTerminal(event);
@@ -4660,48 +4687,6 @@ try {
     }
   }
 
-  // The browser has controls for everything the TUI does with `/name`, so only
-  // the three that read better as text are still parsed.
-  const SLASH_HELP = [
-    '浏览器里绝大多数操作都是界面控件，只剩三条命令：',
-    '/help      这条帮助',
-    '/hotkeys   键盘快捷键',
-    '/copy      复制最后一条回复',
-    '',
-    '模型：输入框右下角的下拉框',
-    '工作目录：输入框左下角的文件夹按钮',
-    '回滚 / 复制某条消息：在消息上点右键',
-    '设置 / 语言服务器 / 终端：右上角齿轮、底部 LSP 状态栏、右侧「终端」标签'
-  ].join('\n');
-
-  function runSlash(text) {
-    const command = text.split(' ')[0].toLowerCase();
-    const clear = () => {
-      inputEl.value = '';
-      resizeInput();
-    };
-    clear();
-    if (command === '/help') {
-      addNote(SLASH_HELP, 'brand');
-      return true;
-    }
-    if (command === '/hotkeys') {
-      addNote([
-        'Enter 发送 · Shift+Enter 换行',
-        '消息右键：回滚 / 复制',
-        'Esc 关闭浮层、下拉框与弹窗',
-        '终端标签里直接敲键盘；Ctrl+C 按钮发中断'
-      ].join('\n'), 'brand');
-      return true;
-    }
-    if (command === '/copy') {
-      copyLastReply();
-      return true;
-    }
-    addNote('斜杠命令已改为界面控件，只剩 /help、/hotkeys、/copy。输入 /help 查看对应位置。', 'warn');
-    return true;
-  }
-
   async function copyLastReply() {
     if (!state.lastAssistant) {
       toast('还没有可复制的回复', 'error');
@@ -4714,11 +4699,8 @@ try {
   function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
-    // A leading slash is still a command attempt; anything else is prose.
-    if (text.startsWith('/')) {
-      runSlash(text);
-      return;
-    }
+    // No slash commands: every control is a control, so a leading `/` is prose
+    // like any other character and goes to the model.
     if (state.busy) {
       state.queue.push(text);
       inputEl.value = '';
@@ -4820,13 +4802,24 @@ try {
       closeTerminal();
       setTimeout(openTerminal, 250);
     });
-    $('termCopy').addEventListener('click', () => copyWithToast($('termScreen').textContent || ''));
+    $('termCopy').addEventListener('click', () => {
+      const text = terminalText();
+      if (!text) {
+        toast('终端里没有可复制的内容', 'error');
+        return;
+      }
+      copyWithToast(text);
+    });
+    $('termClear').addEventListener('click', () => {
+      if (state.terminal.term) state.terminal.term.clear();
+    });
     $('termCtrlC').addEventListener('click', () => {
       termSend('\x03');
-      setTimeout(resizeTerminal, 60);
+      if (state.terminal.term) state.terminal.term.focus();
     });
-    $('termWrap').addEventListener('click', () => $('termInput').focus());
-    bindTerminalInput();
+    $('termWrap').addEventListener('click', () => {
+      if (state.terminal.term) state.terminal.term.focus();
+    });
     $('treeRefresh').addEventListener('click', loadTree);
     $('refreshSessions').addEventListener('click', refreshSessions);
     $('reconnectBtn').addEventListener('click', () => {
@@ -4886,7 +4879,7 @@ try {
     }, { passive: true });
     if (window.ResizeObserver) {
       new ResizeObserver(() => feedSync()).observe(feedEl);
-      new ResizeObserver(() => resizeTerminal()).observe($('termWrap'));
+      new ResizeObserver(() => fitTerminal()).observe($('termWrap'));
     }
     window.addEventListener('resize', () => feedSync());
     inputEl.addEventListener('input', resizeInput);

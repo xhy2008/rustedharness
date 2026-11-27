@@ -16,18 +16,27 @@ pub const POWERSHELL: &str = "powershell";
 /// this Windows shells never emit any output. Shared by the background-process
 /// runner and the web terminal.
 pub fn answer_terminal_queries(pending: &mut Vec<u8>, writer: &mut dyn std::io::Write, rows: u16) {
-    if pending.windows(4).any(|window| window == b"\x1b[6n") {
+    if saw_terminal_query(pending, &[]) {
         let reply = format!("\x1b[{rows};1R");
         let _ = writer.write_all(reply.as_bytes());
         let _ = writer.flush();
         pending.clear();
-        return;
     }
-    // Keep a small tail so a query split across reads is still matched.
-    if pending.len() > 3 {
-        let tail = pending.split_off(pending.len() - 3);
-        *pending = tail;
-    }
+}
+
+/// Detect a DSR query in `chunk`, remembering the last three bytes of the
+/// previous chunk so a split query is still found. Nothing is removed from
+/// `chunk`: callers that forward the raw stream keep every byte.
+pub fn saw_terminal_query(carry: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    let split = carry.len();
+    let mut joined = Vec::with_capacity(split + chunk.len());
+    joined.extend_from_slice(carry);
+    joined.extend_from_slice(chunk);
+    let found = joined.windows(4).any(|window| window == b"\x1b[6n");
+    let keep = joined.len().saturating_sub(3);
+    carry.clear();
+    carry.extend_from_slice(&joined[keep..]);
+    found
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

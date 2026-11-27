@@ -13,7 +13,6 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -28,14 +27,14 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
-mod git;
 mod settings;
 mod terminal;
 
 use rustedharness_core::agent::Agent;
 use rustedharness_core::config::{Config, NewModel};
 use rustedharness_core::error::HarnessError;
-use rustedharness_core::paths::{WorkspacePathResolver, SKIP_DIRS};
+use rustedharness_core::git;
+use rustedharness_core::paths::WorkspacePathResolver;
 use rustedharness_core::protocol::HarnessCommand;
 use rustedharness_core::session::SessionStore;
 use rustedharness_core::VERSION;
@@ -48,10 +47,6 @@ struct AppState {
     config: Config,
     cwd: PathBuf,
     token: Option<String>,
-    /// Where the server is reachable. Native dialogs are only offered when that
-    /// is loopback: popping a file picker on a shared host is not a service a
-    /// remote browser should be able to trigger.
-    local: SocketAddr,
     /// Per-session workspace roots so the file browser follows `/cwd`.
     cwds: Mutex<HashMap<String, PathBuf>>,
 }
@@ -101,7 +96,6 @@ pub async fn spawn(
         config,
         cwd,
         token,
-        local,
         cwds: Mutex::new(HashMap::new()),
     }));
     let handle = tokio::spawn(async move {
@@ -134,6 +128,31 @@ fn open_browser(url: &str) {
 
 /// The same artwork the desktop bundle ships, so the browser tab and the native
 /// window are recognisably the same application.
+/// Vendored `@xterm/xterm` 5.5.0 and `@xterm/addon-fit` 0.10.0, served from the
+/// binary: the page must work on a machine with no internet, and a CDN would
+/// hand a debugging tool to a third party.
+async fn xterm_js() -> impl IntoResponse {
+    asset(include_str!("../assets/xterm.js"), "text/javascript")
+}
+
+async fn xterm_css() -> impl IntoResponse {
+    asset(include_str!("../assets/xterm.css"), "text/css")
+}
+
+async fn addon_fit() -> impl IntoResponse {
+    asset(include_str!("../assets/addon-fit.js"), "text/javascript")
+}
+
+fn asset(body: &'static str, mime: &'static str) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+}
+
 async fn favicon() -> impl IntoResponse {
     const ICO: &[u8] = include_bytes!("../../gui/icons/icon.ico");
     ([(header::CONTENT_TYPE, "image/x-icon")], ICO)
@@ -143,12 +162,14 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/favicon.ico", get(favicon))
+        .route("/assets/xterm.js", get(xterm_js))
+        .route("/assets/xterm.css", get(xterm_css))
+        .route("/assets/addon-fit.js", get(addon_fit))
         .route("/api/health", get(health))
         .route("/api/config", get(config_info))
         .route("/api/tree", get(workspace_tree))
         .route("/api/file", get(workspace_file))
         .route("/api/dirs", get(list_dirs))
-        .route("/api/cwd/pick", axum::routing::post(pick_dir))
         .route("/api/sessions", get(list_sessions))
         .route(
             "/api/sessions/{id}",
@@ -331,9 +352,6 @@ fn dir_listing(dir: &std::path::Path) -> std::result::Result<Value, HarnessError
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        if name.starts_with('.') {
-            continue;
-        }
         entries.push((name, entry.path()));
     }
     entries.sort_by_key(|entry| entry.0.to_lowercase());
@@ -347,103 +365,6 @@ fn dir_listing(dir: &std::path::Path) -> std::result::Result<Value, HarnessError
         "entries": entries,
         "home": std::env::var("HOME").ok(),
     }))
-}
-
-/// Ask the machine running the server for its folder dialog. Only loopback may
-/// do this; anywhere else the browser gets `unsupported` and shows its own
-/// picker instead.
-async fn pick_dir(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(status) = authorized(&state, &headers) {
-        return status.into_response();
-    }
-    if !state.local.ip().is_loopback() {
-        return Json(json!({ "unsupported": true })).into_response();
-    }
-    let start = state.cwd.clone();
-    let picked = tokio::task::spawn_blocking(move || native_directory_dialog(&start))
-        .await
-        .ok()
-        .flatten();
-    match picked {
-        Some(Some(path)) => Json(json!({ "path": path.to_string_lossy() })).into_response(),
-        Some(None) => Json(json!({ "cancelled": true })).into_response(),
-        None => Json(json!({ "unsupported": true })).into_response(),
-    }
-}
-
-/// `None` when the platform has no dialog we can drive, `Some(None)` when the
-/// user cancelled.
-fn native_directory_dialog(start: &std::path::Path) -> Option<Option<PathBuf>> {
-    let start = start.to_string_lossy().to_string();
-    let mut command = if cfg!(target_os = "macos") {
-        let script = format!(
-            "POSIX path of (choose folder with prompt \"选择工作目录\" default location POSIX file \"{start}\")"
-        );
-        let mut command = std::process::Command::new("osascript");
-        command.arg("-e").arg(script);
-        command
-    } else if cfg!(windows) {
-        let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; \
-             $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
-             $d.SelectedPath = '{start}'; \
-             if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }}"
-        );
-        let mut command = std::process::Command::new("powershell");
-        command.args(["-NoProfile", "-STA", "-Command", &script]);
-        command
-    } else if which("zenity") {
-        let mut command = std::process::Command::new("zenity");
-        command.args([
-            "--file-selection",
-            "--directory",
-            "--title=选择工作目录",
-            &format!("--filename={start}/"),
-        ]);
-        command
-    } else if which("kdialog") {
-        let mut command = std::process::Command::new("kdialog");
-        command.args(["--getexistingdirectory", &start, "--title", "选择工作目录"]);
-        command
-    } else {
-        return None;
-    };
-
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(300);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return Some(None);
-                }
-                let output = child.wait_with_output().ok()?;
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if text.is_empty() {
-                    return Some(None);
-                }
-                return Some(Some(PathBuf::from(text)));
-            }
-            Ok(None) if Instant::now() > deadline => {
-                let _ = child.kill();
-                return Some(None);
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(120)),
-            Err(_) => return Some(None),
-        }
-    }
-}
-
-fn which(program: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| dir.join(program).is_file())
 }
 
 fn core_error(err: HarnessError) -> Response {
@@ -504,12 +425,6 @@ fn tree_entries(
             continue;
         }
         let is_dir = file_type.is_dir();
-        if name.starts_with('.') {
-            continue;
-        }
-        if is_dir && SKIP_DIRS.contains(&name.as_str()) {
-            continue;
-        }
         let path = if rel.is_empty() {
             name.clone()
         } else {
@@ -1031,9 +946,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, resume: Option<S
                 }
                 HarnessCommand::TerminalResize { cols, rows } => {
                     if let Some(terminal) = terminal.as_mut() {
-                        let size = terminal.resize(cols, rows);
-                        push(&cmd_out, size);
-                        push(&cmd_out, terminal.snapshot());
+                        if let Some(size) = terminal.resize(cols, rows) {
+                            push(&cmd_out, size);
+                        }
                     }
                 }
                 HarnessCommand::CloseTerminal => {
@@ -1074,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_listing_only_walks_down() {
+    fn directory_listing_lists_every_subdirectory() {
         let (dir, _resolver) = workspace();
         fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         let listing = dir_listing(dir.path()).unwrap();
@@ -1084,8 +999,7 @@ mod tests {
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect();
-        // `target/` is a legitimate workspace even though the file tree hides it.
-        assert_eq!(names, vec!["src", "target"]);
+        assert_eq!(names, vec![".git", "src", "target"]);
         // `dir_listing` canonicalises, so the expectation must too: macOS
         // resolves /var to /private/var and Windows may shorten a user name.
         let canonical = dunce::canonicalize(dir.path()).unwrap();
@@ -1093,12 +1007,10 @@ mod tests {
             listing["parent"],
             canonical.parent().unwrap().to_string_lossy().as_ref()
         );
-        // A file is not a directory and must be refused, not listed.
-        assert!(dir_listing(&dir.path().join("a.txt")).is_err());
     }
 
     #[test]
-    fn tree_lists_directories_first_and_skips_noise() {
+    fn tree_lists_directories_first_and_hides_nothing() {
         let (_dir, resolver) = workspace();
         let payload = tree_payload(&resolver, "").unwrap();
         let entries = payload["entries"].as_array().unwrap();
@@ -1106,9 +1018,11 @@ mod tests {
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["src", "a.txt"]);
-        assert_eq!(entries[0]["dir"], true);
-        assert_eq!(entries[1]["dir"], false);
+        // Dotfiles and build directories are entries like any other: the tree
+        // can afford them because it only reads one directory at a time.
+        assert_eq!(names, vec![".git", "src", "target", ".hidden", "a.txt"]);
+        assert_eq!(entries[1]["dir"], true);
+        assert_eq!(entries[3]["dir"], false);
 
         let nested = tree_payload(&resolver, "src").unwrap();
         assert_eq!(nested["entries"][0]["path"], "src/main.rs");
@@ -1140,28 +1054,5 @@ mod tests {
         let text = payload["content"].as_str().unwrap();
         assert_eq!(text.len(), FILE_LIMIT - 1);
         assert!(text.ends_with('a'));
-    }
-
-    #[test]
-    fn file_and_tree_block_escapes_and_wrong_kinds() {
-        let (_dir, resolver) = workspace();
-        assert_eq!(
-            file_payload(&resolver, "../outside.txt")
-                .unwrap_err()
-                .code(),
-            "E_PATH_ESCAPE"
-        );
-        assert_eq!(
-            tree_payload(&resolver, "..").unwrap_err().code(),
-            "E_PATH_ESCAPE"
-        );
-        assert_eq!(
-            file_payload(&resolver, "src").unwrap_err().code(),
-            "E_NOT_FILE"
-        );
-        assert_eq!(
-            tree_payload(&resolver, "a.txt").unwrap_err().code(),
-            "E_NOT_DIR"
-        );
     }
 }

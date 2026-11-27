@@ -1286,7 +1286,7 @@ fn draw_file_browser(
     frame: &mut Frame,
     body: Rect,
     title: &str,
-    entries: &[(String, bool)],
+    entries: &[crate::app::FileRow],
     sel: usize,
 ) {
     let block = Block::bordered()
@@ -1310,29 +1310,37 @@ fn draw_file_browser(
         .enumerate()
         .skip(offset)
         .take(rows)
-        .map(|(index, (name, dir))| {
+        .map(|(index, row)| {
             let selected = index == sel;
             let marker = if selected { ">" } else { " " };
-            Line::from(vec![
+            let name_style = if selected {
+                if row.is_dir {
+                    style(ACCENT)
+                } else {
+                    style(TEXT)
+                }
+            } else if row.is_dir {
+                style(BLUE)
+            } else {
+                style(DIM)
+            };
+            let mut spans = vec![
                 Span::styled(
                     marker.to_string(),
                     style(if selected { ACCENT } else { FAINT }),
                 ),
-                Span::styled(
-                    format!(" {name}"),
-                    style(if selected {
-                        if *dir {
-                            ACCENT
-                        } else {
-                            TEXT
-                        }
-                    } else if *dir {
-                        BLUE
-                    } else {
-                        DIM
-                    }),
-                ),
-            ])
+                Span::styled(format!(" {}", row.label), name_style),
+            ];
+            // Same colours as the web tree: the status is information, the
+            // name keeps its "this is a directory" colour.
+            if let Some(status) = row.status {
+                let (letter, colour) = git_badge(status);
+                spans.push(Span::styled(
+                    format!("  {letter}"),
+                    style(colour).add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     frame.render_widget(Paragraph::new(shown), inner);
@@ -1348,6 +1356,19 @@ fn draw_file_browser(
         ))),
         hint,
     );
+}
+
+/// The one-letter mark and colour a git status gets in the file browser.
+fn git_badge(status: &str) -> (&'static str, ratatui::style::Color) {
+    match status {
+        "modified" => ("M", YELLOW),
+        "untracked" => ("U", GREEN),
+        "added" => ("A", GREEN),
+        "deleted" => ("D", RED),
+        "renamed" => ("R", crate::theme::ACCENT),
+        "conflicted" => ("C", RED),
+        _ => ("I", FAINT),
+    }
 }
 
 fn panel_title(title: &str) -> Line<'static> {

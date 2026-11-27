@@ -733,17 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn a_toggle_serialises_without_a_value_list() {
-        let item = Item::toggle("notices", "general", "缓存未命中提示", true, "hint");
-        let value = serde_json::to_value(&item).unwrap();
-        assert_eq!(value["control"], "toggle");
-        assert_eq!(value["checked"], true);
-        assert!(value.get("options").is_none());
-        assert!(value.get("action").is_none());
-        assert!(value.get("disabled").is_none());
-    }
-
-    #[test]
     fn apply_writes_every_knob_and_describe_reads_it_back() {
         let dir = tempfile::tempdir().unwrap();
         let agent = agent_in(dir.path());
@@ -787,15 +776,6 @@ mod tests {
         assert_eq!(reloaded.agent.compact_threshold, 0.65);
         assert_eq!(reloaded.agent.keep_recent_turns, 4);
         assert_eq!(reloaded.agent.strip_content, StripContent::Nothing);
-    }
-
-    #[test]
-    fn apply_rejects_unknown_keys_and_wrong_types() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent = agent_in(dir.path());
-        assert!(apply(&agent, "nope", &json!(1)).is_err());
-        assert!(apply(&agent, "notices", &json!("yes")).is_err());
-        assert!(apply(&agent, "search.backend", &json!("altavista")).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod compact;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod git;
 pub mod hashline;
 pub mod imaging;
 pub mod intel;

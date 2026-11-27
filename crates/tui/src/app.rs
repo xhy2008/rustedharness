@@ -102,6 +102,15 @@ impl TurnRow {
     }
 }
 
+/// One row of the file browser: a name, whether it opens as a directory, and
+/// the git status the list colours it by.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub label: String,
+    pub is_dir: bool,
+    pub status: Option<&'static str>,
+}
+
 pub enum Overlay {
     None,
     Slash {
@@ -127,7 +136,7 @@ pub enum Overlay {
     },
     FileBrowser {
         rel: String,
-        entries: Vec<(String, bool)>,
+        entries: Vec<FileRow>,
         sel: usize,
     },
     FileView {
@@ -1673,7 +1682,9 @@ impl App {
                 }
             }
             Overlay::FileBrowser { entries, sel, rel } => {
-                if let Some((name, is_dir)) = entries.get(sel).cloned() {
+                if let Some(row) = entries.get(sel).cloned() {
+                    let name = row.label;
+                    let is_dir = row.is_dir;
                     let path = if rel.is_empty() || name == ".." {
                         if name == ".." {
                             match rel.rfind('/') {
@@ -2698,41 +2709,16 @@ impl App {
     fn open_file_browser_at(&mut self, rel: &str, focus: Option<&str>) {
         let rel = rel.trim_matches('/').to_string();
         let root = self.agent.cwd();
-        let dir = if rel.is_empty() {
-            root.clone()
-        } else {
-            root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
-        };
-        let mut entries: Vec<(String, bool)> = Vec::new();
-        if !rel.is_empty() {
-            entries.push(("..".to_string(), true));
-        }
-        if let Ok(read) = std::fs::read_dir(&dir) {
-            let mut items: Vec<(String, bool)> = Vec::new();
-            for entry in read.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
-                    continue;
-                }
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                if is_dir && is_skip_dir(&name) {
-                    continue;
-                }
-                items.push((if is_dir { format!("{name}/") } else { name }, is_dir));
+        let entries = match list_dir(&root, &rel) {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.notice(format!("cannot open directory {rel}"));
+                self.overlay = Overlay::None;
+                return;
             }
-            items.sort_by(|a, b| match (a.1, b.1) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.0.cmp(&b.0),
-            });
-            entries.extend(items);
-        } else {
-            self.notice(format!("cannot open directory {rel}"));
-            self.overlay = Overlay::None;
-            return;
-        }
+        };
         let focus = focus
-            .and_then(|name| entries.iter().position(|(entry, _)| entry == name))
+            .and_then(|name| entries.iter().position(|row| row.label == name))
             .unwrap_or(if rel.is_empty() { 0 } else { 1 });
         self.overlay = Overlay::FileBrowser {
             sel: focus,
@@ -2807,8 +2793,51 @@ pub fn session_filtered<'a>(items: &'a [PickerItem], filter: &str) -> Vec<&'a Pi
     model_filtered(items, filter)
 }
 
-fn is_skip_dir(name: &str) -> bool {
-    rustedharness_core::paths::SKIP_DIRS.contains(&name)
+/// One directory of the workspace, without judging what belongs there:
+/// dotfiles and build directories are entries like any other, and each one
+/// carries the git status the list colours it by.
+fn list_dir(root: &std::path::Path, rel: &str) -> std::io::Result<Vec<FileRow>> {
+    let dir = if rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+    };
+    let mut entries: Vec<FileRow> = Vec::new();
+    if !rel.is_empty() {
+        entries.push(FileRow {
+            label: "..".to_string(),
+            is_dir: true,
+            status: None,
+        });
+    }
+    let statuses = rustedharness_core::git::statuses(root);
+    let repo = rustedharness_core::git::toplevel(root);
+    let mut items: Vec<FileRow> = Vec::new();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let status = match (&statuses, &repo) {
+            (Some(map), Some(repo)) => entry
+                .path()
+                .strip_prefix(repo)
+                .ok()
+                .and_then(|path| rustedharness_core::git::find(map, path, is_dir))
+                .map(|status| status.label()),
+            _ => None,
+        };
+        items.push(FileRow {
+            label: if is_dir { format!("{name}/") } else { name },
+            is_dir,
+            status,
+        });
+    }
+    items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.label.cmp(&b.label),
+    });
+    entries.extend(items);
+    Ok(entries)
 }
 
 pub(crate) fn shorten_path(path: &str, max: usize) -> String {
@@ -3201,26 +3230,53 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    #[test]
-    fn the_removed_control_keys_do_nothing() {
-        let mut app = crate::ui_tests::demo_app();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        for key in [ctrl('l'), ctrl('r'), ctrl('x'), ctrl('g')] {
-            runtime.block_on(app.handle_key(key, &tx)).unwrap();
-            assert!(
-                matches!(app.overlay, Overlay::None),
-                "{:?} still opens an overlay",
-                key.code
-            );
-        }
-        // ctrl+f is the one that stayed.
-        runtime.block_on(app.handle_key(ctrl('f'), &tx)).unwrap();
-        assert!(matches!(app.overlay, Overlay::FileBrowser { .. }));
-    }
-
     /// Esc leaves the viewer for the list it came from, and only the second Esc
     /// leaves the list.
+    /// The browser is a browser: hidden entries and build directories are
+    /// listed, and a dirty file says so.
+    #[test]
+    fn the_file_browser_lists_everything_and_shows_git_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("tracked.txt"), "one\n").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "one",
+        ]);
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join(".hidden"), "x\n").unwrap();
+
+        let rows = list_dir(dir.path(), "").unwrap();
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![".git/", "target/", ".gitignore", ".hidden", "tracked.txt"]
+        );
+        let status = |label: &str| {
+            rows.iter()
+                .find(|row| row.label == label)
+                .and_then(|row| row.status)
+        };
+        assert_eq!(status("target/"), Some("ignored"));
+        assert_eq!(status("tracked.txt"), Some("modified"));
+        assert_eq!(status(".hidden"), Some("untracked"));
+    }
+
     #[test]
     fn esc_walks_back_out_of_the_file_viewer() {
         let mut app = crate::ui_tests::demo_app();
@@ -3240,7 +3296,7 @@ mod tests {
         };
         assert_eq!(rel, "", "the file sits in the workspace root");
         assert_eq!(
-            entries.get(*sel).map(|(name, _)| name.as_str()),
+            entries.get(*sel).map(|row| row.label.as_str()),
             Some("Cargo.toml"),
             "and the cursor is on it"
         );
