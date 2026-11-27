@@ -1086,9 +1086,12 @@ mod tests {
             .collect();
         // `target/` is a legitimate workspace even though the file tree hides it.
         assert_eq!(names, vec!["src", "target"]);
+        // `dir_listing` canonicalises, so the expectation must too: macOS
+        // resolves /var to /private/var and Windows may shorten a user name.
+        let canonical = dunce::canonicalize(dir.path()).unwrap();
         assert_eq!(
             listing["parent"],
-            dir.path().parent().unwrap().to_string_lossy().as_ref()
+            canonical.parent().unwrap().to_string_lossy().as_ref()
         );
         // A file is not a directory and must be refused, not listed.
         assert!(dir_listing(&dir.path().join("a.txt")).is_err());
