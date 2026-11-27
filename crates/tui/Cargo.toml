@@ -11,6 +11,7 @@ tempfile.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dunce.workspace = true
 arboard.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true

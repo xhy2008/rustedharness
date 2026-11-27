@@ -2802,6 +2802,7 @@ fn list_dir(root: &std::path::Path, rel: &str) -> std::io::Result<Vec<FileRow>> 
     } else {
         root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
     };
+    let dir = dunce::canonicalize(&dir).unwrap_or(dir);
     let mut entries: Vec<FileRow> = Vec::new();
     if !rel.is_empty() {
         entries.push(FileRow {
@@ -3278,6 +3279,23 @@ mod tests {
         assert_eq!(status("target/"), Some("ignored"));
         assert_eq!(status("tracked.txt"), Some("modified"));
         assert_eq!(status(".hidden"), Some("untracked"));
+
+        // Listing through a symlink is the macOS `/var` -> `/private/var` case:
+        // the statuses must survive a root that is spelled differently from the
+        // one git prints.
+        #[cfg(unix)]
+        {
+            let link = tempfile::tempdir().unwrap();
+            let path = link.path().join("repo");
+            std::os::unix::fs::symlink(dir.path(), &path).unwrap();
+            let rows = list_dir(&path, "").unwrap();
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.label == "tracked.txt")
+                    .and_then(|row| row.status),
+                Some("modified")
+            );
+        }
     }
 
     #[test]

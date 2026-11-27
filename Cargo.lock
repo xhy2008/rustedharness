@@ -4690,6 +4690,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "crossterm",
+ "dunce",
  "ratatui",
  "rustedharness-core",
  "serde",

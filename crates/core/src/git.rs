@@ -139,7 +139,13 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     }
     let text = String::from_utf8(output.stdout).ok()?;
     let root = PathBuf::from(text.trim());
-    root.is_dir().then_some(root)
+    if !root.is_dir() {
+        return None;
+    }
+    // Canonical, so it can be compared against paths built from a canonical
+    // listing: git reports `/private/var/...` on macOS and `C:/...` on Windows
+    // while a directory handle may say `/var/...` or use backslashes.
+    Some(dunce::canonicalize(&root).unwrap_or(root))
 }
 
 /// The entry's own status, or the strongest status of anything below it.
