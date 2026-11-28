@@ -82,9 +82,14 @@ impl PosSpec {
             serde_json::Value::String(s) => {
                 let s = s.trim();
                 let (line, anchor) = match s.split_once('#') {
+                    // Models paste the whole `2#TK|beta line two` line they see
+                    // in `read`/`grep` output. The anchor ends at `|`, which is
+                    // never part of the alphabet, so take the prefix.
                     Some((l, a)) => (l.trim(), Some(a.trim().to_ascii_uppercase())),
                     None => (s, None),
                 };
+                let anchor =
+                    anchor.map(|a| a.split('|').next().unwrap_or_default().trim().to_string());
                 let line: usize = line
                     .parse()
                     .map_err(|_| format!("invalid line number `{line}`"))?;
@@ -121,6 +126,18 @@ mod tests {
 
     fn lines_of(text: &str) -> Vec<&str> {
         text.lines().collect()
+    }
+
+    #[test]
+    fn pos_accepts_a_pasted_read_line() {
+        // `read` prints `2#TK|beta line two`; a model pasting the whole thing
+        // into pos means the anchor, not an error.
+        let spec = PosSpec::parse(&serde_json::json!("2#TK|beta line two")).unwrap();
+        assert_eq!(spec.line, 2);
+        assert_eq!(spec.anchor.as_deref(), Some("TK"));
+        assert_eq!(spec.display(), "2#TK");
+        // Junk is still junk.
+        assert!(PosSpec::parse(&serde_json::json!("x#TK")).is_err());
     }
 
     #[test]

@@ -1074,7 +1074,49 @@ impl Provider {
     }
 
     fn provider_error(&self, err: impl std::fmt::Display) -> HarnessError {
-        HarnessError::Provider(format!("{}: {err}", self.name))
+        HarnessError::Provider(format!(
+            "{}: {}",
+            self.name,
+            readable_error(&err.to_string())
+        ))
+    }
+}
+
+/// Turn the client library's error into the server's own message.
+///
+/// `async-openai` parses an error body as `{"error":{"message":String,
+/// "code":Option<String>}}`. A server that sends `"code": 400` as a number -
+/// llama.cpp does - misses that shape, so the user gets
+/// `failed to deserialize api response: error:invalid type: integer 400 …`
+/// instead of "the prompt is longer than the context". The body is already in
+/// the message; dig the message out of it.
+pub fn readable_error(raw: &str) -> String {
+    let Some((_, body)) = raw.split_once(" content:") else {
+        return raw.to_string();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return raw.to_string();
+    };
+    let error = value.get("error").unwrap_or(&value);
+    let message = match error {
+        Value::String(text) => text.clone(),
+        object => ["message", "detail", "error", "title"]
+            .iter()
+            .filter_map(|key| object.get(*key))
+            .find_map(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if message.is_empty() {
+        return raw.to_string();
+    }
+    let status = ["code", "status", "status_code"]
+        .iter()
+        .filter_map(|key| error.get(*key).and_then(Value::as_u64))
+        .next();
+    match status {
+        Some(code) => format!("HTTP {code}: {message}"),
+        None => message,
     }
 }
 
@@ -1117,6 +1159,34 @@ pub fn is_quota_exhausted(message: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig};
+
+    #[test]
+    fn server_error_body_is_readable() {
+        // The exact shape llama.cpp sends when the prompt exceeds the context.
+        let raw = r#"failed to deserialize api response: error:invalid type: integer `400`, expected a string at line 1 column 20 content:{"error":{"code":400,"message":"request (8289 tokens) exceeds the available context size (8192 tokens), try increasing it"}}"#;
+        assert_eq!(
+            readable_error(raw),
+            "HTTP 400: request (8289 tokens) exceeds the available context size (8192 tokens), try increasing it"
+        );
+        // `{"error":"..."}` and a top-level message still work.
+        assert_eq!(
+            readable_error(
+                r#"failed to deserialize api response: error:x content:{"error":"boom"}"#
+            ),
+            "boom"
+        );
+        assert_eq!(
+            readable_error(
+                r#"failed to deserialize api response: error:x content:{"message":"nope"}"#
+            ),
+            "nope"
+        );
+        // Anything that is not an error body is left alone.
+        let plain = "http error: connection reset by peer";
+        assert_eq!(readable_error(plain), plain);
+        let garbage = "failed to deserialize api response: error:x content:not json";
+        assert_eq!(readable_error(garbage), garbage);
+    }
 
     #[test]
     fn image_data_urls_round_trip() {

@@ -294,6 +294,11 @@ CASES = [
               "newText": "row"}]}]},
          ok=False, code="E_INVALID_PATCH",
          files={"notes.txt": "alpha line one\nbeta line two\ngamma line three\n"}),
+    dict(area="edit", name="replace_text 缺少 newText -> 报错且不删内容",
+         tool="edit", args={"files": [{"path": "notes.txt", "edits": [
+             {"op": "replace_text", "oldText": "beta"}]}]},
+         ok=False, code="E_INVALID_PATCH", has=["requires newText"],
+         files={"notes.txt": "alpha line one\nbeta line two\ngamma line three\n"}),
     dict(area="edit", name="replace_text 没有匹配 -> 报错",
          tool="edit", args={"files": [{"path": "notes.txt", "edits": [
              {"op": "replace_text", "pos": 1, "oldText": "不存在",
@@ -315,6 +320,10 @@ CASES = [
          tool="edit", args={"files": [{"path": "notes.txt", "edits": [
              {"op": "replace", "pos": "abc", "lines": ["x"]}]}]},
          ok=False, code="E_INVALID_PATCH"),
+    dict(area="edit", name="行编辑缺 pos -> E_INVALID_PATCH",
+         tool="edit", args={"files": [{"path": "notes.txt", "edits": [
+             {"op": "delete"}]}]},
+         ok=False, code="E_INVALID_PATCH", has=["requires pos"]),
     dict(area="edit", name="行号越界 -> E_INVALID_PATCH",
          tool="edit", args={"files": [{"path": "notes.txt", "edits": [
              {"op": "replace", "pos": 99, "lines": ["x"]}]}]},

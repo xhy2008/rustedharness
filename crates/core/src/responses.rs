@@ -177,8 +177,13 @@ impl ResponsesProvider {
         loop {
             let item = await_guarded(stream.next(), idle, &cancel).await?;
             let Some(item) = item else { break };
-            let event = item
-                .map_err(|e| HarnessError::Provider(format!("{}: stream error: {e}", self.name)))?;
+            let event = item.map_err(|e| {
+                HarnessError::Provider(format!(
+                    "{}: stream error: {}",
+                    self.name,
+                    crate::provider::readable_error(&e.to_string())
+                ))
+            })?;
             acc.apply(&event, &sink);
         }
         acc.finish(&self.name)
@@ -211,7 +216,13 @@ impl Backend for ResponsesProvider {
                 &cancel,
             )
             .await?
-            .map_err(|e| HarnessError::Provider(format!("{}: {e}", self.name)))?;
+            .map_err(|e| {
+                HarnessError::Provider(format!(
+                    "{}: {}",
+                    self.name,
+                    crate::provider::readable_error(&e.to_string())
+                ))
+            })?;
             return self.stream_response(stream, sink, cancel, idle).await;
         }
 

@@ -24,8 +24,9 @@ pub enum EditOpKind {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EditOpArgs {
     pub op: EditOpKind,
-    /// 1-based line, optionally carrying an anchor: `12` or `"12#AB"`.
-    pub pos: Value,
+    /// 1-based line, optionally carrying an anchor: `12` or `"12#AB"`. Required
+    /// for every op except replace_text, which works on text, not positions.
+    pub pos: Option<Value>,
     /// Last line for replace/delete (defaults to pos).
     pub end: Option<Value>,
     /// Replacement/inserted raw lines. Omit for delete. Never include a
@@ -34,6 +35,9 @@ pub struct EditOpArgs {
     /// Substring for op=replace_text. Must be unique unless `all` is set.
     #[serde(rename = "oldText")]
     pub old_text: Option<String>,
+    /// Required for op=replace_text: pass `""` to delete the matched text.
+    /// A missing field would otherwise mean "delete", so a model that
+    /// misspells the key would silently remove content and be told it worked.
     #[serde(rename = "newText")]
     pub new_text: Option<String>,
     /// op=replace_text only: replace every occurrence instead of requiring a
@@ -66,7 +70,7 @@ impl Tool for EditTool {
 
     fn description(&self) -> String {
         "Patch one or more files: {files: [{path, edits: [...]}], dry_run?}. Each edit \
-         is {op: replace|insert_before|insert_after|delete|replace_text, pos: line or \
+         is {op: replace|insert_before|insert_after|delete|replace_text, pos?: line or \
          \"line#anchor\", end?, lines?, oldText?, newText?, all?}. Line numbers choose \
          the position and refer to the file as it is on disk now - the same snapshot \
          for every edit in the batch - and an anchor verifies that line's current \
@@ -75,7 +79,8 @@ impl Tool for EditTool {
          whole call with E_STALE_ANCHOR and the current anchor table; every file in the \
          call is validated before any is written, so a multi-file call is all or \
          nothing. replace_text uses oldText/newText, needs a unique oldText unless \
-         all=true, and must be the only edit for that file. `lines[]` is the new \
+         all=true, must be the only edit for that file, and requires newText - pass \
+         \"\" to delete the matched text. `lines[]` is the new \
          content only: never paste the `line#anchor|` prefix from `read`/`grep`, or \
          unified-diff `+/-` markers, into it. Anchors belong only in `pos`/`end` as \
          `\"12#AB\"`. Returns a unified diff per file, fresh anchors, and LSP \
@@ -361,7 +366,12 @@ pub fn apply_edits(
         }
         let op = &edits[0];
         let old = op.old_text.as_deref().unwrap_or("");
-        let new = op.new_text.as_deref().unwrap_or("");
+        let Some(new) = op.new_text.as_deref() else {
+            return Err(HarnessError::tool(
+                "E_INVALID_PATCH",
+                "replace_text requires newText; pass \"\" to delete the matched text",
+            ));
+        };
         if old.is_empty() {
             return Err(HarnessError::tool(
                 "E_INVALID_PATCH",
@@ -410,7 +420,10 @@ pub fn apply_edits(
     let mut min_touched = usize::MAX;
     let mut max_touched = 0usize;
     for edit in edits {
-        let pos = PosSpec::parse(&edit.pos)
+        let raw_pos = edit.pos.as_ref().ok_or_else(|| {
+            HarnessError::tool("E_INVALID_PATCH", format!("op={:?} requires pos", edit.op))
+        })?;
+        let pos = PosSpec::parse(raw_pos)
             .map_err(|e| HarnessError::tool("E_INVALID_PATCH", format!("invalid pos: {e}")))?;
         let end_pos =
             match &edit.end {
@@ -694,7 +707,7 @@ mod tests {
     fn op(op: EditOpKind, pos: u64, end: Option<u64>, lines: &[&str]) -> EditOpArgs {
         EditOpArgs {
             op,
-            pos: json!(pos),
+            pos: Some(json!(pos)),
             end: end.map(|e| json!(e)),
             lines: Some(lines.iter().map(|s| s.to_string()).collect()),
             old_text: None,
@@ -762,7 +775,10 @@ mod tests {
         let anchor = hashline::anchors(&SRC.lines().collect::<Vec<_>>(), 2)[1].clone();
         let bad = EditOpArgs {
             op: EditOpKind::Replace,
-            pos: json!(format!("2#{}", if anchor == "ZZ" { "YY" } else { "ZZ" })),
+            pos: Some(json!(format!(
+                "2#{}",
+                if anchor == "ZZ" { "YY" } else { "ZZ" }
+            ))),
             end: None,
             lines: Some(vec!["x".into()]),
             old_text: None,
@@ -778,7 +794,7 @@ mod tests {
         let anchors = hashline::anchors(&SRC.lines().collect::<Vec<_>>(), 2);
         let edit = EditOpArgs {
             op: EditOpKind::Replace,
-            pos: json!(format!("2#{}", anchors[1])),
+            pos: Some(json!(format!("2#{}", anchors[1]))),
             end: None,
             lines: Some(vec!["TWO".into()]),
             old_text: None,
@@ -809,13 +825,31 @@ mod tests {
     fn text_op(old: &str, new: &str, all: Option<bool>) -> EditOpArgs {
         EditOpArgs {
             op: EditOpKind::ReplaceText,
-            pos: json!(1),
+            pos: None,
             end: None,
             lines: None,
             old_text: Some(old.into()),
             new_text: Some(new.into()),
             all,
         }
+    }
+
+    #[test]
+    fn replace_text_requires_new_text() {
+        // Before this was enforced, `{"op":"replace_text","oldText":"two"}` with
+        // no newText replaced it with the empty string and reported success: a
+        // misspelled key deleted content and was told it worked.
+        let mut op = text_op("two", "", None);
+        op.new_text = None;
+        let err = apply_edits(SRC, &[op], 2, true).unwrap_err();
+        assert!(err.to_string().contains("requires newText"), "{err}");
+        // An explicit empty string still means "delete the matched text".
+        assert_eq!(
+            apply_edits(SRC, &[text_op("two", "", None)], 2, true)
+                .unwrap()
+                .new_lines,
+            ["one", "", "three", "four", "five"]
+        );
     }
 
     #[test]

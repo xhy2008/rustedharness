@@ -1,5 +1,30 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：接 llama.cpp（MiniCPM5-2B）跑真模型的工具调用（2026-11-28）
+
+`/home/user/llama-bin-cuda/llama-server -m /home/user/MiniCPM5-2B-Q8_0.gguf -c 8192
+-ngl 99 --jinja --port 8080`，`--jinja` 必需：工具调用走聊天模板。
+
+`script/live-tool-test.py`（12 条自然语言任务，约 100 秒，模型 MiniCPM5-2B 实测 11/12）：
+脚本自己写 `models.json`/`config.json`，每例重建工作区，`agent.maxTurns=8` 防止小模型
+在不懂的工具上反复重试把上下文撑爆。判定只看"本用例关心的工具被调用且成功"，模型的
+额外读取和其它工具的失败只记录不判负；`edit` 标为 soft（warn 不算失败）。
+
+真模型暴露的四个问题（都已修）：
+
+1. `edit` 的 `replace_text` 缺 `newText` 时静默把匹配内容替换成空串并报成功 → 现在报
+   `E_INVALID_PATCH`，提示"要删除传空串"。
+2. `pos` 对所有 op 都是必填，而 `replace_text` 不需要行号 → `pos` 改为可选，行编辑缺
+   它时报 `requires pos`。
+3. 模型把 `read` 输出的整行 `2#TK|beta line two` 粘进 `pos` → `PosSpec::parse` 在 `|`
+   处截断。
+4. llama.cpp 的 400 错误体 `{"error":{"code":400,...}}`（code 是数字）让 async-openai
+   解析失败，用户看到 serde 报错 → `provider::readable_error` 取出 `message`，显示
+   `HTTP 400: request (… tokens) exceeds the available context size …`。
+
+确认不是 bug：`cache_hit_pct` 99% 是真的，llama.cpp 跨请求复用前缀缓存；每次请求约
+4k token（系统提示 + 工具 schema），8192 上下文对 2B 模型偏紧。
+
 ## 已完成：每个工具的全量用例（2026-11-27）
 
 `script/tool-test.py`：102 条用例，约 130 秒，走 `rustedharness run --json`，不需要模型、

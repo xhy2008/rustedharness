@@ -5,7 +5,8 @@
 脚本是唯一的事实来源，本文件解释矩阵为什么长这样、每条用例怎样才算"好"：
 
 ```
-script/tool-test.py       # 102 条用例，约 130 秒，失败退出码 1
+script/tool-test.py       # 104 条用例，约 130 秒，失败退出码 1
+script/live-tool-test.py  # 12 条用例，真模型（见第 11 节）
 script/fake-openai.py     # 既能当模型，也能当 SearXNG（--searxng-port）
 ```
 
@@ -15,7 +16,7 @@ script/fake-openai.py     # 既能当模型，也能当 SearXNG（--searxng-port
 cargo build -p rustedharness-cli && python3 script/tool-test.py
 ```
 
-`102/102 通过` 即全绿。常用：
+`104/104 通过` 即全绿。常用：
 
 ```bash
 python3 script/tool-test.py --list            # 列出全部用例
@@ -137,7 +138,7 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 | `path` 是目录 | 目录 | `E_IS_DIR` | 在目录里建文件失败得含糊 |
 | `denyTools` | 被拒绝 | `E_TOOL_DENIED`，磁盘无文件 | 仍然写盘 |
 
-### 5.3 `edit`（20）
+### 5.3 `edit`（22）
 
 | 用法 | 用例 | 好 | 坏 |
 | --- | --- | --- | --- |
@@ -151,11 +152,14 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 | 零匹配 | 报错 | `E_INVALID_PATCH` | 静默成功 |
 | replace_text + 其它编辑 | 同批 | `E_INVALID_PATCH` | 部分生效 |
 | 锚点 `"12#AB"` | 读到的锚点可直接编辑 | 断言通过、文件变 | 锚点被当成行号 |
+| `pos: "2#TK\|beta line two"` | （真模型会这样粘贴） | 截断到 `2#TK` 后成功 | 报"invalid anchor"（曾经） |
 | 过期锚点 | `E_STALE_ANCHOR` | 整批拒绝，文件不变 | 按行号硬改 |
 | `pos` 非法 | `pos: "abc"` | `E_INVALID_PATCH` | panic / 改到第 1 行 |
 | 行号越界 | `E_INVALID_PATCH` | 拒绝 | 越界写 |
 | 同位置两次插入 | `E_OVERLAP` | 拒绝并说明拆开 | 顺序随机 |
 | `files: []` | 空批 | `E_INVALID_PATCH` | 报成功 |
+| `replace_text` 缺 `newText` | — | `E_INVALID_PATCH`，文件不变 | 静默删掉匹配内容并报成功（曾经的 bug） |
+| 行编辑缺 `pos` | — | `E_INVALID_PATCH` "requires pos" | panic 或默认第 1 行 |
 | `dry_run=true` | 干跑 | `dry_run`、文件不变、`changed` 元数据 | 仍然写盘 |
 | 多文件 | 一次调用 | 两个 diff，两个文件都变 | 只改第一个 |
 | 多文件有失败 | 全或无 | 整批拒绝，**第一个文件也没变** | 半改（最危险） |
@@ -313,7 +317,59 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 | chase 注入（回合结束仍有待办） | 需要多回合 | 手动：`todo` 留 pending，看下一回合前的 chase 提示 |
 | 压缩（达到阈值后摘要） | 需要真实长上下文 | 手动，或专门的 `compaction` 测试 |
 
-## 9. 怎么确认"能测出好坏"
+## 9. 用真模型跑一遍（llama.cpp）
+
+上面的用例把"调用什么工具"交给桩，证明工具本身对。另一半是"模型会不会正确调用"，
+这只能在真模型上测：
+
+```bash
+# 1. 起一个 OpenAI 兼容服务（这里是 llama.cpp + MiniCPM5-2B Q8_0）
+cd /home/user/llama-bin-cuda
+./llama-server -m /home/user/MiniCPM5-2B-Q8_0.gguf -c 8192 -ngl 99 \
+    --host 127.0.0.1 --port 8080 --jinja --alias minicpm5-2b
+
+# 2. 让它读工具、调工具
+python3 script/live-tool-test.py --base-url http://127.0.0.1:8080/v1 --model minicpm5-2b
+```
+
+`--jinja` 是必须的：工具调用走聊天模板，没有它 llama-server 不会返回 `tool_calls`。
+脚本自己写 `models.json` / `config.json`（`contextWindow` 默认 8192，可用
+`RH_LIVE_CTX` 改），每个用例前重建工作区，并设 `agent.maxTurns=8`——小模型会在一个
+它不理解的工具上反复重试，不设上限就会把上下文撑爆、一次跑好几分钟。
+
+判定标准：
+
+- **必须**：用例关心的那个工具被调用了，且它的调用成功；
+- **允许**：模型额外读一次文件确认自己的修改（`write` 后 `read` 是正常行为）；
+- **只看自己的工具**：模型跑偏后去 `bash` 里乱试而失败，不算这个工具的错；
+- `soft=True` 的用例失败只打 `warn`，不影响退出码——`edit` 就是这种：让 2B 模型自己
+  从文件里抄 `oldText` 并造 `newText`，它做不到，但工具本身由 `tool-test.py` 覆盖。
+
+MiniCPM5-2B（Q8_0，P104）实测：**11/12 通过，约 100 秒**，`glob` / `read` / `grep` /
+`write` / `bash` / `todo` / `lsp` 全部一次成功，`edit` 是 `warn`。每次请求约 4k token
+（系统提示 + 工具 schema），llama.cpp 的前缀缓存让后续请求命中 98–99%。
+
+这套测试抓到的问题（都已修）：
+
+1. **`edit` 缺少 `newText` 会静默删除内容**。模型只写了 `{"op":"replace_text",
+   "oldText":"beta line two"}`（键名写错或干脆没写），`new_text` 是 `Option`，`unwrap_or("")`
+   把匹配到的文本换成了空串，还返回 `ok: true`。现在缺 `newText` 报 `E_INVALID_PATCH`，
+   并明确提示"要删除就传空串"。
+2. **`pos` 对所有 op 都是必填**。`replace_text` 是文本替换，根本不需要行号，但 schema
+   把它标成 required，模型只能瞎填一个数字。现在 `pos` 可选，行编辑缺它时报
+   `op=… requires pos`。
+3. **`pos` 里粘贴整行 `read` 输出**。`read` 打印 `2#TK|beta line two`，模型把整段塞进
+   `pos`，锚点解析直接报错。现在 `PosSpec::parse` 在 `\|` 处截断，只取锚点前缀。
+4. **上下文超限的报错不可读**。llama.cpp 返回 `{"error":{"code":400,"message":…}}`，
+   `code` 是数字，而 `async-openai` 只接受字符串，于是用户看到的是
+   `failed to deserialize api response: error:invalid type: integer 400 …`。
+   现在从错误体里取出 `message`，显示成 `HTTP 400: request (8289 tokens) exceeds the
+   available context size (8192 tokens), try increasing it`（`provider::readable_error`）。
+
+顺带确认不是 bug 的：`cache_hit_pct` 显示 99% 是真的，llama.cpp 会跨请求复用前缀缓存
+（同一个系统提示 + 工具 schema 约 4k token）。
+
+## 10. 怎么确认"能测出好坏"
 
 改坏一处，跑对应区域，应该变红：
 
@@ -330,7 +386,7 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 
 新增用例时照这个思路写：**先说清楚哪个真实缺陷会让它红**。
 
-## 10. 加用例的坑
+## 11. 加用例的坑
 
 - **一个回合一次调用**：桩按 `tool_call_id` 推进；写多个调用时顺序就是你写的顺序。
 - **`await` 的 pid 只能同回合**：跨回合后台进程已经随进程退出被清理。
