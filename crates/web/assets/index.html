@@ -1388,7 +1388,7 @@ try {
     feed: {
       items: [], el: new Map(), seq: 0, batch: false, chars: {},
       offsets: new Float64Array(0), offsetsLen: 0, height: 0, applied: 0,
-      dirty: true, pinned: []
+      dirty: true, pinned: [], follow: true
     },
     scrollRaf: 0,
     assistantRaf: 0,
@@ -1736,7 +1736,9 @@ try {
     $('modelTitle').textContent = state.models.target === 'compact' ? '选择压缩模型' : '选择 Agent 模型';
     $('modelLead').textContent = state.models.target === 'compact'
       ? 'None 让摘要请求复用主模型的完整前缀，从而命中 prompt 缓存。'
-      : '每个模型写入 config.json 的 model 字段；下一次请求生效。';
+      // The agent model belongs to the session, as in the TUI: config.json keeps
+      // the default for new sessions, this choice carries the current one.
+      : '本次会话使用的模型；下一次请求生效，新会话仍用 config.json 里的默认值。';
     $('modelList').replaceChildren(el('div', 'pick-empty', '正在读取模型清单…'));
     openModal('modelModal');
     sendCommand({ type: 'describe_models' });
@@ -2346,6 +2348,7 @@ try {
   }
 
   function feedToBottom() {
+    state.feed.follow = true;
     // Items mount and measure as the viewport lands on them, which moves the
     // bottom, so settle over a couple of passes instead of once.
     for (let pass = 0; pass < 4; pass++) {
@@ -2366,11 +2369,18 @@ try {
     feedEl.style.scrollBehavior = previous;
   }
 
-  function maybeScroll(stick) {
+  /// `force` means the user asked for the bottom (they just sent something), so
+  /// following resumes. Otherwise a stream only follows while the viewport is
+  /// still at the bottom: the flag is owned by the scroll handler, and re-read
+  /// inside the frame, because a stream that keeps yanking the page down makes
+  /// reading history impossible.
+  function maybeScroll(force) {
     if (state.batchRender || state.feed.batch) return;
-    if (!stick || state.scrollRaf) return;
+    if (force) state.feed.follow = true;
+    if (!state.feed.follow || state.scrollRaf) return;
     state.scrollRaf = requestAnimationFrame(() => {
       state.scrollRaf = 0;
+      if (!state.feed.follow) return;
       scrollBottom();
     });
   }
@@ -2434,6 +2444,7 @@ try {
     state.feed.applied = 0;
     state.feed.dirty = true;
     state.feed.pinned = [];
+    state.feed.follow = true;
     const inner = feedInnerEl();
     if (inner) {
       inner.replaceChildren();
@@ -3121,7 +3132,9 @@ try {
         else renderMarkdownInto(body, active.data.text);
         feedInvalidate(active);
         feedSync();
-        if (stick) scrollBottom();
+        // The flag, not the snapshot taken when the delta arrived: a delta that
+        // was already queued must not undo a scroll the user made meanwhile.
+        if (stick && state.feed.follow) scrollBottom();
       });
     }
   }
@@ -3700,8 +3713,11 @@ try {
         row.tabIndex = 0;
         row.setAttribute('role', 'button');
         row.append(el('span', 'tspacer'), icon('file', 'filico'),
-          el('span', 'tname' + (entry.git ? ' git-' + entry.git : ''), entry.name),
-          el('span', 'tsize', entry.size ? fmtBytes(entry.size) : ''));
+          el('span', 'tname' + (entry.git ? ' git-' + entry.git : ''), entry.name));
+        // The colour alone cannot be read by everyone, and the TUI shows the
+        // same letter, so a file says what changed as well as colouring it.
+        if (entry.git) row.append(el('span', 'git-mark', gitMark(entry.git)));
+        row.append(el('span', 'tsize', entry.size ? fmtBytes(entry.size) : ''));
         row.addEventListener('click', () => openFile(entry.path));
         row.addEventListener('keydown', (event) => {
           if (event.key === 'Enter' || event.key === ' ') {
@@ -4614,7 +4630,14 @@ try {
         break;
       case 'lsp_status': {
         const previous = state.lsp.get(event.language) || {};
-        state.lsp.set(event.language, Object.assign({}, previous, { state: event.state, detail: event.detail }));
+        // The language travels with every status: a `lsp_status` can arrive
+        // before any `lsp_servers` described that language, and the panel sorts
+        // by it.
+        state.lsp.set(event.language, Object.assign({}, previous, {
+          language: event.language,
+          state: event.state,
+          detail: event.detail
+        }));
         if ((!previous || previous.state !== event.state) &&
           (event.state === 'degraded' || event.state === 'absent')) {
           addNote('LSP ' + event.language + '：' + event.state +
@@ -4998,6 +5021,9 @@ try {
     }
     feedEl.addEventListener('scroll', () => {
       hideContextMenu();
+      // Scrolling is the only thing that decides whether the transcript follows
+      // new output. Our own scrolls land at the bottom, so they keep it on.
+      state.feed.follow = isAtBottom();
       feedSync();
     }, { passive: true });
     if (window.ResizeObserver) {
@@ -5076,7 +5102,11 @@ try {
   if (new URLSearchParams(location.search).has('debug')) {
     window.__rh = {
       state, feedSync, showEmptyState, clearFeed, applySnapshot, renderSnapshotMessage,
-      feedPush, pinFeedItem, feedInvalidate
+      feedPush, pinFeedItem, feedInvalidate,
+      // The same function the socket calls, so a test can feed one server event
+      // (consent, LSP status, usage) that the harness cannot be made to emit
+      // on demand.
+      handleEvent
     };
   }
 })();

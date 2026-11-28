@@ -1,5 +1,35 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：Web UI 的整套浏览器测试（2026-11-27）
+
+之前只有零散的一次性脚本（`/tmp/ui-test.py` 之类），既不能复现也不能判断"坏"。现在仓库里有两个
+文件：`script/fake-openai.py`（本地假 provider）和 `script/web-ui-test.py`（113 项检查，约 80 秒），
+说明写在 `docs/web-ui-testing.md`。
+
+要点：
+
+1. **自己起三个进程**：假 provider（7497）、无令牌服务（7499）、带令牌服务（7498），工作区与
+   配置在 `/tmp/rh-ui-test/` 里每次重建，不碰用户目录、不需要 API key。
+2. **假 provider 用首词选场景**：`hello` / `reason` / `tool` / `todo` / `slow` / `long` / `usage`
+   / `rate`（429）/ `boom` / `silent`，并把每个请求体写进 `stub.log`，所以"切换模型后下一次
+   请求真的换了 id"是可断言的，而不是只看 chip 上的字。
+3. **断言服务端收到了什么**：设置项读 `config.json`，模型读 `stub.log`，会话读 `/api/sessions`。
+   界面文字只用来验证渲染。
+4. **`?debug=1` 增加 `__rh.handleEvent`**：就是 socket 回调本身，用来灌服务端难以按需制造的事件
+   （下载同意、LSP 降级、usage、chase、压缩卡片）。文档里明确写了它测不到服务端行为。
+5. 每项检查都按"改坏哪里会红"设计，文档第 9 节给了 8 个反向验证的改法；其中 `number_value`
+   一条当场验证过（改坏后 E3/E5 变红）。
+
+第一次跑就抓到 4 个真 bug，都已修：
+
+1. 流式输出把用户从历史里拽回底部（`stick` 是事件到达时的快照，且被拽回后下一帧继续认为
+   在底部）。改成 `state.feed.follow` 只由滚动决定，并在 rAF 里重新读。
+2. `lsp_status` 先于 `lsp_servers` 到达时没把 `language` 写进 map，LSP 对话框排序抛
+   `TypeError`，永远停在"正在读取语言服务器…"。
+3. 文件树的 git 状态只有颜色没有字母（目录有字母、文件没有），色盲不可读，也与 TUI 不一致。
+4. 模型选择器写着"写入 config.json 的 model 字段"，但 `set_agent_model` 只改会话（TUI 同样），
+   改为如实描述，并让测试断言下一个请求的 model。
+
 ## 已完成：虚拟列表的滚动开销（2026-11-27）
 
 上一节复查里留了个"1600 条无感"的判断，实测之后发现不对：`feedSync()` 每次滚动都

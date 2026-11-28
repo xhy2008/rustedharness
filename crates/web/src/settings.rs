@@ -208,7 +208,7 @@ pub fn describe(config: &Config, live: &Live) -> Vec<Item> {
             "session",
             "Agent 模型",
             model_display(&live.agent_model),
-            "当前回合使用的模型；切换后下一次请求生效。",
+            "本次会话使用的模型；切换后下一次请求生效，新会话仍用默认模型。",
             "models_agent",
         ),
         Item::action(

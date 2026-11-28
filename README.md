@@ -704,6 +704,12 @@ cargo build --workspace
 `cargo bench` runs the resume, syntax-highlighting and live-LSP probes. The LSP
 probe requires `rust-analyzer` on PATH and skips cleanly when it is absent.
 
+The web front end has a browser test of its own: `python3 script/web-ui-test.py`
+starts a stub provider and two servers, drives Chromium through every control
+(113 checks, ~80 s) and asserts what the server actually received. It needs no
+API key; `docs/web-ui-testing.md` explains what each check means, what a failure
+looks like, and what the suite cannot cover.
+
 CI runs formatting, clippy with warnings denied, tests, and builds on Linux,
 macOS, and Windows. The GUI is built in its default configuration, which does
 not require webview libraries; building `--features desktop` additionally needs
