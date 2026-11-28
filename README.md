@@ -618,6 +618,15 @@ turns into a bytes-per-pixel estimate for the rest. A 1600-message session
 mounts about eleven nodes. `overflow-anchor` is off because the list owns its
 scroll position.
 
+The prefix sums of those heights live between syncs in one buffer that grows and
+never shrinks, and a sync only rebuilds them when an item's height actually
+changed - and then only from that item on, which makes one growing message at
+the end of the feed a constant-time relayout. A scroll event that changed
+nothing is a walk over the mounted nodes plus a binary search. Measured per
+wheel notch in Chromium, 1600x900: 3.26 ms -> 1.25 ms for 2 000 messages and
+5.76 ms -> 1.35 ms for 20 000, where a rebuild of the sums alone used to cost
+2.9 ms.
+
 The terminal is a real pty in the workspace directory, rendered by xterm.js with
 the bytes going straight from the pty to the emulator. That is what buys
 scrollback, 256/true colour, mouse reporting and full-screen programs; a

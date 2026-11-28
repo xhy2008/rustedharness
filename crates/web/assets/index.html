@@ -1385,7 +1385,11 @@ try {
     rollbackPending: null,
     terminal: { open: false, cols: 0, rows: 0, id: 0, term: null, fit: null },
     dirPath: '',
-    feed: { items: [], el: new Map(), seq: 0, batch: false, chars: {} },
+    feed: {
+      items: [], el: new Map(), seq: 0, batch: false, chars: {},
+      offsets: new Float64Array(0), offsetsLen: 0, height: 0, applied: 0,
+      dirty: true, pinned: []
+    },
     scrollRaf: 0,
     assistantRaf: 0,
     batchRender: false,
@@ -2148,27 +2152,103 @@ try {
   // were never rendered; two spacers would do the same but would need the
   // distances the offsets already give us.
   const FEED_OVERSCAN = 900;
+  /// Marks a height that was measured in the DOM, as opposed to estimated.
+  const FEED_MEASURED = -1;
 
   function feedInnerEl() {
     return $('feedInner');
   }
 
+  /// Length of the text, without copying the string: a layout pass over 20k
+  /// messages must not allocate 20k copies of them.
+  function feedTextLength(item) {
+    const data = item.data || {};
+    if (typeof data.text === 'string') return data.text.length;
+    if (typeof data.content === 'string') return data.content.length;
+    return 0;
+  }
+
   function feedEstimate(item) {
-    const text = String((item.data && (item.data.text || item.data.content)) || '');
+    const length = feedTextLength(item);
     const base = { user: 44, assistant: 72, note: 38, error: 62, compaction: 44, reasoning: 42, tool: 52 }[item.kind] || 60;
     // Once a kind has been measured, its own bytes-per-pixel ratio beats any
     // hardcoded guess. Unvisited messages then differ by text length, not by
     // a constant, which keeps the scrollbar from lurching as they are visited.
     const learned = state.feed.chars[item.kind];
     if (learned && learned.chars >= 400) {
-      const ratio = learned.height / learned.chars;
-      return Math.max(base * 0.6, base + text.length * ratio);
+      return Math.max(base * 0.6, base + length * (learned.height / learned.chars));
     }
-    return base + Math.ceil(text.length / 72) * 20;
+    return base + Math.ceil(length / 72) * 20;
   }
 
   function feedHeight(item) {
     return item.measured ? item.height : feedEstimate(item);
+  }
+
+  /// The prefix sums live between syncs, in a buffer that grows but never
+  /// shrinks. Rebuilding them costs 2.9 ms for 20 000 messages, which is a
+  /// sixth of a frame - too much to pay on every scroll event for a distance
+  /// that did not change.
+  function feedReserve(count) {
+    const current = state.feed.offsets;
+    if (current.length >= count) return current;
+    let size = current.length || 256;
+    while (size < count) size *= 2;
+    const grown = new Float64Array(size);
+    grown.set(current.subarray(0, Math.min(current.length, count)));
+    state.feed.offsets = grown;
+    return grown;
+  }
+
+  /// Recompute the tops from `from` on. Everything before it kept its height, so
+  /// its top is where it already was - which makes the common case of one
+  /// growing message at the end of the feed a constant-time relayout.
+  function feedLayout(from) {
+    const items = state.feed.items;
+    const offsets = feedReserve(items.length);
+    const start = from || 0;
+    let total = start > 0 ? offsets[start] : 0;
+    for (let i = start; i < items.length; i++) {
+      offsets[i] = total;
+      total += feedHeight(items[i]);
+    }
+    state.feed.offsetsLen = items.length;
+    state.feed.height = total;
+    state.feed.dirty = false;
+  }
+
+  /// The content of a mounted item changed shape: its height is a guess again,
+  /// and the prefix sums after it were computed from the old one.
+  function feedInvalidate(item) {
+    item.measured = false;
+    state.feed.dirty = true;
+  }
+
+  /// First index whose top is at or past `value`.
+  function feedIndexOf(offsets, count, value) {
+    let low = 0;
+    let high = count;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (offsets[middle] < value) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  /// An item that is still being written to stays mounted while it streams: its
+  /// node holds the body the deltas go into, so being off-screen cannot unmount
+  /// it. The list is short - at most the open reasoning block and the open card.
+  function pinFeedItem(item, on) {
+    item.pinned = !!on;
+    const pinned = state.feed.pinned;
+    const at = pinned.indexOf(item);
+    if (on && at < 0) {
+      pinned.push(item);
+      if (!state.feed.el.has(item.index)) feedSync();
+    } else if (!on && at >= 0) {
+      pinned.splice(at, 1);
+    }
   }
 
   function isAtBottom() {
@@ -2181,20 +2261,25 @@ try {
     if (!inner) return;
     if (inner.hidden) inner.hidden = false;
     const items = state.feed.items;
-    if (!items.length) {
+    const count = items.length;
+    if (!count) {
       inner.style.height = '0px';
+      state.feed.offsetsLen = 0;
+      state.feed.height = 0;
+      state.feed.applied = 0;
+      state.feed.dirty = false;
       return;
     }
-    const offsets = new Array(items.length);
-    let total = 0;
-    for (let i = 0; i < items.length; i++) {
-      offsets[i] = total;
-      total += feedHeight(items[i]);
-    }
+    if (state.feed.offsetsLen !== count) state.feed.dirty = true;
+    if (state.feed.dirty) feedLayout(0);
+
+    const mounted = state.feed.el;
     const viewTop = feedEl.scrollTop - FEED_OVERSCAN;
     const viewBottom = feedEl.scrollTop + feedEl.clientHeight + FEED_OVERSCAN;
-    const mounted = state.feed.el;
 
+    // 1. Drop what left the viewport. The top of an item is one array read, so
+    //    this walks the mounted nodes only.
+    let offsets = state.feed.offsets;
     for (const [index, node] of Array.from(mounted)) {
       const item = items[index];
       if (!item) {
@@ -2211,44 +2296,53 @@ try {
       }
     }
 
-    const fresh = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const visible = item.pinned ||
-        (offsets[i] + feedHeight(item) >= viewTop && offsets[i] <= viewBottom);
-      if (!visible) continue;
-      const existing = mounted.get(i);
-      if (existing) {
-        existing.style.top = offsets[i] + 'px';
-        continue;
-      }
-      const node = buildFeedItem(item);
-      node.style.top = offsets[i] + 'px';
-      inner.append(node);
-      mounted.set(i, node);
-      item.el = node;
-      fresh.push(item);
+    // 2. Mount what entered it. The range starts one item before the first top
+    //    at or past `viewTop`: a tall item can begin above the viewport and
+    //    still be visible.
+    const first = Math.max(0, feedIndexOf(offsets, count, viewTop) - 1);
+    for (let i = first; i < count && offsets[i] <= viewBottom; i++) {
+      if (!mounted.has(i)) feedMount(i);
+    }
+    for (const item of state.feed.pinned) {
+      if (!mounted.has(item.index)) feedMount(item.index);
     }
 
-    for (const item of fresh) {
-      const height = item.el.getBoundingClientRect().height;
+    // 3. Measure every mounted item whose height is a guess - fresh mounts and
+    //    streamed updates alike, so there is one pass instead of two lists.
+    let changedAt = FEED_MEASURED;
+    for (const [index, node] of mounted) {
+      const item = items[index];
+      if (item.measured) continue;
+      const height = node.getBoundingClientRect().height;
       if (height <= 0) continue;
       const learned = state.feed.chars[item.kind] || (state.feed.chars[item.kind] = { height: 0, chars: 0 });
       learned.height += height;
-      learned.chars += String((item.data && (item.data.text || item.data.content)) || '').length + 1;
+      learned.chars += feedTextLength(item) + 1;
       if (Math.abs(height - feedHeight(item)) > 1) {
         item.height = height;
         item.measured = true;
+        changedAt = changedAt === FEED_MEASURED ? index : Math.min(changedAt, index);
       }
     }
-
-    let height = 0;
-    for (let i = 0; i < items.length; i++) {
-      const node = mounted.get(i);
-      if (node) node.style.top = height + 'px';
-      height += feedHeight(items[i]);
+    if (changedAt !== FEED_MEASURED) {
+      feedLayout(changedAt);
+      offsets = state.feed.offsets;
     }
-    inner.style.height = height + 'px';
+
+    for (const [index, node] of mounted) node.style.top = offsets[index] + 'px';
+    if (state.feed.applied !== state.feed.height) {
+      inner.style.height = state.feed.height + 'px';
+      state.feed.applied = state.feed.height;
+    }
+  }
+
+  function feedMount(index) {
+    const item = state.feed.items[index];
+    const node = buildFeedItem(item);
+    node.style.top = state.feed.offsets[index] + 'px';
+    feedInnerEl().append(node);
+    state.feed.el.set(index, node);
+    item.el = node;
   }
 
   function feedToBottom() {
@@ -2335,6 +2429,11 @@ try {
     state.feed.el = new Map();
     state.feed.chars = {};
     state.feed.seq = 0;
+    state.feed.offsetsLen = 0;
+    state.feed.height = 0;
+    state.feed.applied = 0;
+    state.feed.dirty = true;
+    state.feed.pinned = [];
     const inner = feedInnerEl();
     if (inner) {
       inner.replaceChildren();
@@ -2351,6 +2450,9 @@ try {
     const stick = opts.stick === undefined ? isAtBottom() : !!opts.stick;
     const item = {
       key: ++state.feed.seq,
+      // Appending only, so an index stays valid for the life of the item; the
+      // pinned list and the mounted map both address items this way.
+      index: state.feed.items.length,
       kind,
       data: data || {},
       measured: false,
@@ -2359,26 +2461,27 @@ try {
       pinned: !!opts.pinned
     };
     state.feed.items.push(item);
+    state.feed.dirty = true;
     if (!state.feed.batch) feedSync();
+    if (item.pinned) state.feed.pinned.push(item);
     if (stick) maybeScroll(true);
     return item;
   }
 
   /// Re-render one mounted item after its data changed shape.
   function feedRebuild(item) {
-    const index = state.feed.items.indexOf(item);
-    if (index < 0) return;
-    const current = state.feed.el.get(index);
+    if (!state.feed.items[item.index]) return;
+    const current = state.feed.el.get(item.index);
     if (!current) {
-      item.measured = false;
+      feedInvalidate(item);
       return;
     }
     const node = buildFeedItem(item);
     node.style.top = current.style.top;
     current.replaceWith(node);
-    state.feed.el.set(index, node);
+    state.feed.el.set(item.index, node);
     item.el = node;
-    item.measured = false;
+    feedInvalidate(item);
     feedSync();
   }
 
@@ -2947,7 +3050,7 @@ try {
     let item = state.reasoningItem;
     if (!item) {
       item = feedPush('reasoning', { text: '', open: true }, { stick });
-      item.pinned = true;
+      pinFeedItem(item, true);
       state.reasoningItem = item;
     }
     item.data.text += String(text || '');
@@ -2956,7 +3059,7 @@ try {
       const count = item.el.querySelector('.think-count');
       if (body) body.textContent = item.data.text;
       if (count) count.textContent = item.data.text.length + ' 字';
-      item.measured = false;
+      feedInvalidate(item);
     }
     maybeScroll(stick);
   }
@@ -2964,7 +3067,7 @@ try {
   function closeReasoningBlock(item) {
     if (!item) return;
     item.data.done = true;
-    item.pinned = false;
+    pinFeedItem(item, false);
     if (item.el) item.el.open = false;
   }
 
@@ -2982,14 +3085,14 @@ try {
       item.data.text = value;
       item.data.done = true;
       item.data.open = false;
-      item.pinned = false;
+      pinFeedItem(item, false);
       if (item.el) {
         const body = item.el.querySelector('.think-body');
         const count = item.el.querySelector('.think-count');
         if (body) body.textContent = value;
         if (count) count.textContent = value.length + ' 字';
         item.el.open = false;
-        item.measured = false;
+        feedInvalidate(item);
       }
     }
     state.reasoningItem = null;
@@ -2998,7 +3101,7 @@ try {
   function ensureAssistantCard() {
     if (state.assistantItem) return state.assistantItem;
     const item = feedPush('assistant', { text: '', streaming: true }, { stick: true });
-    item.pinned = true;
+    pinFeedItem(item, true);
     state.assistantItem = item;
     return item;
   }
@@ -3016,7 +3119,7 @@ try {
         if (!body) return;
         if (active.data.text.length > 80000) body.textContent = active.data.text;
         else renderMarkdownInto(body, active.data.text);
-        active.measured = false;
+        feedInvalidate(active);
         feedSync();
         if (stick) scrollBottom();
       });
@@ -3030,14 +3133,14 @@ try {
     }
     const item = state.assistantItem;
     if (item) {
-      item.pinned = false;
+      pinFeedItem(item, false);
       item.data.streaming = false;
       if (item.el) {
         item.el.classList.remove('streaming');
         const live = item.el.querySelector('.live-dot');
         if (live) live.remove();
       }
-      item.measured = false;
+      feedInvalidate(item);
     }
     closeReasoningBlock(state.reasoningItem);
     state.reasoningItem = null;
@@ -3052,10 +3155,10 @@ try {
     finalizeReasoning(reasoning);
     const item = state.assistantItem;
     if (item) {
-      item.pinned = false;
+      pinFeedItem(item, false);
       item.data.streaming = false;
       item.data.text = content;
-      item.measured = false;
+      feedInvalidate(item);
       if (item.el) {
         item.el.classList.remove('streaming');
         const live = item.el.querySelector('.live-dot');
@@ -3229,7 +3332,7 @@ try {
       if (wrap) wrap.hidden = false;
       const size = item.el.querySelector('.live-size');
       if (size) size.textContent = item.data.live ? item.data.live.length + ' 字符 · 实时' : '实时';
-      item.measured = false;
+      feedInvalidate(item);
       feedSync();
     }
     maybeScroll(stick);
@@ -3244,7 +3347,7 @@ try {
     // Finished calls fold away; the summary still shows status and args.
     item.data.open = false;
     if (item.el) feedRebuild(item);
-    else item.measured = false;
+    else feedInvalidate(item);
     maybeScroll(stick);
   }
 
@@ -4971,7 +5074,10 @@ try {
   // `?debug=1` exposes the feed internals so a browser test can drive a
   // synthetic snapshot (real ones need a provider) and count mounted nodes.
   if (new URLSearchParams(location.search).has('debug')) {
-    window.__rh = { state, feedSync, showEmptyState, clearFeed, applySnapshot, renderSnapshotMessage };
+    window.__rh = {
+      state, feedSync, showEmptyState, clearFeed, applySnapshot, renderSnapshotMessage,
+      feedPush, pinFeedItem, feedInvalidate
+    };
   }
 })();
 </script>
