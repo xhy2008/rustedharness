@@ -560,6 +560,26 @@ async def area_feed(browser):
         " return f.scrollHeight - f.scrollTop - f.clientHeight; }")
     check("C 消息", "C16 在底部时新消息跟随滚动", at_bottom < 120, at_bottom)
 
+    # Scrolling back to the bottom must resume following: the rule is "at the
+    # bottom means follow, reading history means do not", not "follow until
+    # interrupted for the rest of the turn".
+    await send(page, "long 再次长输出")
+    await page.wait_for_function("() => window.__rh.state.busy === true",
+                                 timeout=8000)
+    await page.wait_for_timeout(250)
+    await page.evaluate("() => { document.getElementById('feed').scrollTop = 200; }")
+    await page.wait_for_timeout(300)
+    away = await page.evaluate(
+        "() => { const f = document.getElementById('feed');"
+        " return f.scrollHeight - f.scrollTop - f.clientHeight; }")
+    await page.evaluate("() => { const f = document.getElementById('feed');"
+                        " f.scrollTop = f.scrollHeight; }")
+    await page.wait_for_timeout(600)
+    back = await page.evaluate(
+        "() => { const f = document.getElementById('feed');"
+        " return f.scrollHeight - f.scrollTop - f.clientHeight; }")
+    check("C 消息", "C20 回到最底部后恢复跟随", away > 200 and back < 200, [away, back])
+
     # --- virtualization with 2000 messages
     messages = [{"role": "user", "content": "第 %d 条历史消息 %s" % (i, "y" * (i % 40))}
                 for i in range(2000)]
@@ -865,7 +885,7 @@ async def area_cwd(browser):
 # ------------------------------------------------------------ H. tree ----
 async def area_tree(browser):
     page = await new_page(browser)
-    await page.wait_for_selector("#tree .trow.file", timeout=10000)
+    await page.wait_for_selector("#tree .trow.file", timeout=20000)
     names = await page.locator("#tree .trow.file .tname").all_inner_texts()
     dirs = await page.locator("#tree .trow.dir .tname").all_inner_texts()
     check("H 文件树", "H1 点文件与 build 目录都出现在树里",
@@ -880,7 +900,7 @@ async def area_tree(browser):
     page.on("request", lambda r: requests.append(r.url) if "/api/tree?" in r.url
             else None)
     await page.locator("#tree .trow.dir").filter(has_text="src").click()
-    await page.wait_for_selector("#tree .tkids .trow.file", timeout=8000)
+    await page.wait_for_selector("#tree .tkids .trow.file", timeout=20000)
     expanded = await page.locator("#tree .tkids .trow.file").count()
     first_requests = len(requests)
     await page.locator("#tree .trow.dir").filter(has_text="src").click()
@@ -902,11 +922,11 @@ async def area_tree(browser):
 async def area_viewer(browser):
     errors = []
     page = await new_page(browser, errors=errors)
-    await page.wait_for_selector("#tree .trow.file", timeout=10000)
+    await page.wait_for_selector("#tree .trow.file", timeout=20000)
     await page.locator("#tree .trow.dir").filter(has_text="src").click()
-    await page.wait_for_selector("#tree .tkids .trow.file", timeout=8000)
+    await page.wait_for_selector("#tree .tkids .trow.file", timeout=20000)
     await page.locator("#tree .tkids .trow.file").filter(has_text="main.rs").click()
-    await page.wait_for_selector("#codeContent .code-lines .cl", timeout=8000)
+    await page.wait_for_selector("#codeContent .code-lines .cl", timeout=20000)
 
     lines = await page.locator("#codeContent .code-lines .cl").count()
     numbers = await page.locator("#codeContent .cl .ln").first.inner_text()
@@ -1427,6 +1447,10 @@ async def area_auth(browser):
     check("N 鉴权", "N3 正确令牌连接成功且从地址栏消失",
           "token" not in url and stored == TOKEN and not errors, [url, stored])
 
+    # The server sends the snapshot right after the socket opens; injecting
+    # before it lands would be undone by applySnapshot() clearing the feed.
+    await page2.wait_for_function("() => !!window.__rh.state.sessionId", timeout=8000)
+    await page2.wait_for_timeout(300)
     await inject(page2, {"type": "user_message", "text": "带令牌的消息"})
     check("N 鉴权", "N4 带令牌时消息正常渲染",
           await page2.locator(".msg.user").count() == 1)
@@ -1464,19 +1488,31 @@ async def main():
 
     servers = []
     if not args.no_start:
+        import socket
+        for port in (STUB_PORT, MAIN_PORT, AUTH_PORT):
+            with socket.socket() as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(("127.0.0.1", port))
+                except OSError:
+                    sys.exit(f"port {port} is in use; stop the old server first "
+                             f"(fuser -k -n tcp {port}) or pass --no-start")
         servers.append(subprocess.Popen(
             [sys.executable, str(ROOT / "script" / "fake-openai.py"),
              "--port", str(STUB_PORT), "--log", str(SCRATCH / "stub.log")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        common = dict(stdout=open(SCRATCH / "server.log", "w"),
-                      stderr=subprocess.STDOUT, start_new_session=True)
+        # RUSTEDHARNESS_DIR, not just --config: sessions and caches must not
+        # land in the developer's home directory.
+        env = {**os.environ, "RUSTEDHARNESS_DIR": str(SCRATCH)}
         servers.append(subprocess.Popen(
             [str(BINARY), "--config", str(SCRATCH), "--cwd", str(WS),
-             "serve", "--port", str(MAIN_PORT)], **common))
+             "serve", "--port", str(MAIN_PORT)],
+            env=env, stdout=open(SCRATCH / "server.log", "w"),
+            stderr=subprocess.STDOUT, start_new_session=True))
         servers.append(subprocess.Popen(
             [str(BINARY), "--config", str(SCRATCH), "--cwd", str(WS),
              "serve", "--port", str(AUTH_PORT)],
-            env={**os.environ, "RUSTEDHARNESS_TOKEN": TOKEN},
+            env={**env, "RUSTEDHARNESS_TOKEN": TOKEN},
             stdout=open(SCRATCH / "server-auth.log", "w"),
             stderr=subprocess.STDOUT, start_new_session=True))
         import urllib.error

@@ -704,6 +704,13 @@ cargo build --workspace
 `cargo bench` runs the resume, syntax-highlighting and live-LSP probes. The LSP
 probe requires `rust-analyzer` on PATH and skips cleanly when it is absent.
 
+Every tool has its own test too: `python3 script/tool-test.py` sends one real
+`call {"name": ..., "arguments": ...}` per case through the agent (102 cases:
+arguments, error codes, side effects on disk, and what the provider actually
+received) against a stub model and a stub search backend. `docs/tool-testing.md`
+is the matrix, the error-code table and the list of what needs a real language
+server or a real key.
+
 The web front end has a browser test of its own: `python3 script/web-ui-test.py`
 starts a stub provider and two servers, drives Chromium through every control
 (113 checks, ~80 s) and asserts what the server actually received. It needs no

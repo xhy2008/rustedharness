@@ -182,6 +182,7 @@ fn read_text(ctx: &ToolContext, path: &Path, text: &str, args: &ReadArgs) -> Res
     let mut out = String::new();
     let mut used = 0usize;
     let mut shown_end = start.saturating_sub(1);
+    let mut truncated = false;
     let anchors = if raw {
         Vec::new()
     } else {
@@ -201,12 +202,32 @@ fn read_text(ctx: &ToolContext, path: &Path, text: &str, args: &ReadArgs) -> Res
         if used + cost > max_bytes && shown_end >= start {
             break;
         }
+        if used + cost > max_bytes {
+            // One line longer than the whole window (a minified bundle, a JSON
+            // dump): cutting it is the only useful answer. Returning it whole
+            // would ignore max_bytes, and returning nothing at all would claim
+            // the file is empty.
+            let room = max_bytes.saturating_sub(used + 1);
+            let mut line = String::new();
+            for (offset, ch) in rendered.char_indices() {
+                if offset >= room.saturating_sub(20) {
+                    break;
+                }
+                line.push(ch);
+            }
+            line.push_str(" …[line truncated at max_bytes]");
+            out.push_str(&line);
+            out.push('\n');
+            shown_end = n;
+            truncated = true;
+            break;
+        }
         out.push_str(&rendered);
         out.push('\n');
         used += cost;
         shown_end = n;
     }
-    let truncated = shown_end < end;
+    truncated |= shown_end < end;
     let mut body = String::new();
     if !raw {
         body.push_str(&format!(

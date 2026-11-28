@@ -75,7 +75,7 @@ impl ImagePart {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: Option<String>,
@@ -84,69 +84,11 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
     /// Images carried with the message. Kept apart from `content` so the plain
-    /// text path stays a `String`, and emitted as content parts on the wire.
+    /// text path stays a `String`; `body_with` turns them into content parts.
+    /// Never serialized: a snapshot sent to a browser must stay text, and the
+    /// session file stores images on their own.
+    #[serde(skip)]
     pub images: Vec<ImagePart>,
-}
-
-/// Content parts, in the OpenAI-compatible shape every provider we talk to
-/// accepts for user messages.
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum OutPart<'a> {
-    #[serde(rename = "text")]
-    Text { text: &'a str },
-    #[serde(rename = "image_url")]
-    ImageUrl { image_url: OutImageUrl },
-}
-
-#[derive(Serialize)]
-struct OutImageUrl {
-    url: String,
-}
-
-impl Serialize for ChatMessage {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("role", &self.role)?;
-        // Only user messages are sent as a parts array: tool and assistant
-        // content is a plain string in every gateway we target.
-        if self.role == Role::User && !self.images.is_empty() {
-            let mut parts: Vec<OutPart<'_>> = Vec::new();
-            if let Some(text) = self.content.as_deref() {
-                if !text.is_empty() {
-                    parts.push(OutPart::Text { text });
-                }
-            }
-            for image in &self.images {
-                parts.push(OutPart::ImageUrl {
-                    image_url: OutImageUrl {
-                        url: image.data_url(),
-                    },
-                });
-            }
-            map.serialize_entry("content", &parts)?;
-        } else if let Some(content) = &self.content {
-            map.serialize_entry("content", content)?;
-        }
-        if let Some(reasoning) = &self.reasoning_content {
-            map.serialize_entry("reasoning_content", reasoning)?;
-        }
-        if let Some(calls) = &self.tool_calls {
-            map.serialize_entry("tool_calls", calls)?;
-        }
-        if let Some(id) = &self.tool_call_id {
-            map.serialize_entry("tool_call_id", id)?;
-        }
-        if let Some(name) = &self.name {
-            map.serialize_entry("name", name)?;
-        }
-        map.end()
-    }
 }
 
 #[derive(Deserialize)]
@@ -543,7 +485,21 @@ impl Provider {
                 Role::Tool => "tool",
             };
             out.insert("role".into(), json!(role));
-            if let Some(content) = &message.content {
+            if message.role == Role::User && !message.images.is_empty() {
+                // Images ride as content parts on the user message that carries
+                // them: a plain string would drop them silently.
+                let mut parts: Vec<Value> = Vec::new();
+                if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
+                    parts.push(json!({ "type": "text", "text": text }));
+                }
+                for image in &message.images {
+                    parts.push(json!({
+                        "type": "image_url",
+                        "image_url": { "url": image.data_url() },
+                    }));
+                }
+                out.insert("content".into(), Value::Array(parts));
+            } else if let Some(content) = &message.content {
                 out.insert("content".into(), json!(content));
             } else if message.role == Role::Assistant && message.tool_calls.is_some() {
                 let content = if compat.requires_assistant_after_tool_result
@@ -1416,6 +1372,34 @@ mod tests {
         assert_eq!(body["messages"][1]["reasoning_content"], "");
         assert_eq!(body["messages"][2]["name"], "read");
         assert_eq!(body["tools"], json!([]));
+    }
+
+    /// `read` returns an image as an attachment; the request body has to carry
+    /// it as content parts, or the model never sees the pixels and the tool
+    /// silently degrades to a caption.
+    #[test]
+    fn body_sends_images_as_content_parts() {
+        let p = provider();
+        let image = ImagePart {
+            mime_type: "image/png".into(),
+            data: BASE64.encode(b"png-bytes"),
+        };
+        let request = ChatRequest::new(
+            "m",
+            vec![ChatMessage::user_with_images(
+                "[image] a.png: 1x1",
+                vec![image],
+            )],
+        );
+        let body = p.body(&request);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "[image] a.png: 1x1");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            format!("data:image/png;base64,{}", BASE64.encode(b"png-bytes"))
+        );
     }
 
     #[test]

@@ -1,5 +1,33 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：每个工具的全量用例（2026-11-27）
+
+`script/tool-test.py`：102 条用例，约 130 秒，走 `rustedharness run --json`，不需要模型、
+不需要网络。说明写在 `docs/tool-testing.md`（覆盖矩阵、错误码表、测不了什么、反向验证）。
+
+关键机制：
+
+1. 桩 provider 增加 `call` 场景：prompt 写成 `call {"name":…,"arguments":…}` 就真的执行
+   这个工具；数组形式按顺序**一次一个**调用；参数里的 `"$pid"` 从上一个 `bash
+   run_in_background` 的结果里取，所以"启动后台进程→await"能在一个回合里测完。
+2. 同一个桩进程多开一个服务冒充 SearXNG（`--searxng-port`），`web_search` 和 `read <url>`
+   可以离线测，包括 allowed/blocked domains、空结果、后端 500。
+3. 断言服务端收到了什么：`tool_call.arguments` 原样往返、`tool_result.metadata` 子集、
+   `tool_result.content` 子串、磁盘上的文件内容、以及桩收到的最后一个请求体（`log`）。
+4. 每个用例前重建工作区，含 M/U 的 git 场景、二进制、单行 400 KB、64×48 与 4500 万像素
+   图片、`.gitignore`、隐藏文件。
+
+第一次跑就抓到 3 个真 bug，都已修：
+
+1. **`grep literal=true` 不字面**：`grep-regex` 的 `build_literals` 不转义输入，`fn main(`
+   仍按正则解析并报 `E_INVALID_PATTERN`。改用 `fixed_strings(true)`。
+2. **单行文件的 `max_bytes` 无效**：截断循环要求"已输出至少一行"才 break，于是一个 400 KB
+   的单行文件整行返回。现在按预算切开并标注 `[line truncated at max_bytes]`。
+3. **图片从未送到模型**：`read` 返回 `images`、agent 也拼了 `user_with_images`，但
+   `Provider::body_with` 手写请求体时只写 `content` 字符串，完全忽略 `images`。修成发
+   content parts，删掉从未被调用却误导人的 `impl Serialize for ChatMessage`，并补了直接
+   断言请求体的单元测试（core tests 224 → 225）。
+
 ## 已完成：Web UI 的整套浏览器测试（2026-11-27）
 
 之前只有零散的一次性脚本（`/tmp/ui-test.py` 之类），既不能复现也不能判断"坏"。现在仓库里有两个

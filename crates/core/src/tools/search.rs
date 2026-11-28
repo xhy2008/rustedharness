@@ -82,13 +82,15 @@ impl Tool for GrepTool {
         let literal = args.literal.unwrap_or(false);
         let anchors = args.anchors.unwrap_or(false) && output_mode == OutputMode::Content;
         let mut matcher_builder = RegexMatcherBuilder::new();
-        matcher_builder.case_insensitive(args.case_insensitive.unwrap_or(false));
-        let matcher = if literal {
-            matcher_builder.build_literals(&[args.pattern.as_str()])
-        } else {
-            matcher_builder.build(&args.pattern)
-        }
-        .map_err(|e| HarnessError::tool("E_INVALID_PATTERN", e.to_string()))?;
+        // `build_literals` is for patterns that are already a literal
+        // alternation - it does not escape its input, so `fn main(` would still
+        // be parsed as a group. The fixed_strings knob is the real literal mode.
+        matcher_builder
+            .case_insensitive(args.case_insensitive.unwrap_or(false))
+            .fixed_strings(literal);
+        let matcher = matcher_builder
+            .build(&args.pattern)
+            .map_err(|e| HarnessError::tool("E_INVALID_PATTERN", e.to_string()))?;
 
         let root = ctx.resolver.resolve(args.path.as_deref().unwrap_or("."))?;
         let scope_root = if root.is_file() {

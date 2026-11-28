@@ -15,6 +15,14 @@ drive any path by typing it into the composer:
     rate    -> HTTP 429 on the first request of a turn, then a normal answer
     boom    -> HTTP 500
     silent  -> headers, then nothing (idle budget / "still waiting" probes)
+    call X  -> run the tool call X and answer after the result, where X is a JSON
+               object {"name": ..., "arguments": {...}} or an array of them, e.g.
+               `call {"name":"grep","arguments":{"pattern":"fn main"}}`
+               This makes every tool and every argument reachable without a model.
+
+A second server (`--searxng-port`) answers like SearXNG at `/search?q=...`, so
+`web_search` can be tested without the network: `empty` returns no results,
+`boom` returns 500, anything else returns three fixed hits.
 
 Every request body is appended to --log so a test can assert what the UI sent.
 
@@ -42,6 +50,73 @@ def parts(text, size=4):
     return [word if index == 0 else " " + word for index, word in enumerate(words)]
 
 
+def last_pid(messages):
+    """The pid a previous tool message reported, for `"$pid"` substitution."""
+    import re
+    for message in reversed(messages):
+        if message.get("role") != "tool":
+            continue
+        match = re.search(r"pid:\s*(\d+)", str(message.get("content") or ""))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def substitute(value, pid):
+    if isinstance(value, str):
+        return pid if value == "$pid" and pid else value
+    if isinstance(value, list):
+        return [substitute(item, pid) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute(item, pid) for key, item in value.items()}
+    return value
+
+
+def parse_specs(text):
+    """`call {...}` / `call [...]` -> the (name, arguments) pairs requested."""
+    body = text.strip()[4:].strip()
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return []
+    calls = value if isinstance(value, list) else [value]
+    return [(call["name"], call.get("arguments") or {})
+            for call in calls
+            if isinstance(call, dict) and isinstance(call.get("name"), str)]
+
+
+def parse_calls(text, messages):
+    pid = last_pid(messages)
+    return [{"index": index, "id": "call_stub_%d" % (index + 1),
+             "function": {"name": name, "arguments": json.dumps(substitute(args, pid))}}
+            for index, (name, args) in enumerate(parse_specs(text))]
+
+
+def last_user_text(messages):
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                content = " ".join(p.get("text", "") for p in content
+                                   if isinstance(p, dict))
+            return str(content or "")
+    return ""
+
+
+def next_call(text, messages):
+    """The first requested call whose result is not in the conversation yet."""
+    answered = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}
+    pid = last_pid(messages)
+    for index, (name, args) in enumerate(parse_specs(text)):
+        call_id = "call_stub_%d" % (index + 1)
+        if call_id in answered:
+            continue
+        return {"index": 0, "id": call_id,
+                "function": {"name": name,
+                             "arguments": json.dumps(substitute(args, pid))}}
+    return None
+
+
 def scenarios(word, messages):
     """Yield (delay_seconds, delta, finish_reason, usage) tuples."""
     has_tool_result = any(m.get("role") == "tool" for m in messages)
@@ -49,6 +124,17 @@ def scenarios(word, messages):
         for piece in parts("先想清楚，再说结论。"):
             yield 0.02, {"reasoning_content": piece}, None, None
         for piece in parts("这是带思考的回答。"):
+            yield 0.02, {"content": piece}, None, None
+        yield 0, {}, "stop", None
+        return
+    if word == "call":
+        # One call per round, like a model that has to read each result before
+        # it can pick the next call: that is what makes `"$pid"` resolvable.
+        pending = next_call(last_user_text(messages), messages)
+        if pending:
+            yield 0.02, {"tool_calls": [pending]}, "tool_calls", None
+            return
+        for piece in parts("工具已执行。"):
             yield 0.02, {"content": piece}, None, None
         yield 0, {}, "stop", None
         return
@@ -98,6 +184,44 @@ def scenarios(word, messages):
     yield 0, {}, "stop", None
 
 
+SEARXNG_HITS = [
+    {"title": "Rust 官方文档", "url": "https://doc.rust-lang.org/book/",
+     "content": "The Rust Programming Language."},
+    {"title": "rust-analyzer", "url": "https://rust-analyzer.github.io/",
+     "content": "A language server for Rust."},
+    {"title": "例子站点", "url": "https://example.com/rust",
+     "content": "an example host that domain filters should drop"},
+]
+
+
+class SearxngHandler(BaseHTTPRequestHandler):
+    """Enough of SearXNG's JSON API for `web_search` to work offline."""
+
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        query = ""
+        if "?" in self.path:
+            from urllib.parse import parse_qs, urlparse
+            query = (parse_qs(urlparse(self.path).query).get("q") or [""])[0]
+        if "boom" in query:
+            body = b'{"error": "stub failure"}'
+            self.send_response(500)
+        elif "empty" in query or "无结果" in query:
+            body = b'{"results": []}'
+            self.send_response(200)
+        else:
+            body = json.dumps({"results": SEARXNG_HITS}, ensure_ascii=False).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
 
@@ -137,15 +261,7 @@ class Handler(BaseHTTPRequestHandler):
             body = {}
         self.record(body)
         messages = body.get("messages") or []
-        last_user = ""
-        for message in reversed(messages):
-            if message.get("role") == "user":
-                content = message.get("content")
-                if isinstance(content, list):
-                    content = " ".join(p.get("text", "") for p in content
-                                       if isinstance(p, dict))
-                last_user = str(content or "")
-                break
+        last_user = last_user_text(messages)
         word = (last_user.strip().split() or ["hello"])[0].lower()
 
         if word == "boom":
@@ -201,10 +317,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=7398)
     parser.add_argument("--log", default="")
+    parser.add_argument("--searxng-port", type=int, default=0,
+                        help="also serve a SearXNG-like /search on this port")
     args = parser.parse_args()
     STATE["log"] = args.log or None
     if STATE["log"]:
         open(STATE["log"], "w").close()
+    if args.searxng_port:
+        searxng = ThreadingHTTPServer(("127.0.0.1", args.searxng_port), SearxngHandler)
+        threading.Thread(target=searxng.serve_forever, daemon=True).start()
+        print("fake searxng on http://127.0.0.1:%d/search" % args.searxng_port,
+              flush=True)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("fake openai on http://127.0.0.1:%d/v1" % args.port, flush=True)
     server.serve_forever()
