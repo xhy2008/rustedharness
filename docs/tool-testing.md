@@ -5,7 +5,7 @@
 脚本是唯一的事实来源，本文件解释矩阵为什么长这样、每条用例怎样才算"好"：
 
 ```
-script/tool-test.py       # 104 条用例，约 130 秒，失败退出码 1
+script/tool-test.py       # 111 条用例，约 140 秒，失败退出码 1
 script/live-tool-test.py  # 12 条用例，真模型（见第 11 节）
 script/fake-openai.py     # 既能当模型，也能当 SearXNG（--searxng-port）
 ```
@@ -16,7 +16,7 @@ script/fake-openai.py     # 既能当模型，也能当 SearXNG（--searxng-port
 cargo build -p rustedharness-cli && python3 script/tool-test.py
 ```
 
-`104/104 通过` 即全绿。常用：
+`111/111 通过` 即全绿。常用：
 
 ```bash
 python3 script/tool-test.py --list            # 列出全部用例
@@ -138,7 +138,7 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 | `path` 是目录 | 目录 | `E_IS_DIR` | 在目录里建文件失败得含糊 |
 | `denyTools` | 被拒绝 | `E_TOOL_DENIED`，磁盘无文件 | 仍然写盘 |
 
-### 5.3 `edit`（22）
+### 5.3 `edit`（29）
 
 | 用法 | 用例 | 好 | 坏 |
 | --- | --- | --- | --- |
@@ -153,6 +153,13 @@ python3 script/tool-test.py --keep            # 保留桩与工作区，手工�
 | replace_text + 其它编辑 | 同批 | `E_INVALID_PATCH` | 部分生效 |
 | 锚点 `"12#AB"` | 读到的锚点可直接编辑 | 断言通过、文件变 | 锚点被当成行号 |
 | `pos: "2#TK\|beta line two"` | （真模型会这样粘贴） | 截断到 `2#TK` 后成功 | 报"invalid anchor"（曾经） |
+| 锚点同时给 `pos` 和 `end` | 锚点验证 pos..end 整个范围 | 两行合成一行，长度 -1 | 只校验 `pos`，`end` 随便写 |
+| `end` 锚点写错 | end 锚点不对 | `E_STALE_ANCHOR`，文件不变 | 范围照改 |
+| `insert_after` 带锚点 | insert_before 用锚点 | 新行插在第 4 行之后 | 插错位置 |
+| `grep --anchors=true` 的 `path:N#AB\|` | grep 的锚点能直接喂给 edit | 直接改中那一行 | 两个工具算出不同锚点 |
+| 编辑返回的 `--- Anchors a-b ---` | 编辑返回的锚点能继续用 | 第二次编辑用新锚点成功 | 表里是编辑前的内容（见 §10） |
+| 读到编辑之间文件被改 | 文件被改过 | `E_STALE_ANCHOR` | 按内容漂移改错行 |
+| `edit.anchorWidth=3` | anchorWidth=3 | 3 字符锚点可解析、可校验 | 写死 2 字符 |
 | 过期锚点 | `E_STALE_ANCHOR` | 整批拒绝，文件不变 | 按行号硬改 |
 | `pos` 非法 | `pos: "abc"` | `E_INVALID_PATCH` | panic / 改到第 1 行 |
 | 行号越界 | `E_INVALID_PATCH` | 拒绝 | 越界写 |
@@ -345,8 +352,9 @@ python3 script/live-tool-test.py --base-url http://127.0.0.1:8080/v1 --model min
 - `soft=True` 的用例失败只打 `warn`，不影响退出码——`edit` 就是这种：让 2B 模型自己
   从文件里抄 `oldText` 并造 `newText`，它做不到，但工具本身由 `tool-test.py` 覆盖。
 
-MiniCPM5-2B（Q8_0，P104）实测：**11/12 通过，约 100 秒**，`glob` / `read` / `grep` /
-`write` / `bash` / `todo` / `lsp` 全部一次成功，`edit` 是 `warn`。每次请求约 4k token
+MiniCPM5-2B（Q8_0，P104）实测：**11/13 通过，约 100 秒**，`glob` / `read` / `grep` /
+`write` / `bash` / `todo` / `lsp` 全部一次成功，`edit` 的两条（普通编辑、锚点编辑）是
+`warn`。每次请求约 4k token
 （系统提示 + 工具 schema），llama.cpp 的前缀缓存让后续请求命中 98–99%。
 
 这套测试抓到的问题（都已修）：
@@ -366,6 +374,13 @@ MiniCPM5-2B（Q8_0，P104）实测：**11/12 通过，约 100 秒**，`glob` / `
    现在从错误体里取出 `message`，显示成 `HTTP 400: request (8289 tokens) exceeds the
    available context size (8192 tokens), try increasing it`（`provider::readable_error`）。
 
+5. **锚点本身模型能读对，是 patch 造不出来**。`read` 打印 `3#VB|const LIMIT: usize = 42;`，
+   2B 模型能把 `3#VB` 原样放进 `pos`——这部分工作正常；它做不到的是同一个 edit 里再给出
+   `lines[]`，于是会把 4 个"半个补丁"塞进同一个 `edits` 数组，被
+   "replace_text must be the only edit"（新措辞）拒掉。这是模型能力问题，锚点链路由
+   `tool-test.py` 的 7 条用例覆盖。顺手把 `replace_text` 两个字段都缺时的报错改成
+   "requires oldText and newText"，一次说清。
+
 顺带确认不是 bug 的：`cache_hit_pct` 显示 99% 是真的，llama.cpp 会跨请求复用前缀缓存
 （同一个系统提示 + 工具 schema 约 4k token）。
 
@@ -378,6 +393,8 @@ MiniCPM5-2B（Q8_0，P104）实测：**11/12 通过，约 100 秒**，`glob` / `
 | `grep` 用回 `build_literals` | grep · literal |
 | `read` 去掉单行截断分支 | read · 单行超长 |
 | `body_with` 不写 content parts | read · 图片（`log` 断言） |
+| 关掉锚点校验（`if false && actual != expected`） | edit · end 锚点不对 + 过期锚点 + 文件被改过（三条同时红） |
+| 返回的锚点表用编辑前的内容算 | edit · 编辑返回的锚点能继续用 |
 | `edit` 先写盘再校验 | edit · 多文件里一个失败 |
 | `write` 默认覆盖 | write · 已存在时追加 |
 | `bash` 不净化 ANSI | bash · ANSI 颜色 |

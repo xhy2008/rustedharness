@@ -1,5 +1,35 @@
 # TODO / 交接文档（2026-11-08）
 
+## 已完成：哈希锚点编辑的完整覆盖（2026-11-28）
+
+哈希行号（`12#AB`）是 edit 的核心：行号选位置，锚点校验那一行**内容**没变，所以文件在
+"读"和"改"之间被动过时会整批拒绝，而不是改错行。之前只有 1 条往返用例，现在补齐：
+
+单测（`crates/core/src/tools/edit.rs`，+4）：
+
+1. `end_anchor_is_verified_too` —— `pos` 和 `end` 两个锚点都校验，`end` 错就 stale。
+2. `a_shifted_line_is_stale` —— 内容没变但行号被顶掉一行，锚点必须失效（这正是它的意义）。
+3. `returned_anchor_table_addresses_the_new_content` —— 工具返回的 `--- Anchors a-b ---`
+   必须是编辑**之后**的锚点，逐行能解析、能再校验。
+4. `widened_anchors_parse_and_verify` —— `edit.anchorWidth` 2/3/4 都能解析与校验。
+
+端到端（`script/tool-test.py`，+7，edit 区 29 条）：
+
+- 锚点验证 `pos..end` 整个范围（不只是 `pos`）
+- `end` 锚点写错 → `E_STALE_ANCHOR`，文件不变
+- `insert_after` 带锚点插到正确位置
+- `grep --anchors=true` 输出的 `path:N#AB|` 能直接喂给 edit（两个工具的锚点必须一致）
+- edit 响应里的锚点能直接用于**下一次**编辑（链路闭环）
+- 读到编辑之间被 `sed -i` 改过 → stale
+- `anchorWidth=3` 时 3 字符锚点照样可用（用独立的 `wide.json` 配置）
+
+反向验证：把锚点校验改成 `if false && actual != expected`，三条锚点用例同时变红；
+把返回锚点表改成用编辑前的内容算，链路用例变红。两处都已还原。
+
+真模型（`script/live-tool-test.py`，+1）：MiniCPM5-2B 能把 `3#VB` 原样放进 `pos`，
+但造不出同一 edit 里的 `lines[]`，会把 4 个半成品塞进一个数组——`warn`，工具本身由上面
+的离线用例覆盖。
+
 ## 已完成：接 llama.cpp（MiniCPM5-2B）跑真模型的工具调用（2026-11-28）
 
 `/home/user/llama-bin-cuda/llama-server -m /home/user/MiniCPM5-2B-Q8_0.gguf -c 8192

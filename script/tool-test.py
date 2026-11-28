@@ -123,11 +123,16 @@ def write_config(deny=None):
     if deny:
         config["denyTools"] = deny
     (CFG / "config.json").write_text(json.dumps(config, indent=2))
+    providers = json.loads((CFG / "models.json").read_text())["providers"]
     for name, tools in (("deny.json", ["write"]),):
         denied = dict(config)
         denied["denyTools"] = tools
-        denied["providers"] = json.loads((CFG / "models.json").read_text())["providers"]
+        denied["providers"] = providers
         (SCRATCH / name).write_text(json.dumps(denied, indent=2))
+    wide = dict(config)
+    wide["providers"] = providers
+    wide["edit"] = {"anchorWidth": 3}
+    (SCRATCH / "wide.json").write_text(json.dumps(wide, indent=2))
 
 
 # ---------------------------------------------------------------- runner ----
@@ -309,9 +314,23 @@ CASES = [
              {"op": "replace_text", "pos": 1, "oldText": "alpha",
               "newText": "ALPHA"},
              {"op": "delete", "pos": 3}]}]},
-         ok=False, code="E_INVALID_PATCH"),
+         ok=False, code="E_INVALID_PATCH", has=["must be the only edit"]),
     dict(area="edit", name="读到的锚点可以直接用于编辑",
          tool="edit", special="anchor_roundtrip"),
+    dict(area="edit", name="锚点验证 pos..end 整个范围",
+         special="anchor_end_range"),
+    dict(area="edit", name="end 锚点不对 -> E_STALE_ANCHOR",
+         special="anchor_end_stale"),
+    dict(area="edit", name="insert_before 用锚点",
+         special="anchor_insert"),
+    dict(area="edit", name="grep 的锚点能直接喂给 edit",
+         special="grep_anchor"),
+    dict(area="edit", name="编辑返回的锚点能继续用于下一次编辑",
+         special="anchor_chain"),
+    dict(area="edit", name="文件在读到编辑之间被改过 -> E_STALE_ANCHOR",
+         special="anchor_after_change"),
+    dict(area="edit", name="anchorWidth=3 时锚点仍是可用的",
+         special="anchor_width"),
     dict(area="edit", name="过期锚点 -> E_STALE_ANCHOR",
          tool="edit", args={"files": [{"path": "src/main.rs", "edits": [
              {"op": "replace", "pos": "5#ZZ", "lines": ["// patched"]}]}]},
@@ -596,6 +615,32 @@ def tool_results(events):
     return [e for e in events if e.get("type") == "tool_result"]
 
 
+def run_tool(tool, arguments, config=None):
+    """One turn, one call: returns the last tool_result (or None)."""
+    events, _stderr, _code, _elapsed = run_turn(
+        tool_prompt(tool, arguments), config)
+    results = tool_results(events)
+    return results[-1] if results else None
+
+
+def anchors_in(text, width=(2, 4)):
+    """`{line: anchor}` from `read`'s `12#AB|content` or an anchor table."""
+    import re
+    low, high = width
+    found = {}
+    for row in text.splitlines():
+        # `read` prints `12#AB|text`; `grep` prefixes the file: `src/a.rs:12#AB|text`.
+        match = re.match(rf"^(?:[^\s:]*:)?(\d+)#([0-9A-Z]{{{low},{high}}})\|", row)
+        if match:
+            found[int(match.group(1))] = match.group(2)
+    return found
+
+
+def read_anchors(path="src/main.rs", config=None):
+    result = run_tool("read", {"path": path}, config) or {}
+    return anchors_in(result.get("content") or ""), result
+
+
 def describe(results):
     if not results:
         return "no tool_result event"
@@ -628,6 +673,115 @@ def check_case(case):
               bool(results) and bool(results[-1].get("ok"))
               and "patched by anchor" in (WS / "src/main.rs").read_text(),
               describe(results))
+        return
+
+    if special == "anchor_end_range":
+        anchors, _ = read_anchors()
+        before = (WS / "src/main.rs").read_text().splitlines()
+        # Two adjacent lines, so a range replace is unambiguous.
+        pos = f"12#{anchors[12]}"
+        end = f"13#{anchors[13]}"
+        result = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": pos, "end": end,
+             "lines": ["fn helper() -> u64 { LIMIT as u64 }"]}]}]}) or {}
+        after = (WS / "src/main.rs").read_text().splitlines()
+        check(group, name,
+              bool(result.get("ok"))
+              and after[11] == "fn helper() -> u64 { LIMIT as u64 }"
+              and len(after) == len(before) - 1,
+              f"pos={pos} end={end} | {describe([result])}")
+        return
+
+    if special == "anchor_end_stale":
+        anchors, _ = read_anchors()
+        before = (WS / "src/main.rs").read_text()
+        result = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"11#{anchors[11]}", "end": "12#ZZ",
+             "lines": ["x"]}]}]}) or {}
+        check(group, name,
+              not result.get("ok") and "E_STALE_ANCHOR" in (result.get("content") or "")
+              and (WS / "src/main.rs").read_text() == before,
+              describe([result]))
+        return
+
+    if special == "anchor_insert":
+        anchors, _ = read_anchors()
+        result = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "insert_after", "pos": f"4#{anchors[4]}",
+             "lines": ["// inserted after LIMIT"]}]}]}) or {}
+        after = (WS / "src/main.rs").read_text().splitlines()
+        check(group, name,
+              bool(result.get("ok")) and after[3] == "const LIMIT: usize = 42;"
+              and after[4] == "// inserted after LIMIT",
+              describe([result]))
+        return
+
+    if special == "grep_anchor":
+        # The anchor has to be the same string in grep's output and in edit's
+        # input, or a model cannot chain the two tools.
+        result = run_tool("grep", {"pattern": "LIMIT: usize", "path": "src/main.rs",
+                                   "anchors": True}) or {}
+        anchors = anchors_in(result.get("content") or "")
+        if not anchors:
+            check(group, name, False,
+                  f"grep output had no line#anchor| row: {result.get('content', '')[:120]!r}")
+            return
+        line = sorted(anchors)[0]
+        edited = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"{line}#{anchors[line]}",
+             "lines": ["const LIMIT: usize = 7;"]}]}]}) or {}
+        check(group, name,
+              bool(edited.get("ok"))
+              and "const LIMIT: usize = 7;" in (WS / "src/main.rs").read_text(),
+              describe([edited]))
+        return
+
+    if special == "anchor_chain":
+        anchors, _ = read_anchors()
+        first = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"4#{anchors[4]}",
+             "lines": ["const LIMIT: usize = 100;"]}]}]}) or {}
+        # The anchors printed in the result must address the lines just written.
+        returned = anchors_in(first.get("content") or "")
+        if 4 not in returned or returned[4] == anchors[4]:
+            check(group, name, False,
+                  f"no fresh anchor for line 4 in {first.get('content', '')[:200]!r}")
+            return
+        second = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"4#{returned[4]}",
+             "lines": ["const LIMIT: usize = 1000;"]}]}]}) or {}
+        check(group, name,
+              bool(first.get("ok")) and bool(second.get("ok"))
+              and "const LIMIT: usize = 1000;" in (WS / "src/main.rs").read_text(),
+              f"anchor {anchors[4]} -> {returned[4]} | {describe([second])}")
+        return
+
+    if special == "anchor_after_change":
+        anchors, _ = read_anchors()
+        run_tool("bash", {"command": "sed -i '1i extra line' src/main.rs"})
+        result = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"6#{anchors[6]}", "lines": ["// nope"]}]}]}) or {}
+        check(group, name,
+              not result.get("ok") and "E_STALE_ANCHOR" in (result.get("content") or ""),
+              describe([result]))
+        return
+
+    if special == "anchor_width":
+        config = str(SCRATCH / "wide.json")
+        anchors, result = read_anchors(config=config)
+        if 6 not in anchors:
+            check(group, name, False, "no anchor for line 6 in read output")
+            return
+        if len(anchors[6]) != 3:
+            check(group, name, False, f"anchor is {len(anchors[6])} chars, wanted 3")
+            return
+        edited = run_tool("edit", {"files": [{"path": "src/main.rs", "edits": [
+            {"op": "replace", "pos": f"6#{anchors[6]}",
+             "lines": ["    // widened anchor"]}]}]}, config) or {}
+        check(group, name,
+              bool(edited.get("ok"))
+              and "// widened anchor" in (WS / "src/main.rs").read_text(),
+              f"anchor={anchors[6]} | {describe([edited])}")
         return
 
     if case.get("calls"):

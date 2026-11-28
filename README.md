@@ -706,11 +706,11 @@ probe requires `rust-analyzer` on PATH and skips cleanly when it is absent.
 
 A live check against any OpenAI-compatible server is
 `python3 script/live-tool-test.py --base-url http://127.0.0.1:8080/v1 --model …`
-(needs `--jinja` on llama.cpp for tool calls): twelve natural-language tasks that
-assert the model really called the tool, with the result fed back.
+(needs `--jinja` on llama.cpp for tool calls): thirteen natural-language tasks
+that assert the model really called the tool, with the result fed back.
 
 Every tool has its own test too: `python3 script/tool-test.py` sends one real
-`call {"name": ..., "arguments": ...}` per case through the agent (102 cases:
+`call {"name": ..., "arguments": ...}` per case through the agent (111 cases:
 arguments, error codes, side effects on disk, and what the provider actually
 received) against a stub model and a stub search backend. `docs/tool-testing.md`
 is the matrix, the error-code table and the list of what needs a real language

@@ -361,11 +361,20 @@ pub fn apply_edits(
         if edits.len() > 1 {
             return Err(HarnessError::tool(
                 "E_INVALID_PATCH",
-                "replace_text cannot be combined with other edits in one call",
+                format!(
+                    "replace_text must be the only edit for a file; send exactly one, got {}",
+                    edits.len()
+                ),
             ));
         }
         let op = &edits[0];
         let old = op.old_text.as_deref().unwrap_or("");
+        if op.old_text.is_none() && op.new_text.is_none() {
+            return Err(HarnessError::tool(
+                "E_INVALID_PATCH",
+                "replace_text requires oldText and newText",
+            ));
+        }
         let Some(new) = op.new_text.as_deref() else {
             return Err(HarnessError::tool(
                 "E_INVALID_PATCH",
@@ -835,6 +844,18 @@ mod tests {
     }
 
     #[test]
+    fn replace_text_with_neither_field_says_so() {
+        let mut op = text_op("two", "", None);
+        op.old_text = None;
+        op.new_text = None;
+        let err = apply_edits(SRC, &[op], 2, true).unwrap_err();
+        assert!(
+            err.to_string().contains("requires oldText and newText"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn replace_text_requires_new_text() {
         // Before this was enforced, `{"op":"replace_text","oldText":"two"}` with
         // no newText replaced it with the empty string and reported success: a
@@ -919,6 +940,106 @@ mod tests {
             reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline),
             "a\rb\nC\n"
         );
+    }
+
+    /// The anchor on `end` guards the last line of a range, not just `pos`.
+    #[test]
+    fn end_anchor_is_verified_too() {
+        let anchors = hashline::anchors(&SRC.lines().collect::<Vec<_>>(), 2);
+        let range = |end_anchor: String| {
+            let mut edit = op(EditOpKind::Replace, 2, Some(3), &["TWO-THREE"]);
+            edit.pos = Some(json!(format!("2#{}", anchors[1])));
+            edit.end = Some(json!(format!("3#{end_anchor}")));
+            edit
+        };
+        let applied = apply_edits(SRC, &[range(anchors[2].clone())], 2, true).unwrap();
+        assert_eq!(applied.new_lines, vec!["one", "TWO-THREE", "four", "five"]);
+
+        let wrong = if anchors[2] == "ZZ" { "YY" } else { "ZZ" };
+        let err = apply_edits(SRC, &[range(wrong.to_string())], 2, true).unwrap_err();
+        assert_eq!(err.code(), "E_STALE_ANCHOR");
+    }
+
+    /// Moving a line without changing it must break the anchor that was taken
+    /// at its old number: that drift is the whole reason anchors exist.
+    #[test]
+    fn a_shifted_line_is_stale() {
+        let before = "one\ntwo\nthree\n";
+        let anchors = hashline::anchors(&before.lines().collect::<Vec<_>>(), 2);
+        let after = "zero\none\ntwo\nthree\n";
+        let mut edit = op(EditOpKind::Replace, 2, None, &["TWO"]);
+        edit.pos = Some(json!(format!("2#{}", anchors[1])));
+        // Line 2 is now "one", so the anchor for "two" no longer matches.
+        let err = apply_edits(after, &[edit], 2, true).unwrap_err();
+        assert_eq!(err.code(), "E_STALE_ANCHOR");
+    }
+
+    /// The anchors the tool prints must address the lines it just wrote, or the
+    /// next edit in the same turn has nothing to hold on to.
+    #[test]
+    fn returned_anchor_table_addresses_the_new_content() {
+        let applied = apply_edits(
+            SRC,
+            &[op(EditOpKind::Replace, 3, None, &["THREE", "THREE-B"])],
+            2,
+            true,
+        )
+        .unwrap();
+        let table: Vec<(usize, String)> = applied
+            .anchor_table
+            .lines()
+            .filter_map(|row| {
+                let (pos, _content) = row.split_once('|')?;
+                let (line, anchor) = pos.split_once('#')?;
+                Some((line.parse().ok()?, anchor.to_string()))
+            })
+            .collect();
+        // The table covers the edited range plus context lines.
+        assert!(table.len() >= 2, "{:?}", applied.anchor_table);
+        assert!(table.iter().any(|(line, _)| *line == 3));
+        assert!(table.iter().any(|(line, _)| *line == 4));
+        // Every printed anchor parses and verifies against the edited file.
+        for (line, anchor) in &table {
+            let mut edit = op(EditOpKind::Replace, *line as u64, None, &["X"]);
+            edit.pos = Some(json!(format!("{line}#{anchor}")));
+            assert!(apply_edits(
+                &reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline),
+                &[edit],
+                2,
+                true
+            )
+            .is_ok());
+        }
+        // ...and a wrong anchor on that line is still rejected.
+        let mut stale = op(EditOpKind::Replace, 3, None, &["X"]);
+        stale.pos = Some(json!("3#ZZ"));
+        assert_eq!(
+            apply_edits(
+                &reconstruct(&applied.new_lines, applied.crlf, applied.trailing_newline),
+                &[stale],
+                2,
+                true
+            )
+            .unwrap_err()
+            .code(),
+            "E_STALE_ANCHOR"
+        );
+    }
+
+    /// `edit.anchorWidth` can widen the anchor to 3-4 characters; parsing and
+    /// verification must follow the width, not assume two.
+    #[test]
+    fn widened_anchors_parse_and_verify() {
+        for width in 2..=4 {
+            let anchors = hashline::anchors(&SRC.lines().collect::<Vec<_>>(), width);
+            assert_eq!(anchors[1].len(), width);
+            let mut edit = op(EditOpKind::Replace, 2, None, &["TWO"]);
+            edit.pos = Some(json!(format!("2#{}", anchors[1])));
+            assert!(
+                apply_edits(SRC, &[edit], width, true).is_ok(),
+                "width {width}"
+            );
+        }
     }
 
     #[test]

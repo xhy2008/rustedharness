@@ -91,6 +91,15 @@ CASES = [
          prompt="用 edit 工具把 notes.txt 里的 beta 改成 BETA，用 replace_text。",
          tools=["edit"], soft=True,
          files={"notes.txt": "alpha line one\nBETA line two\ngamma line three\n"}),
+    # The headline workflow: read prints `3#VB|const LIMIT…`, the model hands
+    # that anchor back in `pos`, and the tool verifies the line still matches.
+    # A 2B model reads the anchor correctly but rarely fills `lines[]`, so this
+    # is a warning rather than a gate.
+    dict(area="edit", name="锚点编辑：读到的锚点改第 3 行",
+         prompt="先 read src/main.rs，然后用 edit 把第 3 行改成 `const LIMIT: usize = 1000;`。"
+                "pos 用你读到的第 3 行锚点（形如 \"3#AB\"），新内容放在 lines 数组里。只调用工具。",
+         tools=["edit", "read"], soft=True,
+         files={"src/main.rs": ("~", "const LIMIT: usize = 1000;")}),
     dict(area="bash", name="跑一条 shell 命令",
          prompt="用 shell 工具执行 `echo live-ok`，把输出告诉我。",
          tools=["bash", "shell", "run", "powershell"], answer="live-ok"),
@@ -148,7 +157,7 @@ def write_config(base_url, model):
         "apiKey": os.environ.get("RH_LIVE_KEY", "none"),
         "models": [{"id": model, "name": model,
                     "contextWindow": int(os.environ.get("RH_LIVE_CTX", "8192")),
-                    "maxTokens": 1024}],
+                    "maxTokens": int(os.environ.get("RH_LIVE_MAX_TOKENS", "2048"))}],
     }}}, indent=2))
     (CFG / "config.json").write_text(json.dumps({
         "model": f"{PROVIDER}/{model}",
